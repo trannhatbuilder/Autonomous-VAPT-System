@@ -1,0 +1,1 @@
+"""VAPT-AI core package — config, logging, security helpers."""

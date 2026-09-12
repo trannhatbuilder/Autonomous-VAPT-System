@@ -1,0 +1,38 @@
+name: metasploit
+command: msfconsole
+enabled: true
+description: |
+  Metasploit Framework — exploit development + execution. 4000+ exploit modules,
+  payloads, encoders, NOP generators. Requires msfrpcd running for RPC integration
+  (W6 task). This wrapper covers msfconsole CLI mode only.
+
+  D25 HITL POLICY: safety_class=destructive — ALL exploit execution requires HITL.
+short_description: Metasploit Framework — exploit execution (HITL required)
+category: exploitation
+wstg_ids:
+  - WSTG-INPV-11
+mitre_attack:
+  - T1190
+safety_class: destructive
+parameters:
+  - name: command
+    type: string
+    description: msfconsole command (e.g. "use exploit/multi/handler; set RHOSTS 10.0.0.5; run")
+    required: true
+    position: 1
+  - name: quiet
+    type: bool
+    description: Quiet mode (no banner)
+    required: false
+    flag: "-q"
+    default: true
+  - name: additional_args
+    type: string
+    description: Additional msfconsole arguments
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 3600
+allowed_exit_codes: [0, 1]

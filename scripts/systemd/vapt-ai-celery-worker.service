@@ -1,0 +1,50 @@
+# ============================================================
+# VAPT-AI v3.2 — Celery Worker systemd unit
+# ============================================================
+# Processes background scan tasks (queued via Redis).
+#
+# Install:
+#   sudo cp scripts/systemd/vapt-ai-celery-worker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable vapt-ai-celery-worker
+#   sudo systemctl start vapt-ai-celery-worker
+# ============================================================
+
+[Unit]
+Description=VAPT-AI Celery Worker (background scans)
+After=network.target redis-server.service postgresql.service vapt-ai-app.service
+Wants=redis-server.service postgresql.service
+Requires=vapt-ai-app.service
+
+[Service]
+Type=simple
+User=nhat
+Group=nhat
+
+WorkingDirectory=/home/nhat/VAPT-AI
+Environment=PYTHONPATH=/home/nhat/VAPT-AI
+EnvironmentFile=/home/nhat/VAPT-AI/.env
+
+# Celery worker — process scans + retests + retention queues
+ExecStart=/home/nhat/VAPT-AI/venv/bin/celery -A workers worker -l info -Q scans,retests,retention
+
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vapt-ai-celery-worker
+
+# Security hardening (less strict than app — Celery needs more access for subprocess tools)
+NoNewPrivileges=true
+# PrivateTmp=true
+# ProtectSystem=full
+# ProtectHome=read-only
+# ReadWritePaths=/home/nhat/VAPT-AI/data /home/nhat/VAPT-AI/logs /tmp
+# ProtectKernelTunables=true
+# ProtectKernelModules=true
+# ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

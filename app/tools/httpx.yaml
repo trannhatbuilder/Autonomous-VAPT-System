@@ -1,0 +1,119 @@
+# VAPT-AI MCP Tool Wrapper — httpx
+# ============================================================
+# Tool: httpx (HTTP probe + fingerprint)
+# Category: recon
+# WSTG IDs: WSTG-INFO-04 (Search Engine Discovery), WSTG-CONF-01 (Network Configuration)
+# MITRE ATT&CK: T1595.002 (Active Scanning: Vulnerability Scanning)
+# Install: go install github.com/projectdiscovery/httpx/cmd/httpx@latest (W1-I)
+# ============================================================
+
+name: httpx
+command: httpx
+enabled: true
+description: |
+  Fast HTTP probe + fingerprint. Detects live hosts, status codes, titles,
+  tech stack, redirects, IPs. Use on subfinder output to find live web apps.
+
+  Examples:
+    - Probe single URL: httpx -u http://example.com
+    - Probe list: subfinder -d example.com | httpx
+    - With tech detection: httpx -u <url> -tech-detect
+    - Screenshot (needs chromedp): httpx -u <url> -screenshot
+
+short_description: HTTP probe + tech fingerprint
+
+category: recon
+
+wstg_ids:
+  - WSTG-INFO-04  # Search Engine Discovery
+  - WSTG-CONF-01  # Network Configuration
+mitre_attack:
+  - T1595.002  # Vulnerability Scanning
+
+safety_class: active
+
+parameters:
+  - name: target
+    type: string
+    description: Target URL or domain (or use -list for file)
+    required: false
+    flag: "-u"
+    default: ""
+
+  - name: list
+    type: string
+    description: File with list of URLs/hosts (one per line)
+    required: false
+    flag: "-list"
+    default: ""
+
+  - name: status_code
+    type: bool
+    description: Show HTTP status code
+    required: false
+    flag: "-status-code"
+    default: true
+
+  - name: title
+    type: bool
+    description: Show page title
+    required: false
+    flag: "-title"
+    default: true
+
+  - name: tech_detect
+    type: bool
+    description: Detect tech stack (Wappalyzer-style)
+    required: false
+    flag: "-tech-detect"
+    default: true
+
+  - name: web_server
+    type: bool
+    description: Show web server header
+    required: false
+    flag: "-web-server"
+    default: true
+
+  - name: follow_redirects
+    type: bool
+    description: Follow HTTP redirects
+    required: false
+    flag: "-follow-redirects"
+    default: true
+
+  - name: threads
+    type: integer
+    description: Number of concurrent threads
+    required: false
+    flag: "-threads"
+    default: 50
+
+  - name: timeout
+    type: integer
+    description: HTTP timeout (seconds)
+    required: false
+    flag: "-timeout"
+    default: 10
+
+  - name: silent
+    type: bool
+    description: Only print live hosts (no banner)
+    required: false
+    flag: "-silent"
+    default: true
+
+  - name: additional_args
+    type: string
+    description: Additional httpx arguments
+    required: false
+    default: ""
+
+output:
+  max_bytes: 50000
+  format: text
+  parse_hints:
+    live_host: '^(https?://[^\\s]+)\\s+\\[(\\d+)\\]\\s+\\[([^\\]]+)\\]\\s+(.*)$'
+
+timeout: 300
+allowed_exit_codes: [0]

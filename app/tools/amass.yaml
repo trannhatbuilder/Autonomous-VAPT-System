@@ -1,0 +1,36 @@
+name: amass
+command: amass
+enabled: true
+description: |
+  Amass — OWASP subdomain enumeration. Uses 30+ data sources (passive) +
+  DNS brute-force (active). Most thorough subdomain tool.
+short_description: Amass — OWASP subdomain enumeration (30+ sources)
+category: recon
+wstg_ids:
+  - WSTG-INFO-01
+mitre_attack:
+  - T1592.002
+safety_class: passive
+parameters:
+  - name: domain
+    type: string
+    description: Root domain (e.g. example.com)
+    required: true
+    flag: "-d"
+  - name: enum_mode
+    type: string
+    description: 'Enumeration mode: passive (OSINT only) or active (DNS brute-force)'
+    required: false
+    flag: ""
+    default: "passive"
+    options: ["passive", "active"]
+  - name: additional_args
+    type: string
+    description: Additional amass arguments
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 600
+allowed_exit_codes: [0]

@@ -1,0 +1,60 @@
+name: netexec
+command: netexec
+enabled: true
+description: |
+  NetExec (formerly CrackMapExec) — network execution toolkit for
+  SMB/WMI/MSSQL/LDAP. Enumerate hosts, users, sessions, execute commands.
+
+  Examples:
+    - Enumerate hosts: netexec smb 10.0.0.0/24
+    - Execute command: netexec smb 10.0.0.5 -u user -p pass -x "whoami"
+    - Dump SAM: netexec smb 10.0.0.5 -u user -p pass --sam
+short_description: NetExec — SMB/WMI/MSSQL network execution
+category: exploitation
+wstg_ids:
+  - WSTG-ATHN-04
+  - WSTG-ATHZ-03
+mitre_attack:
+  - T1021
+safety_class: destructive
+parameters:
+  - name: target
+    type: string
+    description: Target IP/range (e.g. 10.0.0.5 or 10.0.0.0/24)
+    required: true
+    position: 1
+  - name: protocol
+    type: string
+    description: Protocol (smb, wmi, mssql, ldap)
+    required: true
+    position: 2
+    default: "smb"
+    options: ["smb", "wmi", "mssql", "ldap"]
+  - name: username
+    type: string
+    description: Username
+    required: false
+    flag: "-u"
+    default: ""
+  - name: password
+    type: string
+    description: Password
+    required: false
+    flag: "-p"
+    default: ""
+  - name: command
+    type: string
+    description: Command to execute on target
+    required: false
+    flag: "-x"
+    default: ""
+  - name: additional_args
+    type: string
+    description: Additional netexec arguments
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 300
+allowed_exit_codes: [0, 1]

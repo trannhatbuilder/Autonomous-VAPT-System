@@ -1,0 +1,92 @@
+# ============================================================
+# VAPT-AI v3.2 — Production Requirements
+# ============================================================
+# Pip install order matters: install build deps (psycopg2, asyncpg, cryptography)
+# before runtime deps to avoid binary wheel issues on fresh systems.
+# ============================================================
+
+# ---------- Core Framework ----------
+fastapi==0.115.0
+# Pin starlette to <1.0 — fastapi 0.115.0 incompatible with starlette 1.x
+# (TypeError: Router.__init__() got an unexpected keyword argument 'on_startup')
+starlette>=0.37,<1.0
+uvicorn[standard]>=0.31.1
+pydantic>=2.11.0
+pydantic-settings>=2.5.0
+
+# ---------- Database (PostgreSQL) ----------
+# Both drivers are needed:
+#   - psycopg2-binary: sync driver (used by Alembic migrations + legacy EVVO code)
+#   - asyncpg:          async driver (used by VAPT-AI app.db.session — canonical runtime)
+psycopg2-binary==2.9.10
+asyncpg>=0.29.0
+sqlalchemy[asyncio]>=2.0.25
+alembic>=1.13.0
+pgvector>=0.3.0          # pgvector extension for RAG / LightRAG (kept — PostgreSQL)
+
+# ---------- Background Tasks ----------
+celery[redis]==5.3.6
+redis==5.0.1
+
+# ---------- Security & Encryption ----------
+# Pin bcrypt to 4.0.1 — passlib 1.7.4 has a bug with bcrypt 4.1+ (AttributeError on __about__)
+# See: https://github.com/pyca/bcrypt/issues/394
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+cryptography>=42.0.0
+
+# ---------- HTTP Client (for VAPT tools & AutoResearch) ----------
+httpx>=0.27.1
+# Audit P2-15: aiohttp 3.9.3 had CVE-2024-30251 (infinite loop on malformed
+# multipart, fixed in 3.9.4). Pin minimum to a patched release.
+aiohttp>=3.9.5
+requests>=2.31.0
+
+# ---------- PDF Generation ----------
+reportlab==4.1.0
+weasyprint==60.2
+
+# ---------- Email ----------
+aiosmtplib==3.0.1
+
+# ---------- SSL/Certificates ----------
+certifi==2024.2.2
+
+# ---------- Utilities ----------
+python-multipart==0.0.9
+python-dotenv==1.0.1
+
+# ---------- Observability ----------
+prometheus_client>=0.20.0
+structlog>=24.4.0
+
+# ---------- Testing ----------
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0
+httpx>=0.26.0
+pip-audit>=2.7.0
+
+# ---------- Knowledge Base ----------
+python-frontmatter>=1.1.0
+pyyaml>=6.0.1
+
+# ---------- PII Redaction (D24) ----------
+# scrubadub: NLP-based PII detection (emails, phones, names, SSNs)
+# Used by app/pii/redactor.py as Layer 1 (regex is Layer 2 fallback)
+scrubadub>=2.0.0
+
+# ---------- LightRAG (RAG pipeline — used by shield_engine.lightrag_adapter) ----------
+lightrag-hku>=0.1.0
+sentence-transformers>=2.6.0
+tiktoken>=0.6.0
+anthropic>=0.40.0
+playwright>=1.58.0
+
+# ---------- MCP (Model Context Protocol) — Metasploit integration ----------
+mcp>=1.2.0
+msgpack>=1.0.7
+
+# ---------- Auth (W1-F will use these) ----------
+authlib>=1.4.0
+python-jose>=3.3.0

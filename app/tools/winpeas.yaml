@@ -1,0 +1,23 @@
+name: winpeas
+command: winpeas.exe
+enabled: true
+description: |
+  WinPEAS — Windows Privilege Escalation Awesome Script. Enumerates 200+ privesc
+  vectors: services, registry, scheduled tasks, tokens, UAC bypass. Runs via Wine.
+short_description: WinPEAS — Windows privilege escalation enumeration
+category: post_exploit
+wstg_ids: []
+mitre_attack:
+  - T1068
+safety_class: passive
+parameters:
+  - name: additional_args
+    type: string
+    description: Additional winpeas arguments
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 300
+allowed_exit_codes: [0]

@@ -1,0 +1,28 @@
+name: mimikatz
+command: mimikatz.exe
+enabled: true
+description: |
+  Mimikatz — Windows credential extraction. Dumps LSASS, NTLM hashes, Kerberos
+  tickets, plaintext passwords. Runs via Wine. D25 HITL: destructive.
+short_description: Mimikatz — Windows credential extraction (HITL required)
+category: post_exploit
+wstg_ids: []
+mitre_attack:
+  - T1003
+safety_class: destructive
+parameters:
+  - name: command
+    type: string
+    description: 'Mimikatz command (e.g. "sekurlsa::logonpasswords", "lsadump::sam")'
+    required: true
+    position: 1
+  - name: additional_args
+    type: string
+    description: Additional mimikatz arguments
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 120
+allowed_exit_codes: [0]

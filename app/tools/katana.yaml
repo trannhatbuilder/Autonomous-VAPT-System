@@ -1,0 +1,35 @@
+name: katana
+command: katana
+enabled: true
+description: |
+  Katana — web crawler from ProjectDiscovery. Discovers endpoints, JavaScript
+  files, API paths. Headless browser mode for dynamic content.
+short_description: Katana — web crawler (endpoint + JS discovery)
+category: recon
+wstg_ids:
+  - WSTG-INFO-04
+mitre_attack:
+  - T1592.002
+safety_class: active
+parameters:
+  - name: target
+    type: string
+    description: Target URL
+    required: true
+    flag: "-u"
+  - name: depth
+    type: integer
+    description: Crawl depth
+    required: false
+    flag: "-d"
+    default: 3
+  - name: additional_args
+    type: string
+    description: Additional katana arguments
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 300
+allowed_exit_codes: [0]

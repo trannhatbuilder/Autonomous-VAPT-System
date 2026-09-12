@@ -1,0 +1,96 @@
+# VAPT-AI MCP Tool Wrapper — feroxbuster
+# ============================================================
+# Tool: feroxbuster (Recursive content discovery)
+# Category: web_scanner
+# WSTG IDs: WSTG-CONF-05 (Review Old Backup and Unreferenced Files)
+# MITRE ATT&CK: T1595.003 (Wordlist Scanning)
+# Install: apt install feroxbuster (W1-I) or cargo install feroxbuster
+# ============================================================
+
+name: feroxbuster
+command: feroxbuster
+enabled: true
+description: |
+  Fast recursive content discovery tool. Combines speed of ffuf with
+  recursion of gobuster. Auto-discovers + recurses into found directories.
+
+  Examples:
+    - Basic scan: feroxbuster -u <url>
+    - With extensions: feroxbuster -u <url> -x php,html,txt
+    - Custom wordlist: feroxbuster -u <url> -w wordlist.txt
+    - Filter status: feroxbuster -u <url> -C 404,403
+
+short_description: Recursive content discovery (fast + auto-recurse)
+
+category: web_scanner
+
+wstg_ids:
+  - WSTG-CONF-05  # Old Backup and Unreferenced Files
+mitre_attack:
+  - T1595.003  # Wordlist Scanning
+
+safety_class: active
+
+parameters:
+  - name: target
+    type: string
+    description: Target URL
+    required: true
+    flag: "-u"
+
+  - name: wordlist
+    type: string
+    description: 'Path to wordlist file (default: built-in)'
+    required: false
+    flag: "-w"
+    default: ""
+
+  - name: extensions
+    type: string
+    description: File extensions (comma-separated, e.g. php,asp,jsp)
+    required: false
+    flag: "-x"
+    default: ""
+
+  - name: depth
+    type: integer
+    description: Maximum recursion depth
+    required: false
+    flag: "-d"
+    default: 4
+
+  - name: threads
+    type: integer
+    description: Number of concurrent threads
+    required: false
+    flag: "-t"
+    default: 50
+
+  - name: filter_status
+    type: string
+    description: Filter OUT these status codes (comma-separated, e.g. 404,403)
+    required: false
+    flag: "-C"
+    default: ""
+
+  - name: timeout
+    type: integer
+    description: HTTP timeout (seconds)
+    required: false
+    flag: "-T"
+    default: 10
+
+  - name: additional_args
+    type: string
+    description: Additional feroxbuster arguments
+    required: false
+    default: ""
+
+output:
+  max_bytes: 50000
+  format: text
+  parse_hints:
+    found: '^(\\d{3})\\s+(\\S+)\\s+(\\S+)\\s+(\\d+\\s+\\w+)'
+
+timeout: 900  # 15 min — recursive scans can be slow
+allowed_exit_codes: [0, 1]

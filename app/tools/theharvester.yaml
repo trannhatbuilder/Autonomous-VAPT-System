@@ -1,0 +1,41 @@
+name: theharvester
+command: theHarvester
+enabled: true
+description: |
+  theHarvester — OSINT email, subdomain, and name harvester. Queries 30+ sources
+  (Google, Bing, LinkedIn, Shodan, etc.). Passive — no target contact.
+short_description: theHarvester — OSINT email/subdomain harvesting (passive)
+category: recon
+wstg_ids:
+  - WSTG-INFO-01
+mitre_attack:
+  - T1592.002
+safety_class: passive
+parameters:
+  - name: domain
+    type: string
+    description: Target domain
+    required: true
+    flag: "-d"
+  - name: source
+    type: string
+    description: Data source (google, bing, linkedin, shodan, all)
+    required: false
+    flag: "-b"
+    default: "all"
+  - name: limit
+    type: integer
+    description: Max results per source
+    required: false
+    flag: "-l"
+    default: 500
+  - name: additional_args
+    type: string
+    description: Additional theHarvester arguments
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 600
+allowed_exit_codes: [0]

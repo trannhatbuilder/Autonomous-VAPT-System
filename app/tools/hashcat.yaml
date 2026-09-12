@@ -1,0 +1,45 @@
+name: hashcat
+command: hashcat
+enabled: true
+description: |
+  Hashcat — advanced password recovery. GPU + CPU cracking. 300+ hash modes.
+  Examples: hashcat -m 1000 hashes.txt wordlist.txt (NTLM), -m 0 (MD5), -m 1800 (sha512crypt)
+short_description: Hashcat — GPU/CPU password cracking (300+ hash modes)
+category: password_cracking
+wstg_ids: []
+mitre_attack:
+  - T1110
+safety_class: active
+parameters:
+  - name: hash_mode
+    type: integer
+    description: Hash type (0=MD5, 100=SHA1, 1000=NTLM, 1800=sha512crypt, etc.)
+    required: true
+    flag: "-m"
+    default: 0
+  - name: hash_file
+    type: string
+    description: File containing hashes (one per line)
+    required: true
+    position: 1
+  - name: wordlist
+    type: string
+    description: Wordlist file (e.g. /usr/share/wordlists/rockyou.txt)
+    required: true
+    position: 2
+  - name: attack_mode
+    type: integer
+    description: Attack mode (0=straight, 1=combinator, 3=brute-force, 6=hybrid)
+    required: false
+    flag: "-a"
+    default: 0
+  - name: additional_args
+    type: string
+    description: Additional hashcat arguments
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 3600
+allowed_exit_codes: [0, 1]

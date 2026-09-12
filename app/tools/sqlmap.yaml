@@ -1,0 +1,130 @@
+# VAPT-AI MCP Tool Wrapper — sqlmap
+# ============================================================
+# Tool: sqlmap (SQL injection detection + exploitation)
+# Category: web_scanner
+# WSTG IDs: WSTG-INPV-05 (Testing for SQL Injection)
+# MITRE ATT&CK: T1190 (Exploit Public-Facing Application)
+# Install: apt install sqlmap + pip install sqlmap (W1-I)
+# ============================================================
+# D25 HITL POLICY:
+#   - detect mode (--batch, no --os-shell, no --dump): safety_class=active (no HITL)
+#   - exploit mode (--os-shell, --dump, --sql-shell): safety_class=destructive (HITL required)
+# This wrapper defaults to detect mode. Exploit mode requires separate wrapper
+# (sqlmap_exploit.yaml — W6 task) with safety_class=destructive.
+# ============================================================
+
+name: sqlmap
+command: sqlmap
+enabled: true
+description: |
+  SQL injection detection + exploitation tool. Detect mode only — does NOT
+  dump data or spawn shells. For exploitation (HITL required), use sqlmap_exploit.
+
+  Examples:
+    - Detect SQLi on URL: sqlmap -u <url> --batch
+    - With POST data: sqlmap -u <url> --data="user=1&pass=2" --batch
+    - Specific param: sqlmap -u <url> -p id --batch
+    - With cookie: sqlmap -u <url> --cookie="session=abc" --batch
+
+short_description: SQL injection detection (detect mode — no exploitation)
+
+category: web_scanner
+
+wstg_ids:
+  - WSTG-INPV-05  # Testing for SQL Injection
+mitre_attack:
+  - T1190  # Exploit Public-Facing Application
+
+safety_class: active  # detect mode — no HITL required
+
+parameters:
+  - name: target
+    type: string
+    description: Target URL with parameters (e.g. http://example.com/page?id=1)
+    required: true
+    flag: "-u"
+
+  - name: data
+    type: string
+    description: POST data string (e.g. "user=admin&pass=test")
+    required: false
+    flag: "--data"
+    default: ""
+
+  - name: param
+    type: string
+    description: Specific parameter to test (skip others). Comma-separated for multiple.
+    required: false
+    flag: "-p"
+    default: ""
+
+  - name: cookie
+    type: string
+    description: HTTP Cookie header value
+    required: false
+    flag: "--cookie"
+    default: ""
+
+  - name: method
+    type: string
+    description: HTTP method (GET, POST, PUT, DELETE)
+    required: false
+    flag: "--method"
+    default: "GET"
+    options: ["GET", "POST", "PUT", "DELETE", "PATCH"]
+
+  - name: level
+    type: integer
+    description: Test level (1-5, higher = more tests but slower)
+    required: false
+    flag: "--level"
+    default: 1
+    options: [1, 2, 3, 4, 5]
+
+  - name: risk
+    type: integer
+    description: Risk of tests (1-3, higher = more aggressive — risk of data modification)
+    required: false
+    flag: "--risk"
+    default: 1
+    options: [1, 2, 3]
+
+  - name: dbms
+    type: string
+    description: Target DBMS (mysql, postgresql, mssql, oracle, sqlite, etc.)
+    required: false
+    flag: "--dbms"
+    default: ""
+
+  - name: batch
+    type: bool
+    description: Never ask for user input (use defaults)
+    required: false
+    flag: "--batch"
+    default: true
+
+  - name: additional_args
+    type: string
+    description: Additional sqlmap arguments (NO --os-shell, --dump, --sql-shell — use sqlmap_exploit)
+    required: false
+    default: ""
+
+output:
+  max_bytes: 50000
+  format: text
+  parse_hints:
+    sqli_found: "(.*)(is vulnerable|injectable)(.*)"
+    dbms: "back-end DBMS: (.*)"
+    payload: "Payload: (.*)"
+
+timeout: 600
+allowed_exit_codes: [0, 1]  # 1 = no SQLi found — still useful
+
+# Block destructive flags — if user tries to pass these, scope_guard will reject
+forbidden_args:
+  - "--os-shell"
+  - "--sql-shell"
+  - "--dump"
+  - "--dump-all"
+  - "--os-pwn"
+  - "--priv-esc"

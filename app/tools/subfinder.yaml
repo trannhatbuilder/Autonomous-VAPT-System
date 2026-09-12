@@ -1,0 +1,88 @@
+# VAPT-AI MCP Tool Wrapper — subfinder
+# ============================================================
+# Tool: subfinder (Subdomain enumeration)
+# Category: recon
+# WSTG IDs: WSTG-INFO-01 (Conduct Search Engine Discovery)
+# MITRE ATT&CK: T1592.002 (Gather Victim Host Info: Software)
+# Install: go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest (W1-I)
+# ============================================================
+
+name: subfinder
+command: subfinder
+enabled: true
+description: |
+  Passive subdomain enumeration tool. Queries 30+ sources (Shodan, SecurityTrails,
+  Censys, VirusTotal, etc.) WITHOUT touching the target — completely stealthy.
+
+  Examples:
+    - Enumerate subdomains: subfinder -d example.com
+    - With API keys (config): subfinder -d example.com -config api.yaml
+    - Output to file: subfinder -d example.com -o subdomains.txt
+
+short_description: Passive subdomain enumeration (30+ sources, no target contact)
+
+category: recon
+
+wstg_ids:
+  - WSTG-INFO-01  # Search Engine Discovery
+mitre_attack:
+  - T1592.002  # Software
+
+safety_class: passive  # passive — no contact with target
+
+parameters:
+  - name: domain
+    type: string
+    description: Root domain (e.g. example.com)
+    required: true
+    flag: "-d"
+
+  - name: sources
+    type: string
+    description: Specific sources (comma-separated, e.g. shodan,censys,virustotal)
+    required: false
+    flag: "-sources"
+    default: ""
+
+  - name: exclude_sources
+    type: string
+    description: Sources to exclude (comma-separated)
+    required: false
+    flag: "-exclude-sources"
+    default: ""
+
+  - name: config
+    type: string
+    description: Path to API config file (with API keys for paid sources)
+    required: false
+    flag: "-config"
+    default: ""
+
+  - name: output_file
+    type: string
+    description: Write results to file (instead of stdout)
+    required: false
+    flag: "-o"
+    default: ""
+
+  - name: silent
+    type: bool
+    description: Only print subdomains (no banner, no progress)
+    required: false
+    flag: "-silent"
+    default: true
+
+  - name: additional_args
+    type: string
+    description: Additional subfinder arguments
+    required: false
+    default: ""
+
+output:
+  max_bytes: 50000
+  format: text
+  parse_hints:
+    subdomain: '^([a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})$'
+
+timeout: 300
+allowed_exit_codes: [0]

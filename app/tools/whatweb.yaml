@@ -1,0 +1,83 @@
+# VAPT-AI MCP Tool Wrapper — whatweb
+# ============================================================
+# Tool: whatweb (Web tech fingerprint)
+# Category: recon
+# WSTG IDs: WSTG-INFO-04 (Search Engine Discovery), WSTG-CONF-01 (Network Configuration)
+# MITRE ATT&CK: T1592.002 (Gather Victim Host Info: Software)
+# Install: apt install whatweb (W1-I)
+# ============================================================
+
+name: whatweb
+command: whatweb
+enabled: true
+description: |
+  Web tech fingerprint tool. Identifies CMS, frameworks, JS libraries,
+  web servers, analytics packages, etc. 1800+ plugins.
+
+  Examples:
+    - Fingerprint single URL: whatweb <url>
+    - Aggressive: whatweb -a 3 <url>
+    - Output JSON: whatweb --output-json <url>
+
+short_description: Web tech fingerprint (1800+ plugins)
+
+category: recon
+
+wstg_ids:
+  - WSTG-INFO-04  # Search Engine Discovery
+  - WSTG-CONF-01  # Network Configuration
+mitre_attack:
+  - T1592.002  # Software
+
+safety_class: active
+
+parameters:
+  - name: target
+    type: string
+    description: Target URL (e.g. http://example.com)
+    required: true
+    position: 1
+
+  - name: aggression
+    type: integer
+    description: Aggression level (1=stealthy, 3=aggressive — more requests)
+    required: false
+    flag: "-a"
+    default: 1
+    options: [1, 2, 3, 4]
+
+  - name: output_format
+    type: string
+    description: Output format (text, json, xml)
+    required: false
+    flag: "--output-json"
+    default: ""
+
+  - name: no_errors
+    type: bool
+    description: Suppress error messages
+    required: false
+    flag: "--no-errors"
+    default: true
+
+  - name: user_agent
+    type: string
+    description: Custom User-Agent string
+    required: false
+    flag: "--user-agent"
+    default: ""
+
+  - name: additional_args
+    type: string
+    description: Additional whatweb arguments
+    required: false
+    default: ""
+
+output:
+  max_bytes: 50000
+  format: text
+  parse_hints:
+    tech: '\\[([^\\]]+)\\]'
+
+timeout: 120
+allowed_exit_codes: [0]

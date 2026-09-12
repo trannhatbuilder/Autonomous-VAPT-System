@@ -1,0 +1,29 @@
+name: dnsenum
+command: dnsenum
+enabled: true
+description: |
+  dnsenum — DNS enumeration. Collects subdomains via Google, zone transfer,
+  reverse DNS, brute-force. Good for quick DNS recon.
+short_description: dnsenum — DNS enumeration (subdomains, zone transfer, reverse DNS)
+category: recon
+wstg_ids:
+  - WSTG-CONF-01
+mitre_attack:
+  - T1592.002
+safety_class: active
+parameters:
+  - name: domain
+    type: string
+    description: Target domain
+    required: true
+    position: 1
+  - name: additional_args
+    type: string
+    description: Additional dnsenum arguments
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 300
+allowed_exit_codes: [0]

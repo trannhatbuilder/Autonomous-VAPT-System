@@ -1,0 +1,40 @@
+name: john
+command: john
+enabled: true
+description: |
+  John the Ripper — password cracker. Supports 100+ hash types. Auto-detect
+  hash format with --format=dynamic. Good for offline cracking of /etc/shadow.
+short_description: John the Ripper — offline password cracking
+category: password_cracking
+wstg_ids: []
+mitre_attack:
+  - T1110
+safety_class: active
+parameters:
+  - name: hash_file
+    type: string
+    description: File containing hashes
+    required: true
+    position: 1
+  - name: wordlist
+    type: string
+    description: Wordlist file
+    required: false
+    flag: "--wordlist"
+    default: ""
+  - name: format
+    type: string
+    description: Hash format (e.g. raw-md5, raw-sha1, ntlm, bcrypt)
+    required: false
+    flag: "--format"
+    default: ""
+  - name: additional_args
+    type: string
+    description: Additional john arguments
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 3600
+allowed_exit_codes: [0, 1]

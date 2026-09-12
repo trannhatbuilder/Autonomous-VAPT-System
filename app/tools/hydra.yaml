@@ -1,0 +1,58 @@
+name: hydra
+command: hydra
+enabled: true
+description: |
+  Hydra — online password brute-force. Supports 50+ protocols (SSH, FTP, HTTP,
+  SMB, RDP, MySQL, PostgreSQL, etc.). D25 HITL: destructive (active brute-force).
+short_description: Hydra — online password brute-force (50+ protocols)
+category: password_cracking
+wstg_ids:
+  - WSTG-ATHN-01
+mitre_attack:
+  - T1110
+safety_class: destructive
+parameters:
+  - name: target
+    type: string
+    description: Target host or IP
+    required: true
+    position: 1
+  - name: service
+    type: string
+    description: Service (ssh, ftp, http-get, http-post, smb, rdp, mysql, postgresql, etc.)
+    required: true
+    position: 2
+  - name: username
+    type: string
+    description: Username or -L for user list
+    required: false
+    flag: "-l"
+    default: ""
+  - name: user_list
+    type: string
+    description: Username list file (use instead of -l)
+    required: false
+    flag: "-L"
+    default: ""
+  - name: password
+    type: string
+    description: Password or -P for password list
+    required: false
+    flag: "-p"
+    default: ""
+  - name: pass_list
+    type: string
+    description: Password list file (use instead of -p)
+    required: false
+    flag: "-P"
+    default: ""
+  - name: additional_args
+    type: string
+    description: Additional hydra arguments
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 600
+allowed_exit_codes: [0, 1]

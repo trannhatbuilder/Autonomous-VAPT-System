@@ -1,0 +1,29 @@
+name: waybackurls
+command: waybackurls
+enabled: true
+description: |
+  waybackurls — fetch all URLs for a domain from the Wayback Machine.
+  Passive — no contact with target. Good for discovering old/hidden endpoints.
+short_description: waybackurls — fetch URLs from Wayback Machine (passive)
+category: recon
+wstg_ids:
+  - WSTG-INFO-01
+mitre_attack:
+  - T1592.002
+safety_class: passive
+parameters:
+  - name: domain
+    type: string
+    description: Target domain (e.g. example.com)
+    required: true
+    position: 1
+  - name: additional_args
+    type: string
+    description: Additional waybackurls arguments
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 300
+allowed_exit_codes: [0]

@@ -1,0 +1,125 @@
+# VAPT-AI MCP Tool Wrapper — nmap
+# ============================================================
+# Tool: nmap (Network Mapper)
+# Category: network_scanner
+# WSTG IDs: WSTG-INFO-02 (TCP/IP Fingerprinting), WSTG-INFO-03 (Port Scan)
+# MITRE ATT&CK: T1046 (Network Service Discovery)
+# Install: apt install nmap (W1-I)
+# ============================================================
+
+name: nmap
+command: nmap
+enabled: true
+description: |
+  Network scanner — discovers hosts + services on a network, OS detection,
+  version detection, script scanning (NSE). Use for port scanning, service
+  fingerprinting, vulnerability detection via NSE scripts.
+
+  Examples:
+    - Port scan top 1000 ports: nmap -sS -sV <target>
+    - Full port scan: nmap -p- <target>
+    - OS + version detection: nmap -A <target>
+    - NSE vuln scripts: nmap --script vuln <target>
+
+short_description: Network scanner — port scan, service detection, NSE scripts
+
+# Tool category for organization + UI grouping
+category: network_scanner
+
+# Standards mapping
+wstg_ids:
+  - WSTG-INFO-02  # TCP/IP Fingerprinting
+  - WSTG-INFO-03  # Port Scan
+mitre_attack:
+  - T1046  # Network Service Discovery
+
+# Safety classification — drives HITL gate (D25)
+# passive: no impact on target (read-only)
+# active: sends probes but no exploitation
+# destructive: exploitation (HITL required)
+safety_class: active
+
+# Parameters schema (JSON Schema format — MCP compatible)
+parameters:
+  - name: target
+    type: string
+    description: Target IP, hostname, or CIDR range (e.g. 192.168.1.1, scanme.nmap.org, 10.0.0.0/24)
+    required: true
+    position: 1  # positional arg (appended to command)
+
+  - name: ports
+    type: string
+    description: 'Port specification (e.g. 80, 1-1000, -, top-1000). Default: top 1000.'
+    required: false
+    flag: "-p"
+    default: ""
+
+  - name: scan_type
+    type: string
+    description: Scan technique
+    required: false
+    flag: "-sS"  # SYN scan (default — requires root, falls back to -sT)
+    default: "-sS"
+    options:
+      - "-sS"  # SYN scan (stealth)
+      - "-sT"  # TCP connect scan (no root)
+      - "-sU"  # UDP scan
+      - "-sA"  # ACK scan (firewall detection)
+
+  - name: version_detection
+    type: bool
+    description: Enable service version detection (-sV)
+    required: false
+    flag: "-sV"
+    default: false
+
+  - name: os_detection
+    type: bool
+    description: Enable OS detection (-O)
+    required: false
+    flag: "-O"
+    default: false
+
+  - name: aggressive
+    type: bool
+    description: Enable aggressive scan (-A = OS + version + script + traceroute)
+    required: false
+    flag: "-A"
+    default: false
+
+  - name: script
+    type: string
+    description: NSE script to run (e.g. vuln, banner, smb-os-discovery)
+    required: false
+    flag: "--script"
+    default: ""
+
+  - name: timing
+    type: string
+    description: Timing template (T0=paranoid, T3=normal, T5=insane)
+    required: false
+    flag: "-T"
+    default: "4"  # T4 — aggressive timing
+    options: ["0", "1", "2", "3", "4", "5"]
+
+  - name: additional_args
+    type: string
+    description: Additional nmap arguments (e.g. "--top-ports 100 -v")
+    required: false
+    default: ""
+
+# Output handling
+output:
+  max_bytes: 50000  # 50KB cap, spill to disk if exceeded
+  format: text       # nmap outputs text by default
+  parse_hints:
+    # Regex patterns to extract structured data from output
+    open_port: '^(\\d+)/(tcp|udp)\\s+open\\s+(\\S+)'
+    host_status: '^Host is up|Host: \\S+\\s+\\(.*\\)\\s+Status: Up'
+    os_guess: '^OS details: (.*)'
+
+# Timeout (seconds) — nmap can be slow on full port scans
+timeout: 600
+
+# Allowed exit codes (0 = success, 1 = no hosts up — still useful info)
+allowed_exit_codes: [0, 1]

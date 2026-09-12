@@ -1,0 +1,29 @@
+name: fscan
+command: fscan
+enabled: true
+description: |
+  fscan — fast internal network scanner. Combines port scan + service detection +
+  vulnerability check + brute-force in one tool. Good for quick internal assessment.
+short_description: fscan — all-in-one internal network scanner
+category: network_scanner
+wstg_ids:
+  - WSTG-INFO-03
+mitre_attack:
+  - T1046
+safety_class: active
+parameters:
+  - name: target
+    type: string
+    description: Target IP/range (e.g. 10.0.0.0/24)
+    required: true
+    position: 1
+  - name: additional_args
+    type: string
+    description: Additional fscan arguments (e.g. -p 22,80,443 -nopoc)
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 600
+allowed_exit_codes: [0, 1]

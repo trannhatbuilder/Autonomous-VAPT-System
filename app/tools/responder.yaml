@@ -1,0 +1,32 @@
+name: responder
+command: responder
+enabled: true
+description: |
+  Responder — LLMNR/NBT-NS/mDNS poisoner. Captures NTLMv2 hashes via
+  name poisoning. Use for internal network credential harvesting.
+
+  D25 HITL: destructive — requires HITL approval.
+short_description: Responder — LLMNR/NBT-NS poisoner (HITL required)
+category: exploitation
+wstg_ids:
+  - WSTG-ATHN-04
+mitre_attack:
+  - T1557
+safety_class: destructive
+parameters:
+  - name: interface
+    type: string
+    description: Network interface (e.g. eth0)
+    required: true
+    flag: "-I"
+    default: "eth0"
+  - name: additional_args
+    type: string
+    description: Additional responder arguments
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 300
+allowed_exit_codes: [0]

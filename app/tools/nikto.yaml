@@ -1,0 +1,104 @@
+# VAPT-AI MCP Tool Wrapper — nikto
+# ============================================================
+# Tool: nikto (Web server scanner)
+# Category: vuln_scanner
+# WSTG IDs: WSTG-CONF-01 (Network Configuration), WSTG-CONF-06 (Test HTTP Methods)
+# MITRE ATT&CK: T1595.002 (Active Scanning: Vulnerability Scanning)
+# Install: apt install nikto (W1-I)
+# ============================================================
+
+name: nikto
+command: nikto
+enabled: true
+description: |
+  Web server scanner — checks for 6700+ potentially dangerous files/programs,
+  outdated server software, misconfigurations. Slower than nuclei but thorough.
+
+  Examples:
+    - Basic scan: nikto -h <url>
+    - With port: nikto -h <host> -p 8080
+    - Output HTML: nikto -h <url> -Format htm -output report.html
+
+short_description: Web server scanner (6700+ checks)
+
+category: vuln_scanner
+
+wstg_ids:
+  - WSTG-CONF-01  # Network Configuration
+  - WSTG-CONF-06  # Test HTTP Methods
+mitre_attack:
+  - T1595.002  # Vulnerability Scanning
+
+safety_class: active
+
+parameters:
+  - name: target
+    type: string
+    description: 'Target host or URL (e.g. example.com or http://example.com)'
+    required: true
+    flag: "-h"
+
+  - name: port
+    type: integer
+    description: 'Target port (default: 80 for http, 443 for https)'
+    required: false
+    flag: "-p"
+    default: 0
+
+  - name: ssl
+    type: bool
+    description: Force SSL mode (HTTPS)
+    required: false
+    flag: "-ssl"
+    default: false
+
+  - name: tuning
+    type: string
+    description: Tuning options (1=Interesting File, 3=Injection, 8=SQLi, etc.)
+    required: false
+    flag: "-Tuning"
+    default: ""
+
+  - name: format
+    type: string
+    description: Output format (csv, htm, txt, xml)
+    required: false
+    flag: "-Format"
+    default: "txt"
+    options: ["csv", "htm", "txt", "xml"]
+
+  - name: output
+    type: string
+    description: Output file path
+    required: false
+    flag: "-output"
+    default: ""
+
+  - name: timeout
+    type: integer
+    description: Request timeout (seconds)
+    required: false
+    flag: "-timeout"
+    default: 10
+
+  - name: user_agent
+    type: string
+    description: Custom User-Agent
+    required: false
+    flag: "-useragent"
+    default: ""
+
+  - name: additional_args
+    type: string
+    description: Additional nikto arguments
+    required: false
+    default: ""
+
+output:
+  max_bytes: 50000
+  format: text
+  parse_hints:
+    finding: '^\\+\\s+(.*)'
+
+timeout: 1200  # 20 min — nikto is slow
+allowed_exit_codes: [0, 1]

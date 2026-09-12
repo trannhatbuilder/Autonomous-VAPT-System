@@ -1,0 +1,42 @@
+name: wpscan
+command: wpscan
+enabled: true
+description: |
+  WPScan — WordPress vulnerability scanner. Enumerates plugins, themes, users,
+  checks for known vulnerabilities. Requires free API token for vulnerability DB.
+short_description: WPScan — WordPress vulnerability scanner
+category: web_scanner
+wstg_ids:
+  - WSTG-INFO-04
+  - WSTG-CONF-01
+mitre_attack:
+  - T1595.002
+safety_class: active
+parameters:
+  - name: target
+    type: string
+    description: WordPress URL (e.g. http://example.com)
+    required: true
+    flag: "-u"
+  - name: enumerate
+    type: string
+    description: What to enumerate (vp=plugins, vt=themes, u=users, ap=all plugins)
+    required: false
+    flag: "--enumerate"
+    default: "ap,at,u"
+  - name: api_token
+    type: string
+    description: WPScan API token (free from wpscan.com — needed for vuln DB)
+    required: false
+    flag: "--api-token"
+    default: ""
+  - name: additional_args
+    type: string
+    description: Additional wpscan arguments
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 600
+allowed_exit_codes: [0, 1]

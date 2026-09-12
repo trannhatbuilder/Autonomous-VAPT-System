@@ -1,0 +1,29 @@
+name: fierce
+command: fierce
+enabled: true
+description: |
+  fierce — DNS reconnaissance tool. Discovers subdomains via zone transfer,
+  reverse DNS, brute-force. Similar to dnsenum but lighter.
+short_description: fierce — DNS reconnaissance (subdomains, zone transfer)
+category: recon
+wstg_ids:
+  - WSTG-CONF-01
+mitre_attack:
+  - T1592.002
+safety_class: active
+parameters:
+  - name: domain
+    type: string
+    description: Target domain
+    required: true
+    flag: "-d"
+  - name: additional_args
+    type: string
+    description: Additional fierce arguments
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 300
+allowed_exit_codes: [0]

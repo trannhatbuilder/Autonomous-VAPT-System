@@ -1,0 +1,35 @@
+name: rustscan
+command: rustscan
+enabled: true
+description: |
+  RustScan — fast modern port scanner. Scans all 65535 ports in seconds.
+  Combines with nmap for service detection. Safer than masscan.
+short_description: RustScan — fast port scanner (all 65535 ports in seconds)
+category: network_scanner
+wstg_ids:
+  - WSTG-INFO-03
+mitre_attack:
+  - T1046
+safety_class: active
+parameters:
+  - name: target
+    type: string
+    description: Target IP or hostname
+    required: true
+    position: 1
+  - name: ports
+    type: string
+    description: Ports (e.g. 1-65535 or top1000)
+    required: false
+    flag: "-p"
+    default: "1-65535"
+  - name: additional_args
+    type: string
+    description: Additional rustscan arguments (e.g. --ulimit 5000)
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 300
+allowed_exit_codes: [0, 1]

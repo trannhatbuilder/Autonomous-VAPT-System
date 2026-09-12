@@ -1,0 +1,105 @@
+# VAPT-AI MCP Tool Wrapper — dalfox
+# ============================================================
+# Tool: dalfox (XSS scanner)
+# Category: web_scanner
+# WSTG IDs: WSTG-INPV-01 (Testing for Reflected XSS), WSTG-INPV-02 (Testing for Stored XSS)
+# MITRE ATT&CK: T1059.007 (Command and Scripting Interpreter: JavaScript)
+# Install: go install github.com/hahwul/dalfox/v2@latest (W1-I)
+# ============================================================
+
+name: dalfox
+command: dalfox
+enabled: true
+description: |
+  XSS (Cross-Site Scripting) scanner — detects reflected + stored XSS.
+  DOM-based XSS via headless browser. 1000+ payloads.
+
+  Examples:
+    - Scan URL: dalfox url <url>
+    - Scan with param: dalfox url <url> -p id
+    - Pipeline from httpx: cat urls.txt | dalfox pipe
+
+short_description: XSS scanner (reflected + stored + DOM-based)
+
+category: web_scanner
+
+wstg_ids:
+  - WSTG-INPV-01  # Reflected XSS
+  - WSTG-INPV-02  # Stored XSS
+mitre_attack:
+  - T1059.007  # JavaScript
+
+safety_class: active
+
+parameters:
+  - name: target
+    type: string
+    description: Target URL (with params if known)
+    required: true
+    position: 1
+
+  - name: param
+    type: string
+    description: Specific parameter to test (comma-separated)
+    required: false
+    flag: "-p"
+    default: ""
+
+  - name: data
+    type: string
+    description: POST data (e.g. "user=test&pass=test")
+    required: false
+    flag: "--data"
+    default: ""
+
+  - name: cookie
+    type: string
+    description: Cookie header value
+    required: false
+    flag: "--cookie"
+    default: ""
+
+  - name: method
+    type: string
+    description: HTTP method (GET, POST)
+    required: false
+    flag: "-X"
+    default: "GET"
+    options: ["GET", "POST"]
+
+  - name: silence
+    type: bool
+    description: Only print results (no banner)
+    required: false
+    flag: "--silence"
+    default: true
+
+  - name: only_poc
+    type: string
+    description: Print only PoC code (r=reflected, v=verified)
+    required: false
+    flag: "--only-poc"
+    default: "v"  # only verified PoCs
+
+  - name: timeout
+    type: integer
+    description: HTTP timeout (seconds)
+    required: false
+    flag: "--timeout"
+    default: 10
+
+  - name: additional_args
+    type: string
+    description: Additional dalfox arguments
+    required: false
+    default: ""
+
+output:
+  max_bytes: 50000
+  format: text
+  parse_hints:
+    xss_found: '\\[V\\]\\s+Found\\s+at\\s+(\\S+)'
+    payload: 'Payload:\\s+(\\S+)'
+
+timeout: 600
+allowed_exit_codes: [0]

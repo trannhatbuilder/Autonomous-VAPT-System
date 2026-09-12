@@ -1,0 +1,47 @@
+name: ffuf
+command: ffuf
+enabled: true
+description: |
+  ffuf — fast web fuzzer. Directory/file discovery, vhost fuzzing, parameter
+  fuzzing. 3x faster than gobuster. Supports recursion + rate limiting.
+short_description: ffuf — fast web fuzzer (dirs, vhosts, params)
+category: web_scanner
+wstg_ids:
+  - WSTG-CONF-05
+mitre_attack:
+  - T1595.003
+safety_class: active
+parameters:
+  - name: target
+    type: string
+    description: Target URL with FUZZ keyword (e.g. http://example.com/FUZZ)
+    required: true
+    flag: "-u"
+  - name: wordlist
+    type: string
+    description: Wordlist file
+    required: true
+    flag: "-w"
+    default: "/usr/share/wordlists/dirb/common.txt"
+  - name: extensions
+    type: string
+    description: File extensions (comma-separated)
+    required: false
+    flag: "-e"
+    default: ""
+  - name: threads
+    type: integer
+    description: Concurrent threads
+    required: false
+    flag: "-t"
+    default: 50
+  - name: additional_args
+    type: string
+    description: Additional ffuf arguments
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 600
+allowed_exit_codes: [0]

@@ -1,0 +1,23 @@
+name: linpeas
+command: linpeas
+enabled: true
+description: |
+  LinPEAS — Linux Privilege Escalation Awesome Script. Enumerates 200+ privesc
+  vectors: SUID bins, capabilities, cron jobs, services, kernel exploits.
+short_description: LinPEAS — Linux privilege escalation enumeration
+category: post_exploit
+wstg_ids: []
+mitre_attack:
+  - T1068
+safety_class: passive
+parameters:
+  - name: additional_args
+    type: string
+    description: Additional linpeas arguments (e.g. -a for all checks)
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 300
+allowed_exit_codes: [0]

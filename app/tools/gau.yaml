@@ -1,0 +1,29 @@
+name: gau
+command: gau
+enabled: true
+description: |
+  gau (getallurls) — fetches known URLs from AlienVault OTX, Wayback Machine,
+  Common Crawl, and URLScan.io. Passive — no contact with target.
+short_description: gau — fetch known URLs from OSINT sources (passive)
+category: recon
+wstg_ids:
+  - WSTG-INFO-01
+mitre_attack:
+  - T1592.002
+safety_class: passive
+parameters:
+  - name: domain
+    type: string
+    description: Target domain (e.g. example.com)
+    required: true
+    position: 1
+  - name: additional_args
+    type: string
+    description: Additional gau arguments (e.g. --threads 5)
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 300
+allowed_exit_codes: [0]

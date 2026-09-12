@@ -1,0 +1,104 @@
+# === VAPT-AI v3.2 .gitignore ===
+# Adapted from EVVO Sentinel .gitignore + VAPT-AI-specific rules.
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+develop
+.installed.cfg
+*.egg
+
+# === Virtual environments ===
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+venv314/
+
+# === Testing ===
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# === Environment / Secrets ===
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.crt
+certs/*.crt
+certs/*.key
+!certs/.gitkeep
+
+# === Runtime data ===
+# Keep data/rl/adaptive_encoder.json (EVVO legacy RL weights — useful seed)
+# Ignore all other RL artifacts (regeneratable from RLCheckpoint table)
+data/rl/*.npy
+data/rl/*.npz
+data/rl/q_meta.json
+# Ignore all replay traces (regeneratable from ReplayTrace table)
+data/traces/*.jsonl
+# Ignore KG snapshots (regeneratable from KGNode/KGEdge tables)
+data/vapt_kg/*.json
+data/vapt_kg/snapshots/
+!data/vapt_kg/.gitkeep
+# Ignore KG research cache
+data/kg_research/*.json
+# Ignore generated reports
+data/reports/
+# Ignore uploaded files
+data/uploads/
+# Ignore C2 payloads
+c2_payloads/
+!c2_payloads/.gitkeep
+
+# === Logs ===
+*.log
+logs/
+/var/log/
+
+# === Database ===
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/vapt_ai.db
+data/vapt_ai.db-journal
+data/vapt_ai.db-wal
+data/vapt_ai.db-shm
+
+# === Celery / Task Queue ===
+celerybeat-schedule*
+
+# === Installation artifacts ===
+msfinstall
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini

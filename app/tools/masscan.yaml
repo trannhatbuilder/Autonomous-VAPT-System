@@ -1,0 +1,41 @@
+name: masscan
+command: masscan
+enabled: true
+description: |
+  Masscan — fastest Internet port scanner. Scans entire Internet in 6 minutes.
+  Use for large network ranges. Caution: can saturate network. D25 HITL: destructive.
+short_description: Masscan — ultra-fast port scanner (HITL required)
+category: network_scanner
+wstg_ids:
+  - WSTG-INFO-03
+mitre_attack:
+  - T1046
+safety_class: destructive
+parameters:
+  - name: target
+    type: string
+    description: Target IP/range (e.g. 10.0.0.0/24)
+    required: true
+    position: 1
+  - name: ports
+    type: string
+    description: Ports to scan (e.g. 1-65535, 80,443,22)
+    required: true
+    flag: "-p"
+    default: "1-65535"
+  - name: rate
+    type: integer
+    description: Packets per second (default 100 — increase for faster scan)
+    required: false
+    flag: "--rate"
+    default: 1000
+  - name: additional_args
+    type: string
+    description: Additional masscan arguments
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 600
+allowed_exit_codes: [0]

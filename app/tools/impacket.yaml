@@ -1,0 +1,42 @@
+name: impacket
+command: impacket-smbexec
+enabled: true
+description: |
+  Impacket — Python collection of network protocol classes for exploitation.
+  Includes smbexec, psexec, wmiexec, secretsdump, GetUserSPNs, etc.
+
+  Examples:
+    - smbexec: impacket-smbexec user:pass@10.0.0.5
+    - secretsdump: impacket-secretsdump user:pass@10.0.0.5
+    - GetUserSPNs: impacket-GetUserSPNs domain.local/user:pass -request
+short_description: Impacket — SMB/WMI/Kerberos exploitation toolkit
+category: exploitation
+wstg_ids:
+  - WSTG-ATHN-04
+  - WSTG-ATHZ-03
+mitre_attack:
+  - T1021
+  - T1558
+safety_class: destructive
+parameters:
+  - name: target
+    type: string
+    description: Target (user:pass@host or domain/user:pass@host)
+    required: true
+    position: 1
+  - name: subtool
+    type: string
+    description: Impacket subtool (smbexec, psexec, wmiexec, secretsdump, GetUserSPNs)
+    required: false
+    default: "smbexec"
+    options: ["smbexec", "psexec", "wmiexec", "secretsdump", "GetUserSPNs"]
+  - name: additional_args
+    type: string
+    description: Additional impacket arguments
+    required: false
+    default: ""
+output:
+  max_bytes: 50000
+  format: text
+timeout: 300
+allowed_exit_codes: [0, 1]

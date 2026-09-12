@@ -1,0 +1,63 @@
+# ============================================================
+# VAPT-AI v3.2 — Metasploit RPC daemon (msfrpcd) systemd unit
+# ============================================================
+# msfrpcd is the RPC daemon shipped with Metasploit Framework.
+# VAPT-AI talks to it via msgpack RPC (mcp_servers/metasploit/msf_rpc_client.py).
+#
+# NO Docker — runs as direct process (v3.2 policy).
+#
+# Install:
+#   sudo cp scripts/systemd/msfrpcd.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable msfrpcd
+#   sudo systemctl start msfrpcd
+#
+# Password: set MSF_RPC_PASSWORD in /home/nhat/VAPT-AI/.env
+# ============================================================
+
+[Unit]
+Description=Metasploit RPC Daemon (msfrpcd)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=nhat
+Group=nhat
+
+# msfrpcd must run from a directory it can write to (for session DB)
+WorkingDirectory=/home/nhat
+
+# Read password from environment file
+EnvironmentFile=/home/nhat/VAPT-AI/.env
+
+# Start msfrpcd:
+#   -U  username (from MSF_RPC_USER env var)
+#   -P  password (from MSF_RPC_PASSWORD env var)
+#   -a  bind address (127.0.0.1 — localhost only, NOT 0.0.0.0)
+#   -p  port (55553)
+#   -S  disable SSL (we're localhost-only; add -s for SSL if needed)
+#   -f  run in foreground (systemd manages daemonization)
+ExecStart=/usr/bin/msfrpcd -U ${MSF_RPC_USER} -P ${MSF_RPC_PASSWORD} -a 127.0.0.1 -p 55553 -S -f
+
+Restart=on-failure
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=msfrpcd
+
+# Security: msfrpcd binds to 127.0.0.1 only — not exposed externally
+# It needs to spawn Metasploit modules (high privilege) — run as user, not root
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/nhat/.msf6 /tmp
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

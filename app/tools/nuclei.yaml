@@ -1,0 +1,107 @@
+# VAPT-AI MCP Tool Wrapper — nuclei
+# ============================================================
+# Tool: nuclei (Fast vulnerability scanner)
+# Category: vuln_scanner
+# WSTG IDs: WSTG-INFO-04 (Search Engine Discovery), WSTG-CONF-01 (Network Configuration)
+# MITRE ATT&CK: T1595.002 (Active Scanning: Vulnerability Scanning)
+# Install: go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest (W1-I)
+# ============================================================
+
+name: nuclei
+command: nuclei
+enabled: true
+description: |
+  Fast, template-based vulnerability scanner. Uses YAML templates to detect
+  CVEs, misconfigurations, exposures, takeovers. 8000+ community templates.
+
+  Examples:
+    - Scan with all templates: nuclei -u <url>
+    - Specific severity: nuclei -u <url> -severity critical,high
+    - Specific tags: nuclei -u <url> -t cves -t exposures
+    - Update templates: nuclei -update-templates
+
+short_description: Template-based vulnerability scanner (8000+ templates)
+
+category: vuln_scanner
+
+wstg_ids:
+  - WSTG-INFO-04  # Search Engine Discovery
+  - WSTG-CONF-01  # Network Configuration
+mitre_attack:
+  - T1595.002  # Vulnerability Scanning
+
+safety_class: active
+
+parameters:
+  - name: target
+    type: string
+    description: 'Target URL (http://example.com) or file with URLs (-list)'
+    required: true
+    flag: "-u"
+
+  - name: templates
+    type: string
+    description: 'Template directory or file (comma-separated for multiple). Default: all templates.'
+    required: false
+    flag: "-t"
+    default: ""
+
+  - name: tags
+    type: string
+    description: Template tags to run (comma-separated, e.g. cves,exposures,misconfig)
+    required: false
+    flag: "-tags"
+    default: ""
+
+  - name: severity
+    type: string
+    description: Severity filter (info,low,medium,high,critical — comma-separated)
+    required: false
+    flag: "-severity"
+    default: "medium,high,critical"
+
+  - name: output_format
+    type: string
+    description: Output format (text, json, jsonl, sarif)
+    required: false
+    flag: "-jsonl"  # JSONL is easiest to parse
+    default: true
+    options: ["text", "json", "jsonl", "sarif"]
+
+  - name: rate_limit
+    type: integer
+    description: Maximum requests per second
+    required: false
+    flag: "-rl"
+    default: 150
+
+  - name: concurrency
+    type: integer
+    description: Number of concurrent templates to run
+    required: false
+    flag: "-c"
+    default: 25
+
+  - name: timeout
+    type: integer
+    description: Timeout per request (seconds)
+    required: false
+    flag: "-timeout"
+    default: 10
+
+  - name: additional_args
+    type: string
+    description: Additional nuclei arguments
+    required: false
+    default: ""
+
+output:
+  max_bytes: 50000
+  format: jsonl
+  parse_hints:
+    finding: '"template-id":"([^"]+)"'
+    severity: '"info":\\{"severity":"([^"]+)"'
+    matched: '"matched":"([^"]+)"'
+
+timeout: 900  # 15 minutes — nuclei can be slow with all templates
+allowed_exit_codes: [0]

@@ -1,0 +1,51 @@
+# ============================================================
+# VAPT-AI v3.2 — Celery Beat (scheduler) systemd unit
+# ============================================================
+# Runs scheduled jobs: disclosure-window notifications, evidence
+# retention purge, etc.
+#
+# Install:
+#   sudo cp scripts/systemd/vapt-ai-celery-beat.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable vapt-ai-celery-beat
+#   sudo systemctl start vapt-ai-celery-beat
+# ============================================================
+
+[Unit]
+Description=VAPT-AI Celery Beat (scheduled jobs)
+After=network.target redis-server.service postgresql.service vapt-ai-celery-worker.service
+Wants=redis-server.service postgresql.service
+Requires=vapt-ai-celery-worker.service
+
+[Service]
+Type=simple
+User=nhat
+Group=nhat
+
+WorkingDirectory=/home/nhat/VAPT-AI
+Environment=PYTHONPATH=/home/nhat/VAPT-AI
+EnvironmentFile=/home/nhat/VAPT-AI/.env
+
+# Celery beat — scheduled job scheduler
+ExecStart=/home/nhat/VAPT-AI/venv/bin/celery -A workers beat -l info
+
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vapt-ai-celery-beat
+
+# Security hardening (same as worker)
+NoNewPrivileges=true
+# PrivateTmp=true
+# ProtectSystem=full
+# ProtectHome=read-only
+# ReadWritePaths=/home/nhat/VAPT-AI/data /home/nhat/VAPT-AI/logs /tmp
+# ProtectKernelTunables=true
+# ProtectKernelModules=true
+# ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

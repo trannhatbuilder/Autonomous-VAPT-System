@@ -1,0 +1,103 @@
+# VAPT-AI MCP Tool Wrapper — gobuster
+# ============================================================
+# Tool: gobuster (Directory/file brute-force)
+# Category: web_scanner
+# WSTG IDs: WSTG-CONF-05 (Review Old Backup and Unreferenced Files), WSTG-ATHZ-01 (Directory Traversal)
+# MITRE ATT&CK: T1595.003 (Wordlist Scanning)
+# Install: apt install gobuster (W1-I)
+# ============================================================
+
+name: gobuster
+command: gobuster
+enabled: true
+description: |
+  Directory/file brute-force tool. Discovers hidden paths using wordlists.
+
+  Examples:
+    - Directory scan: gobuster dir -u <url> -w wordlist.txt
+    - Subdomain scan: gobuster dns -d example.com -w subdomains.txt
+    - vhost scan: gobuster vhost -u <url> -w vhosts.txt
+
+short_description: Directory/file brute-force scanner
+
+category: web_scanner
+
+wstg_ids:
+  - WSTG-CONF-05  # Old Backup and Unreferenced Files
+  - WSTG-ATHZ-01  # Directory Traversal
+mitre_attack:
+  - T1595.003  # Wordlist Scanning
+
+safety_class: active
+
+parameters:
+  - name: mode
+    type: string
+    description: Scan mode (dir, dns, vhost, fuzz)
+    required: true
+    position: 1
+    default: "dir"
+    options: ["dir", "dns", "vhost", "fuzz"]
+
+  - name: target
+    type: string
+    description: Target URL (for dir/vhost/fuzz) or domain (for dns)
+    required: true
+    flag: "-u"
+
+  - name: wordlist
+    type: string
+    description: 'Path to wordlist file (default: /usr/share/wordlists/dirb/common.txt)'
+    required: false
+    flag: "-w"
+    default: "/usr/share/wordlists/dirb/common.txt"
+
+  - name: extensions
+    type: string
+    description: File extensions to search (comma-separated, e.g. php,asp,jsp)
+    required: false
+    flag: "-x"
+    default: ""
+
+  - name: status_codes
+    type: string
+    description: 'Status codes to include (default: 200,204,301,302,307,401,403)'
+    required: false
+    flag: "-s"
+    default: ""
+
+  - name: threads
+    type: integer
+    description: Number of concurrent threads
+    required: false
+    flag: "-t"
+    default: 50
+
+  - name: timeout
+    type: integer
+    description: HTTP timeout (seconds)
+    required: false
+    flag: "-to"
+    default: 10
+
+  - name: no_progress
+    type: bool
+    description: Hide progress bar (cleaner output)
+    required: false
+    flag: "-q"
+    default: true
+
+  - name: additional_args
+    type: string
+    description: Additional gobuster arguments
+    required: false
+    default: ""
+
+output:
+  max_bytes: 50000
+  format: text
+  parse_hints:
+    found: '(\\S+)\\s+\\(Status:\\s+(\\d+)\\)\\s+\\[Size:\\s+(\\d+)\\]'
+
+timeout: 600
+allowed_exit_codes: [0, 1]  # 1 = no results found
