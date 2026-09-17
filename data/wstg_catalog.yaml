@@ -1,0 +1,1401 @@
+version: '4.2'
+source: https://owasp.org/www-project-web-security-testing-guide/
+last_updated: '2026-09-15'
+license: CC BY-SA 4.0 (OWASP WSTG is open source)
+categories:
+- code: INFO
+  name: Information Gathering
+- code: CONF
+  name: Configuration and Deployment Management
+- code: IDM
+  name: Identity Management
+- code: ATHN
+  name: Authentication
+- code: ATHZ
+  name: Authorization
+- code: SESS
+  name: Session Management
+- code: INPV
+  name: Input Validation
+- code: ERR
+  name: Error Handling
+- code: CRYP
+  name: Weak Cryptography
+- code: BUSL
+  name: Business Logic
+- code: CLNT
+  name: Client-side
+- code: APIT
+  name: APIs
+tests:
+- wstg_id: WSTG-INFO-01
+  name: Conduct Search Engine Discovery and Reconnaissance for Information Leakage
+  category: Information Gathering
+  description: Test whether search engines disclose sensitive information about the application, such as credentials, internal
+    paths, error messages, or hidden endpoints. Use search engine dorking (Google, Shodan, etc.) to find indexed sensitive
+    data.
+  related_mitre_attack:
+  - T1592
+  - T1590
+  related_cwe:
+  - CWE-200
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INFO-02
+  name: Fingerprint Web Server
+  category: Information Gathering
+  description: Identify the web server software, version, and underlying OS by examining HTTP headers (Server, X-Powered-By),
+    error pages, default pages, and behavior to specific requests. Used to find known CVEs for that server version.
+  related_mitre_attack:
+  - T1592
+  related_cwe:
+  - CWE-200
+  - CWE-205
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INFO-03
+  name: Review Webserver Metafiles for Information Leakage
+  category: Information Gathering
+  description: Review robots.txt, sitemap.xml, .well-known/, META tags, and other metafiles for sensitive paths, admin URLs,
+    or hidden endpoints that should not be publicly accessible.
+  related_mitre_attack:
+  - T1590
+  related_cwe:
+  - CWE-200
+  - CWE-538
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INFO-04
+  name: Enumerate Applications on Webserver
+  category: Information Gathering
+  description: Discover all applications hosted on the web server (multiple virtual hosts, subdomains, default apps). Useful
+    to find forgotten or staging applications exposed on production servers.
+  related_mitre_attack:
+  - T1590
+  related_cwe:
+  - CWE-200
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INFO-05
+  name: Review Webpage Content for Information Leakage
+  category: Information Gathering
+  description: Manually inspect page source, HTML comments, JavaScript files, CSS, and embedded resources for sensitive information
+    such as credentials, internal IPs, developer names, email addresses, or version strings.
+  related_mitre_attack:
+  - T1592
+  related_cwe:
+  - CWE-200
+  - CWE-615
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INFO-06
+  name: Identify Application Entry Points
+  category: Information Gathering
+  description: 'Map all entry points to the application: HTTP methods supported, URL parameters, form fields, file uploads,
+    API endpoints, WebSocket connections. Each entry point is a potential attack surface for injection.'
+  related_mitre_attack:
+  - T1590
+  - T1059
+  related_cwe:
+  - CWE-200
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INFO-07
+  name: Map Execution Paths Through Application
+  category: Information Gathering
+  description: Spider the application to enumerate all reachable pages, including those not linked from the homepage. Identify
+    business workflows (login → dashboard → checkout → logout) so they can be fuzzed systematically.
+  related_mitre_attack:
+  - T1590
+  related_cwe:
+  - CWE-200
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INFO-08
+  name: Fingerprint Web Application Framework
+  category: Information Gathering
+  description: Identify the web framework (Rails, Django, Laravel, Express, Spring, .NET) by file extensions, default cookies
+    (e.g. PHPSESSID, JSESSIONID), framework-specific HTTP headers, and default error pages.
+  related_mitre_attack:
+  - T1592
+  related_cwe:
+  - CWE-200
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INFO-09
+  name: Fingerprint Web Application
+  category: Information Gathering
+  description: 'Identify the application (WordPress, Drupal, Joomla, custom CMS) using fingerprinting techniques: known file
+    paths (wp-admin, /admin), version banners in HTTP headers, generator meta tags, and framework-specific cookie names.'
+  related_mitre_attack:
+  - T1592
+  related_cwe:
+  - CWE-200
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INFO-10
+  name: Identify Application Architecture
+  category: Information Gathering
+  description: 'Map the application''s architecture: frontend framework (React, Vue, Angular), backend framework, database,
+    message queue, caching layer, third-party integrations. Useful for planning targeted attacks.'
+  related_mitre_attack:
+  - T1592
+  related_cwe:
+  - CWE-200
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INFO-11
+  name: Map Network Architecture
+  category: Information Gathering
+  description: 'Identify the network architecture around the web app: load balancers, reverse proxies, WAFs, CDNs, database
+    servers, internal API endpoints. Useful for understanding the attack surface beyond a single host.'
+  related_mitre_attack:
+  - T1590
+  - T1046
+  related_cwe:
+  - CWE-200
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CONF-01
+  name: Test Network Infrastructure Configuration
+  category: Configuration and Deployment Management
+  description: 'Review network architecture: DMZ placement, firewall rules, TLS termination points, WAF rules, load balancer
+    config. Check for unintended exposure of internal services to the public internet.'
+  related_mitre_attack:
+  - T1046
+  - T1590
+  related_cwe:
+  - CWE-16
+  - CWE-200
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CONF-02
+  name: Test Application Platform Configuration
+  category: Configuration and Deployment Management
+  description: 'Review web server config (Apache httpd.conf, Nginx nginx.conf, IIS web.config) for insecure settings: directory
+    listing enabled, hidden admin panels exposed, default error pages, missing security headers.'
+  related_mitre_attack:
+  - T1190
+  related_cwe:
+  - CWE-16
+  - CWE-538
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CONF-03
+  name: Test File Extensions Handling for Sensitive Information
+  category: Configuration and Deployment Management
+  description: Test whether the server properly handles file extensions. Look for backup files (.bak, .old, .orig), source
+    files (.php.bak, .py~), and configuration files (.env, config.json, web.config) accessible via direct URL.
+  related_mitre_attack:
+  - T1190
+  - T1552
+  related_cwe:
+  - CWE-200
+  - CWE-552
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CONF-04
+  name: Review Old Backup and Unreferenced Files for Sensitive Information
+  category: Configuration and Deployment Management
+  description: Look for old backup files, unreferenced pages, debug endpoints, and abandoned admin panels. These often contain
+    hardcoded credentials, internal paths, or unpatched vulnerabilities.
+  related_mitre_attack:
+  - T1190
+  - T1552
+  related_cwe:
+  - CWE-200
+  - CWE-552
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CONF-05
+  name: Enumerate Infrastructure and Application Admin Interfaces
+  category: Configuration and Deployment Management
+  description: Discover admin interfaces (/admin, /wp-admin, /manager, /console) that should not be publicly accessible. Test
+    for default credentials, bypass via direct URL access, or exposed admin APIs.
+  related_mitre_attack:
+  - T1190
+  - T1110
+  related_cwe:
+  - CWE-200
+  - CWE-749
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CONF-06
+  name: Test HTTP Methods
+  category: Configuration and Deployment Management
+  description: Test which HTTP methods are accepted (GET, POST, PUT, DELETE, TRACE, OPTIONS, CONNECT, PATCH). TRACE method
+    enables Cross-Site Tracing (XST). PUT/DELETE may allow unauthorized file manipulation.
+  related_mitre_attack:
+  - T1190
+  related_cwe:
+  - CWE-650
+  - CWE-749
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CONF-07
+  name: Test HTTP Strict Transport Security
+  category: Configuration and Deployment Management
+  description: 'Verify HSTS header is set: Strict-Transport-Security: max-age=31536000; includeSubDomains; preload. Without
+    HSTS, users can be downgraded to HTTP via MITM attacks.'
+  related_mitre_attack:
+  - T1557
+  related_cwe:
+  - CWE-319
+  - CWE-1021
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CONF-08
+  name: Test RIA Cross Domain Policy
+  category: Configuration and Deployment Management
+  description: Review crossdomain.xml and clientaccesspolicy.xml for over-permissive policies (allow-access-from domain="*").
+    These files govern Flash/Silverlight cross-domain requests and can enable data exfiltration.
+  related_mitre_attack:
+  - T1190
+  related_cwe:
+  - CWE-942
+  - CWE-200
+  applicable_to_web_mvp: false
+- wstg_id: WSTG-CONF-09
+  name: Test File Permission
+  category: Configuration and Deployment Management
+  description: 'Verify file permissions on the web server: config files should not be world-readable, upload directories should
+    not be executable, log files should not be web-accessible.'
+  related_mitre_attack:
+  - T1190
+  related_cwe:
+  - CWE-732
+  - CWE-276
+  applicable_to_web_mvp: false
+- wstg_id: WSTG-CONF-10
+  name: Test for Subdomain Takeover
+  category: Configuration and Deployment Management
+  description: Check if any subdomains point to decommissioned cloud services (S3 buckets, Heroku apps, GitHub Pages). Attackers
+    can claim those resources and serve malicious content from a trusted subdomain.
+  related_mitre_attack:
+  - T1190
+  - T1584
+  related_cwe:
+  - CWE-350
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CONF-11
+  name: Test Cloud Storage
+  category: Configuration and Deployment Management
+  description: Check cloud storage buckets (S3, GCS, Azure Blob) for public-read permissions, anonymous access, or overly
+    permissive IAM policies. Look for sensitive files (backups, .env, db dumps) exposed via misconfigured bucket ACLs.
+  related_mitre_attack:
+  - T1530
+  - T1580
+  related_cwe:
+  - CWE-732
+  - CWE-200
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-IDM-01
+  name: Test Role Definitions
+  category: Identity Management
+  description: 'Review application role definitions: are there overly broad roles? Are role transitions audited? Are privilege
+    boundaries clearly enforced between user types (anonymous, registered, admin, super-admin)?'
+  related_mitre_attack:
+  - T1078
+  - T1069
+  related_cwe:
+  - CWE-269
+  - CWE-285
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-IDM-02
+  name: Test User Registration Process
+  category: Identity Management
+  description: 'Test the user registration process: can users register with disposable emails? Is email verification enforced?
+    Can users register with reserved usernames (admin, root, support)? Are usernames predictable (sequential IDs)?'
+  related_mitre_attack:
+  - T1078
+  - T1136
+  related_cwe:
+  - CWE-287
+  - CWE-290
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-IDM-03
+  name: Test Account Provisioning Process
+  category: Identity Management
+  description: 'Test how new accounts are provisioned: are default permissions least-privilege? Are accounts auto-activated
+    without verification? Can users self-elevate privileges during registration?'
+  related_mitre_attack:
+  - T1078
+  - T1136
+  related_cwe:
+  - CWE-269
+  - CWE-285
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-IDM-04
+  name: Testing for Account Enumeration and Guessable User Account
+  category: Identity Management
+  description: Test login and password reset flows for username enumeration. Different error messages for 'user not found'
+    vs 'wrong password' enable attacker to enumerate valid usernames via timing or response differences.
+  related_mitre_attack:
+  - T1110
+  - T1580
+  related_cwe:
+  - CWE-204
+  - CWE-307
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-IDM-05
+  name: Testing for Weak or Unenforced Username Policy
+  category: Identity Management
+  description: 'Test if username policy is enforced: are very short usernames allowed? Are special characters permitted? Are
+    usernames case-sensitive (a potential confusion attack)? Can two users have visually identical usernames via Unicode normalization?'
+  related_mitre_attack:
+  - T1078
+  related_cwe:
+  - CWE-287
+  - CWE-176
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ATHN-01
+  name: Testing for Credentials Transported over an Encrypted Channel
+  category: Authentication
+  description: Verify that login forms submit credentials over HTTPS only. Check for mixed-content (form action is HTTP),
+    redirect to HTTP after login, or credential transmission via URL parameters (logged in server logs).
+  related_mitre_attack:
+  - T1557
+  - T1040
+  related_cwe:
+  - CWE-319
+  - CWE-522
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ATHN-02
+  name: Testing for Default Credentials
+  category: Authentication
+  description: Test for default admin/vendor credentials (admin/admin, root/root, admin/password). Common in IoT devices,
+    embedded systems, and forgotten staging environments.
+  related_mitre_attack:
+  - T1078
+  - T1110
+  related_cwe:
+  - CWE-521
+  - CWE-798
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ATHN-03
+  name: Testing for Weak Lock Out Mechanism
+  category: Authentication
+  description: Test the account lockout policy after failed login attempts. Without lockout, brute-force attacks are feasible.
+    Verify CAPTCHA, rate limit, or temporary lockout after N failed attempts.
+  related_mitre_attack:
+  - T1110
+  related_cwe:
+  - CWE-307
+  - CWE-799
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ATHN-04
+  name: Testing for Bypassing Authentication Schema
+  category: Authentication
+  description: 'Test for authentication bypass: SQL injection in login form, forced browsing past login (direct URL access
+    to /dashboard without session), parameter tampering (admin=true), HTTP verb tampering, response manipulation.'
+  related_mitre_attack:
+  - T1190
+  - T1078
+  related_cwe:
+  - CWE-287
+  - CWE-89
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ATHN-05
+  name: Test User Permission for Forced Browsing Past Access Control Checks
+  category: Authentication
+  description: Test if authenticated users can access other users' resources by direct URL access. Vertical (user→admin) and
+    horizontal (user→user) privilege escalation via forced browsing.
+  related_mitre_attack:
+  - T1078
+  - T1548
+  related_cwe:
+  - CWE-285
+  - CWE-639
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ATHN-06
+  name: Test Browser Cache Strength for Sensitive Page Caching
+  category: Authentication
+  description: 'Verify sensitive pages (account dashboard, billing info) send Cache-Control: no-store/no-cache. Otherwise
+    shared/public browsers may leak sensitive data to subsequent users.'
+  related_mitre_attack:
+  - T1552
+  - T1539
+  related_cwe:
+  - CWE-525
+  - CWE-522
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ATHN-07
+  name: Testing for Weak Password Policy
+  category: Authentication
+  description: 'Verify password policy enforces: minimum length (12+ chars), complexity (mix of upper/lower/digits/symbols),
+    breach check (haveibeenpwned API), no reuse of last N passwords, mandatory rotation only if risk-based.'
+  related_mitre_attack:
+  - T1110
+  related_cwe:
+  - CWE-521
+  - CWE-522
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ATHN-08
+  name: Testing for Weak Security Question/Answer
+  category: Authentication
+  description: 'Test password reset security questions: are they guessable (mother''s maiden name, first pet)? Are answers
+    case-insensitive? Can multiple guesses be made without lockout? Should be deprecated in favor of MFA.'
+  related_mitre_attack:
+  - T1110
+  related_cwe:
+  - CWE-521
+  - CWE-640
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ATHN-09
+  name: Testing for Weak Password Change or Reset Functionalities
+  category: Authentication
+  description: 'Test password reset flow: is the reset token random and time-limited? Can reset token be reused? Does the
+    email contain the token in URL (logged in mail server)? Can user A reset user B''s password by parameter tampering?'
+  related_mitre_attack:
+  - T1078
+  related_cwe:
+  - CWE-640
+  - CWE-522
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ATHN-10
+  name: Testing for Weaker Authentication in Alternative Channel
+  category: Authentication
+  description: Test if alternative authentication channels (mobile app, mobile web, API, desktop client) have weaker auth
+    than primary web. E.g. mobile API may accept HTTP, allow 4-digit PIN, or skip MFA.
+  related_mitre_attack:
+  - T1078
+  related_cwe:
+  - CWE-287
+  - CWE-308
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ATHZ-01
+  name: Testing Directory Traversal/File Include
+  category: Authorization
+  description: Test for path traversal (../../../etc/passwd) and file inclusion (LFI/RFI). Look for parameters that take filenames
+    or paths, and try to read system files or include remote malicious scripts.
+  related_mitre_attack:
+  - T1190
+  - T1083
+  related_cwe:
+  - CWE-22
+  - CWE-98
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ATHZ-02
+  name: Testing for Bypassing Authorization Schema
+  category: Authorization
+  description: Test if authorization checks can be bypassed via parameter manipulation, hidden form fields, cookie tampering,
+    or direct API calls. Horizontal (user A accesses user B's data) and vertical (user accesses admin functions) bypass.
+  related_mitre_attack:
+  - T1548
+  - T1078
+  related_cwe:
+  - CWE-285
+  - CWE-639
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ATHZ-03
+  name: Testing for Privilege Escalation
+  category: Authorization
+  description: 'Test if a low-privilege user can escalate to higher privileges (e.g. regular user → admin). Methods: parameter
+    tambling (role=admin), exploiting insecure direct object references, or chaining multiple lower-severity bugs.'
+  related_mitre_attack:
+  - T1548
+  - T1078
+  related_cwe:
+  - CWE-269
+  - CWE-285
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ATHZ-04
+  name: Testing for Insecure Direct Object References
+  category: Authorization
+  description: 'Test IDOR: can user A access user B''s resources by changing /users/123 to /users/124? Test on URLs, POST
+    body parameters, and API endpoints. Each resource ID is a potential IDOR target.'
+  related_mitre_attack:
+  - T1078
+  related_cwe:
+  - CWE-639
+  - CWE-285
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ATHZ-05
+  name: Testing for Mass Assignment
+  category: Authorization
+  description: 'Test mass assignment: send extra fields in JSON/POST body that the server blindly maps to model attributes
+    (e.g. {"email":"new@x.com","is_admin":true}). Frameworks like Rails/Django auto-bind request params to models.'
+  related_mitre_attack:
+  - T1548
+  related_cwe:
+  - CWE-915
+  - CWE-1321
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ATHZ-06
+  name: Testing for Function Level Authorization Misconfiguration (Vertical)
+  category: Authorization
+  description: Test if regular users can invoke admin-only functions (e.g. /admin/users/delete) by direct URL access. The
+    server should verify user role on every protected function call, not just hide the menu.
+  related_mitre_attack:
+  - T1548
+  - T1078
+  related_cwe:
+  - CWE-285
+  - CWE-749
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ATHZ-07
+  name: Testing for Missing Function Level Access Control
+  category: Authorization
+  description: Test for hidden admin functions exposed at predictable URLs (/admin, /admin/export, /admin/debug). Even if
+    the UI hides them, the endpoints may still be accessible without authentication.
+  related_mitre_attack:
+  - T1190
+  - T1078
+  related_cwe:
+  - CWE-285
+  - CWE-552
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-SESS-01
+  name: Testing for Session Management Schema
+  category: Session Management
+  description: 'Review the overall session management: cookie-based vs token-based (JWT), session timeout, concurrent session
+    limit, session token structure (random vs predictable), session storage (server-side vs client-side).'
+  related_mitre_attack:
+  - T1556
+  - T1539
+  related_cwe:
+  - CWE-384
+  - CWE-613
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-SESS-02
+  name: Testing for Cookies Attributes
+  category: Session Management
+  description: 'Verify cookie security flags: HttpOnly (prevents JS access), Secure (HTTPS only), SameSite=Lax/Strict (CSRF
+    defense), Path/Domain scoping. Missing flags enable XSS session theft and CSRF.'
+  related_mitre_attack:
+  - T1539
+  - T1185
+  related_cwe:
+  - CWE-1004
+  - CWE-614
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-SESS-03
+  name: Testing for Session Fixation
+  category: Session Management
+  description: Test if session ID changes after login. If not, an attacker can pre-set a known session ID on victim's browser,
+    wait for victim to log in, then hijack the now-authenticated session.
+  related_mitre_attack:
+  - T1556
+  - T1539
+  related_cwe:
+  - CWE-384
+  - CWE-613
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-SESS-04
+  name: Testing for Exposed Session Variables
+  category: Session Management
+  description: Test if session variables are exposed via URLs (sessionid in query string), logs (server access logs), or referrer
+    headers (leaked to third-party sites when user clicks external link).
+  related_mitre_attack:
+  - T1539
+  - T1552
+  related_cwe:
+  - CWE-200
+  - CWE-522
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-SESS-05
+  name: Testing for CSRF
+  category: Session Management
+  description: 'Test Cross-Site Request Forgery: can an attacker site trigger state-changing requests (fund transfer, password
+    change, privilege elevation) on victim''s authenticated session? Look for missing CSRF tokens, weak token validation,
+    or SameSite cookie bypass.'
+  related_mitre_attack:
+  - T1185
+  - T1556
+  related_cwe:
+  - CWE-352
+  - CWE-642
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-SESS-06
+  name: Testing for Cross Site Session Hijacking (CSRF + XSS chained)
+  category: Session Management
+  description: 'Test for chained CSRF + XSS attacks: XSS can read cookies if HttpOnly is missing, then CSRF can use stolen
+    session to forge requests. Defense-in-depth requires both XSS prevention and CSRF tokens.'
+  related_mitre_attack:
+  - T1185
+  - T1059
+  related_cwe:
+  - CWE-79
+  - CWE-352
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-SESS-07
+  name: Testing for Session Timeout
+  category: Session Management
+  description: Verify session expires after a reasonable idle period (15-30 minutes for sensitive apps). Long-lived sessions
+    increase exposure if device is shared or compromised. Test server-side session invalidation on logout.
+  related_mitre_attack:
+  - T1556
+  related_cwe:
+  - CWE-613
+  - CWE-614
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-SESS-08
+  name: Testing for Session Puzzling
+  category: Session Management
+  description: 'Test session puzzling: does the app reuse the same session variable for multiple purposes (e.g. authenticated
+    user vs. user-being-logged-in)? Attackers can manipulate state by setting session vars early.'
+  related_mitre_attack:
+  - T1078
+  related_cwe:
+  - CWE-488
+  - CWE-287
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-SESS-09
+  name: Testing for Session Hijacking
+  category: Session Management
+  description: 'Test session hijacking: predict session IDs, sniff session cookies over HTTP, steal via XSS, or use session
+    fixation. Verify session IDs are sufficiently random (CSPRNG, ≥128 bits).'
+  related_mitre_attack:
+  - T1539
+  - T1185
+  related_cwe:
+  - CWE-384
+  - CWE-330
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-SESS-10
+  name: Testing for Weak Session Generation
+  category: Session Management
+  description: Test if session IDs are predictable (sequential, timestamp-based, MD5 of username). Use statistical analysis
+    on collected session IDs to detect non-randomness. Strong sessions use CSPRNG with ≥128 bits entropy.
+  related_mitre_attack:
+  - T1539
+  related_cwe:
+  - CWE-330
+  - CWE-338
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INPV-01
+  name: Testing for Reflected Cross Site Scripting
+  category: Input Validation
+  description: 'Test reflected XSS: user input is reflected in HTML response without proper encoding. Inject <script>alert(1)</script>
+    in parameters, headers (User-Agent, Referer), and URL paths. Verify CSP and output encoding.'
+  related_mitre_attack:
+  - T1059
+  - T1185
+  related_cwe:
+  - CWE-79
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INPV-02
+  name: Testing for Stored Cross Site Scripting
+  category: Input Validation
+  description: 'Test stored XSS: malicious input is stored (in DB, comment, profile field) and rendered later when other users
+    view the page. Persistent XSS is more dangerous than reflected — fires on every page view.'
+  related_mitre_attack:
+  - T1059
+  - T1185
+  related_cwe:
+  - CWE-79
+  - CWE-610
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INPV-03
+  name: Testing for HTTP Verb Tampering
+  category: Input Validation
+  description: 'Test HTTP verb tampering: send unusual methods (PUT, DELETE, TRACE, CONNECT, JUNKMETHOD) to bypass access
+    controls. Some frameworks fall back to GET handler when the requested method is not implemented, bypassing auth middleware.'
+  related_mitre_attack:
+  - T1190
+  related_cwe:
+  - CWE-650
+  - CWE-285
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INPV-04
+  name: Testing for HTTP Parameter Pollution
+  category: Input Validation
+  description: 'Test HPP: send duplicate parameters (?id=1&id=2). Different frameworks pick different values (first, last,
+    or concatenate). Attackers exploit this to bypass WAFs or alter backend behavior.'
+  related_mitre_attack:
+  - T1190
+  related_cwe:
+  - CWE-1235
+  - CWE-235
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INPV-05
+  name: Testing for SQL Injection
+  category: Input Validation
+  description: 'Test SQL injection: inject SQL payloads ('' OR 1=1--, UNION SELECT, time-based, blind) in parameters that
+    reach a database query. Use sqlmap for automated detection. Blind SQLi may require timing-based or boolean-based detection.'
+  related_mitre_attack:
+  - T1190
+  - T1078
+  related_cwe:
+  - CWE-89
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INPV-06
+  name: Testing for LDAP Injection
+  category: Input Validation
+  description: 'Test LDAP injection: inject LDAP query syntax (*)(uid=*)) in parameters used for directory lookups. Can bypass
+    authentication or extract directory data. Common in enterprise apps with AD integration.'
+  related_mitre_attack:
+  - T1190
+  related_cwe:
+  - CWE-90
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INPV-07
+  name: Testing for ORM Injection
+  category: Input Validation
+  description: 'Test ORM injection: inject ORM-specific syntax (Hibernate HQL, Django ORM, SQLAlchemy) that may bypass traditional
+    SQL injection filters. ORM frameworks can still be vulnerable if user input is concatenated into ORM queries.'
+  related_mitre_attack:
+  - T1190
+  related_cwe:
+  - CWE-89
+  - CWE-94
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INPV-08
+  name: Testing for XML Injection
+  category: Input Validation
+  description: 'Test XML injection: inject XML tags into parameters used to build XML documents (e.g. SOAP requests). Can
+    manipulate XML structure to bypass auth, inject additional elements, or read internal files.'
+  related_mitre_attack:
+  - T1190
+  related_cwe:
+  - CWE-91
+  - CWE-611
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INPV-09
+  name: Testing for SSI Injection
+  category: Input Validation
+  description: 'Test Server-Side Includes injection: inject <!--#exec cmd="ls" --> into pages processed by SSI-enabled servers.
+    SSI directives can execute commands, read files, or include remote content.'
+  related_mitre_attack:
+  - T1190
+  - T1059
+  related_cwe:
+  - CWE-94
+  - CWE-97
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INPV-10
+  name: Testing for XPath Injection
+  category: Input Validation
+  description: 'Test XPath injection: inject XPath syntax ('' or ''1''=''1) into parameters used to query XML data stores.
+    XPath 1.0 has no parameterized queries, making injection common in XML-backed apps.'
+  related_mitre_attack:
+  - T1190
+  related_cwe:
+  - CWE-643
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INPV-11
+  name: Testing for IMAP/SMTP Injection
+  category: Input Validation
+  description: 'Test IMAP/SMTP injection: inject CRLF + SMTP commands into email-related parameters (To, From, Subject). Can
+    send spam via the server, manipulate mailbox state, or read other users'' emails.'
+  related_mitre_attack:
+  - T1190
+  - T1564
+  related_cwe:
+  - CWE-93
+  - CWE-147
+  applicable_to_web_mvp: false
+- wstg_id: WSTG-INPV-12
+  name: Testing for Code Injection
+  category: Input Validation
+  description: 'Test code injection: inject language-native code (PHP eval, Python exec, Ruby eval) into parameters that reach
+    eval() or similar. Often combined with file inclusion or template injection.'
+  related_mitre_attack:
+  - T1059
+  - T1190
+  related_cwe:
+  - CWE-94
+  - CWE-95
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INPV-13
+  name: Testing for Command Injection
+  category: Input Validation
+  description: 'Test OS command injection: inject shell metacharacters (; | ` $() && ||) into parameters passed to system()
+    or popen(). Most critical web vuln — leads to RCE. Use safe APIs (subprocess with list args) instead of shell=True.'
+  related_mitre_attack:
+  - T1059
+  - T1190
+  related_cwe:
+  - CWE-78
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INPV-14
+  name: Testing for Buffer Overflow
+  category: Input Validation
+  description: 'Test buffer overflow: send long inputs (10,000+ chars) to native-code backends (C/C++ apps, IIS extensions).
+    May crash the service (DoS) or allow arbitrary code execution. Less common in modern interpreted languages.'
+  related_mitre_attack:
+  - T1190
+  - T1499
+  related_cwe:
+  - CWE-120
+  - CWE-119
+  applicable_to_web_mvp: false
+- wstg_id: WSTG-INPV-15
+  name: Testing for Incubated Vulnerability
+  category: Input Validation
+  description: 'Test incubated vulnerabilities: malicious input stored now, but only exploited later via a different vector
+    (e.g. stored XSS that activates when admin views the user list, or stored SQLi in a batch job that runs at midnight).'
+  related_mitre_attack:
+  - T1059
+  - T1190
+  related_cwe:
+  - CWE-79
+  - CWE-89
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INPV-16
+  name: Testing for HTTP Splitting/Smuggling
+  category: Input Validation
+  description: Test HTTP splitting (CRLF injection in response headers) and smuggling (CL-CL or CL-TE desync between front-end
+    and back-end). Smuggling bypasses WAFs and enables request queue poisoning.
+  related_mitre_attack:
+  - T1190
+  - T1557
+  related_cwe:
+  - CWE-93
+  - CWE-444
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INPV-17
+  name: Testing for HTTP Incoming Requests
+  category: Input Validation
+  description: 'Test for handling of unusual HTTP requests: oversized headers, malformed HTTP/2 frames, slow-body attacks
+    (slowloris), request smuggling attempts. Server should reject malformed requests and rate-limit abusive clients.'
+  related_mitre_attack:
+  - T1190
+  - T1499
+  related_cwe:
+  - CWE-444
+  - CWE-770
+  applicable_to_web_mvp: false
+- wstg_id: WSTG-INPV-18
+  name: Testing for Host Header Injection
+  category: Input Validation
+  description: 'Test Host header injection: inject malicious Host value to poison password-reset emails (link points to attacker-controlled
+    domain), cache poisoning, or routing bypass.'
+  related_mitre_attack:
+  - T1190
+  - T1557
+  related_cwe:
+  - CWE-601
+  - CWE-444
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INPV-19
+  name: Testing for Server-side Template Injection
+  category: Input Validation
+  description: 'Test SSTI: inject template syntax ({{7*7}}, ${7*7}, <%= 7*7 %>) into parameters rendered by Jinja2, Twig,
+    Freemarker, Velocity, Handlebars. SSTI can lead to RCE via template engine escape.'
+  related_mitre_attack:
+  - T1059
+  - T1190
+  related_cwe:
+  - CWE-94
+  - CWE-1336
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-INPV-20
+  name: Testing for Server-Side Request Forgery
+  category: Input Validation
+  description: 'Test SSRF: inject internal URLs (http://localhost:8080, http://169.254.169.254/metadata) into parameters that
+    fetch URLs server-side. Can read internal-only APIs, cloud metadata, or scan internal network.'
+  related_mitre_attack:
+  - T1190
+  - T1046
+  related_cwe:
+  - CWE-918
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ERR-01
+  name: Testing for Improper Error Handling
+  category: Error Handling
+  description: 'Test if the app handles errors gracefully: are stack traces returned to the client? Are internal paths disclosed?
+    Does the app fail open (allow access) or fail closed (deny) when an exception occurs?'
+  related_mitre_attack:
+  - T1190
+  related_cwe:
+  - CWE-209
+  - CWE-755
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ERR-02
+  name: Testing for Stack Traces
+  category: Error Handling
+  description: Trigger errors (divide by zero, malformed JSON, large inputs) and check if stack traces are returned. Stack
+    traces disclose framework versions, internal file paths, and library internals useful for further exploitation.
+  related_mitre_attack:
+  - T1190
+  - T1592
+  related_cwe:
+  - CWE-209
+  - CWE-215
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ERR-03
+  name: Testing for SQL Errors (Information Disclosure via SQL Errors)
+  category: Error Handling
+  description: 'Test if SQL errors disclose query structure: send malformed SQL syntax in inputs and check error messages
+    for table names, column names, or DB version info. Useful for refining SQL injection attacks.'
+  related_mitre_attack:
+  - T1190
+  related_cwe:
+  - CWE-209
+  - CWE-89
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ERR-04
+  name: Testing for Vulnerable Remember Password
+  category: Error Handling
+  description: 'Test ''Remember Me'' cookies: are they hashed/encrypted? Can they be replayed after password change? Do they
+    expire? Are they predictable (user_id-based)? Weak remember-me tokens enable long-term account takeover.'
+  related_mitre_attack:
+  - T1556
+  - T1539
+  related_cwe:
+  - CWE-522
+  - CWE-565
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ERR-05
+  name: Testing for File Path Manipulation
+  category: Error Handling
+  description: 'Test file path manipulation: inject ../, ..\, %2e%2e%2f in URL paths and parameters used to read/write files.
+    Can lead to path traversal, file overwrite, or arbitrary file read.'
+  related_mitre_attack:
+  - T1190
+  - T1083
+  related_cwe:
+  - CWE-22
+  - CWE-73
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ERR-06
+  name: Testing for Internal IP Disclosure
+  category: Error Handling
+  description: Trigger redirects (3xx) or error pages that include internal IPs (e.g. proxy header X-Forwarded-For, error
+    page 'Contact admin@10.0.0.5'). Internal IPs reveal network topology for lateral movement.
+  related_mitre_attack:
+  - T1590
+  - T1046
+  related_cwe:
+  - CWE-200
+  - CWE-209
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ERR-07
+  name: Testing for Password Field Autocomplete
+  category: Error Handling
+  description: Verify password fields have autocomplete=off. Otherwise browsers may store credentials and leak them on shared
+    devices or via browser extensions.
+  related_mitre_attack:
+  - T1552
+  related_cwe:
+  - CWE-522
+  - CWE-525
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-ERR-08
+  name: Testing for Sensitive Information in Source Code
+  category: Error Handling
+  description: Review HTML/JS source for hardcoded credentials, API keys, internal URLs, debug flags, or commented-out credentials.
+    JavaScript bundles are common sources of leaked secrets.
+  related_mitre_attack:
+  - T1552
+  - T1592
+  related_cwe:
+  - CWE-200
+  - CWE-547
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CRYP-01
+  name: Testing for Weak SSL/TLS Ciphers, Insufficient Transport Layer Protection
+  category: Weak Cryptography
+  description: 'Test TLS configuration: outdated protocols (SSLv2/v3, TLS 1.0/1.1), weak ciphers (RC4, 3DES, CBC), small key
+    sizes (<2048-bit RSA), missing forward secrecy. Use ssllabs.com or testssl.sh for automated scan.'
+  related_mitre_attack:
+  - T1557
+  - T1040
+  related_cwe:
+  - CWE-326
+  - CWE-327
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CRYP-02
+  name: Testing for Padding Oracle
+  category: Weak Cryptography
+  description: 'Test padding oracle: send modified ciphertexts to a decryption endpoint and observe whether error messages
+    distinguish padding errors from MAC errors. Enables plaintext recovery via POODLE-style attacks.'
+  related_mitre_attack:
+  - T1190
+  related_cwe:
+  - CWE-209
+  - CWE-310
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CRYP-03
+  name: Testing for Sensitive Information Sent via Unencrypted Channels
+  category: Weak Cryptography
+  description: Verify sensitive data (passwords, session tokens, PII, payment data) is transmitted only over HTTPS. Check
+    for HTTP form submissions, plain HTTP API calls, or mixed-content on HTTPS pages.
+  related_mitre_attack:
+  - T1040
+  - T1557
+  related_cwe:
+  - CWE-319
+  - CWE-311
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CRYP-04
+  name: Testing for Weak Encryption
+  category: Weak Cryptography
+  description: 'Test for use of weak crypto algorithms: MD5/SHA1 for password hashing (use bcrypt/scrypt/argon2), ECB mode
+    (use GCM/CBC), DES/3DES (use AES-256), hardcoded keys, or insecure random number generators (use CSPRNG).'
+  related_mitre_attack:
+  - T1110
+  - T1552
+  related_cwe:
+  - CWE-327
+  - CWE-326
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CRYP-05
+  name: Testing for Subresource Integrity
+  category: Weak Cryptography
+  description: Verify third-party scripts (CDN-hosted jQuery, analytics, ads) include integrity attribute (SRI hash). Without
+    SRI, a compromised CDN can inject malicious JS into your site.
+  related_mitre_attack:
+  - T1195
+  - T1059
+  related_cwe:
+  - CWE-829
+  - CWE-353
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CRYP-06
+  name: Testing for Source Code Disclosure (via Crypto Misuse)
+  category: Weak Cryptography
+  description: Test for source code disclosure via path traversal, .git/.svn directory exposure, debug endpoints, or improper
+    file extensions. Combined with crypto misuse, source code often reveals hardcoded secrets.
+  related_mitre_attack:
+  - T1552
+  - T1190
+  related_cwe:
+  - CWE-200
+  - CWE-540
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CRYP-07
+  name: Testing for Weak Random Number Generator
+  category: Weak Cryptography
+  description: Test if session tokens, CSRF tokens, password reset tokens use cryptographically secure RNG (CSPRNG). Predictable
+    tokens enable session hijacking, CSRF bypass, or account takeover.
+  related_mitre_attack:
+  - T1539
+  - T1552
+  related_cwe:
+  - CWE-330
+  - CWE-338
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-BUSL-01
+  name: Testing for Business Logic Manipulation
+  category: Business Logic
+  description: 'Test if business workflows can be circumvented: skip steps, reorder steps, or invoke later steps without completing
+    earlier ones. E.g. checkout without payment, withdraw without sufficient balance.'
+  related_mitre_attack:
+  - T1190
+  related_cwe:
+  - CWE-840
+  - CWE-285
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-BUSL-02
+  name: Testing for Ability to Forge Requests
+  category: Business Logic
+  description: 'Test if attacker can forge requests that the app processes as legitimate. Methods: CSRF, replay attacks, parameter
+    tampering, or direct API calls bypassing the intended workflow.'
+  related_mitre_attack:
+  - T1185
+  - T1190
+  related_cwe:
+  - CWE-352
+  - CWE-840
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-BUSL-03
+  name: Testing for Integrity Checks
+  category: Business Logic
+  description: 'Test if the app verifies integrity of critical data: prices in e-commerce cart (can attacker change price
+    to 0?), quantities (negative quantities?), discount codes (reuse, stacking, expired codes).'
+  related_mitre_attack:
+  - T1190
+  related_cwe:
+  - CWE-345
+  - CWE-840
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-BUSL-04
+  name: Testing for Process Timing
+  category: Business Logic
+  description: 'Test for race conditions: run two parallel requests that both check+act on shared state (e.g. withdraw $100
+    from $50 balance — both see $50, both deduct, balance goes negative). Often in coupon redemption or balance deduction.'
+  related_mitre_attack:
+  - T1190
+  related_cwe:
+  - CWE-362
+  - CWE-366
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-BUSL-05
+  name: Testing for Number of Times a Function Can Be Used Limits
+  category: Business Logic
+  description: 'Test rate limits on business functions: free trial signup (multiple trials?), coupon redemption (unlimited
+    uses?), referral bonuses (self-referral?). Without limits, attackers can abuse promo offers.'
+  related_mitre_attack:
+  - T1110
+  - T1190
+  related_cwe:
+  - CWE-799
+  - CWE-307
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-BUSL-06
+  name: Testing for Workflow Circumvention
+  category: Business Logic
+  description: Test if business workflows can be circumvented by directly accessing later steps without completing earlier
+    ones. E.g. skip payment step by directly hitting /checkout/success URL.
+  related_mitre_attack:
+  - T1190
+  related_cwe:
+  - CWE-840
+  - CWE-285
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-BUSL-07
+  name: Testing Defenses Against Application Misuse
+  category: Business Logic
+  description: 'Test if the app defends against misuse: brute-force on promo codes, automated scraping, or mass account creation.
+    Defenses include CAPTCHA, rate limit, IP block, device fingerprinting, or behavioral analysis.'
+  related_mitre_attack:
+  - T1110
+  - T1190
+  related_cwe:
+  - CWE-799
+  - CWE-307
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-BUSL-08
+  name: Testing for Upload of Unexpected File Types
+  category: Business Logic
+  description: 'Test file upload: can attacker upload executable files (.php, .jsp, .exe, .sh) disguised as images (rename
+    .php → .php.jpg)? Can the uploaded file be accessed directly to execute (webshell)?'
+  related_mitre_attack:
+  - T1190
+  - T1505
+  related_cwe:
+  - CWE-434
+  - CWE-436
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-BUSL-09
+  name: Testing for Upload of Malicious Files
+  category: Business Logic
+  description: Test if uploaded files are scanned for malware. Even if file type is restricted to images, EXIF metadata can
+    carry PHP payloads, or polyglot files can be both valid image and valid PHP.
+  related_mitre_attack:
+  - T1190
+  - T1027
+  related_cwe:
+  - CWE-434
+  - CWE-502
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-BUSL-10
+  name: Testing for Denial of Service via Business Logic
+  category: Business Logic
+  description: 'Test business-logic DoS: trigger expensive operations (PDF generation, complex queries, image processing)
+    via automated requests. E.g. submit 1000-page PDF to a converter, or trigger password reset loop on all users.'
+  related_mitre_attack:
+  - T1499
+  - T1190
+  related_cwe:
+  - CWE-770
+  - CWE-400
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CLNT-01
+  name: Testing for DOM-based Cross Site Scripting
+  category: Client-side
+  description: 'Test DOM XSS: client-side JS reads user input (location.hash, document.referrer, postMessage) and writes it
+    to DOM (innerHTML, document.write) without sanitization. Source→sink analysis is key.'
+  related_mitre_attack:
+  - T1059
+  - T1185
+  related_cwe:
+  - CWE-79
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CLNT-02
+  name: Testing for JavaScript Execution
+  category: Client-side
+  description: 'Test for arbitrary JS execution: inject JS via URL params, postMessage handlers, or eval()/Function() calls.
+    Even without DOM XSS, eval on user input can lead to full client-side compromise.'
+  related_mitre_attack:
+  - T1059
+  - T1185
+  related_cwe:
+  - CWE-94
+  - CWE-95
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CLNT-03
+  name: Testing for HTML Injection
+  category: Client-side
+  description: 'Test HTML injection: inject HTML tags (<img src=x onerror=alert(1)>, <iframe>) into reflected/stored parameters
+    that get rendered in the page. Often combined with XSS.'
+  related_mitre_attack:
+  - T1059
+  - T1185
+  related_cwe:
+  - CWE-79
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CLNT-04
+  name: Testing for Client-side URL Redirect
+  category: Client-side
+  description: 'Test open redirect: inject external URL into redirect parameters (?next=https://evil.com). Used in phishing
+    campaigns — users see legitimate domain in URL but get redirected to attacker site.'
+  related_mitre_attack:
+  - T1566
+  - T1185
+  related_cwe:
+  - CWE-601
+  - CWE-79
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CLNT-05
+  name: Testing for CSS Injection
+  category: Client-side
+  description: 'Test CSS injection: inject CSS rules via user-controlled stylesheets or style attributes. Can exfiltrate data
+    via attribute selectors + background-image, or deface the page to phish credentials.'
+  related_mitre_attack:
+  - T1185
+  related_cwe:
+  - CWE-79
+  - CWE-74
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CLNT-06
+  name: Testing for Client-side Resource Manipulation
+  category: Client-side
+  description: 'Test if attacker can manipulate client-side resources: redirect script src to attacker server, modify CSP
+    via meta tags, or inject preload directives to load malicious resources.'
+  related_mitre_attack:
+  - T1185
+  - T1059
+  related_cwe:
+  - CWE-74
+  - CWE-79
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CLNT-07
+  name: Testing for Cross Origin Resource Sharing
+  category: Client-side
+  description: 'Test CORS: check Access-Control-Allow-Origin header. Permissive configs (ACAO: * with credentials) enable
+    any site to read responses from authenticated API. Common in modern SPAs.'
+  related_mitre_attack:
+  - T1185
+  - T1190
+  related_cwe:
+  - CWE-942
+  - CWE-346
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CLNT-08
+  name: Testing for Cross Site Flashing
+  category: Client-side
+  description: 'Test for Flash/Silverlight vulnerabilities: parameter injection in .swf files, allowScriptAccess=always, ExternalInterface
+    callbacks. Mostly historical but legacy apps still use Flash.'
+  related_mitre_attack:
+  - T1185
+  - T1059
+  related_cwe:
+  - CWE-79
+  - CWE-470
+  applicable_to_web_mvp: false
+- wstg_id: WSTG-CLNT-09
+  name: Testing for Clickjacking
+  category: Client-side
+  description: 'Test clickjacking: can the page be embedded in an iframe? Without X-Frame-Options: DENY or CSP frame-ancestors,
+    attackers can overlay invisible iframes to trick users into clicking hidden buttons (e.g. ''Delete account'').'
+  related_mitre_attack:
+  - T1185
+  related_cwe:
+  - CWE-1021
+  - CWE-693
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CLNT-10
+  name: Testing for WebSockets
+  category: Client-side
+  description: 'Test WebSocket security: cross-origin access (no Origin check), authentication (token in URL — leaky), confidentiality
+    (ws:// instead of wss://), or message injection that triggers server-side SQLi.'
+  related_mitre_attack:
+  - T1190
+  - T1071
+  related_cwe:
+  - CWE-346
+  - CWE-319
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CLNT-11
+  name: Testing for Web Messaging
+  category: Client-side
+  description: 'Test postMessage: does the receiver check event.origin before processing? Can attacker site send malicious
+    messages that get executed by the target''s JS? Common in cross-origin iframe communication.'
+  related_mitre_attack:
+  - T1185
+  - T1059
+  related_cwe:
+  - CWE-346
+  - CWE-79
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-CLNT-12
+  name: Testing for Local Storage
+  category: Client-side
+  description: 'Test what data is stored in localStorage/sessionStorage: JWT tokens, session IDs, PII. localStorage is accessible
+    via JS, so any XSS can exfiltrate. Sensitive data should be in HttpOnly cookies.'
+  related_mitre_attack:
+  - T1552
+  - T1539
+  related_cwe:
+  - CWE-522
+  - CWE-922
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-APIT-01
+  name: Testing for GraphQL
+  category: APIs
+  description: 'Test GraphQL endpoints: introspection enabled (dumps full schema), batching attacks (multiple queries in one
+    request to bypass rate limit), query complexity DoS, deep nested queries, or injection in resolvers.'
+  related_mitre_attack:
+  - T1190
+  - T1059
+  related_cwe:
+  - CWE-200
+  - CWE-89
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-APIT-02
+  name: Testing for RESTful Web Services
+  category: APIs
+  description: 'Test REST API: missing auth, IDOR on resource IDs, mass assignment in JSON body, improper HTTP method handling
+    (PUT/DELETE without auth), no rate limit on sensitive endpoints (login, password reset).'
+  related_mitre_attack:
+  - T1190
+  - T1078
+  related_cwe:
+  - CWE-285
+  - CWE-639
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-APIT-03
+  name: Testing for SOAP Web Services
+  category: APIs
+  description: 'Test SOAP: WSDL disclosure (reveals all operations), XML injection in SOAP body, XXE via DOCTYPE, or SOAPAction
+    header injection. Legacy enterprise apps often expose SOAP APIs.'
+  related_mitre_attack:
+  - T1190
+  - T1059
+  related_cwe:
+  - CWE-91
+  - CWE-611
+  applicable_to_web_mvp: false
+- wstg_id: WSTG-APIT-04
+  name: Testing for JSON Web Tokens (JWT)
+  category: APIs
+  description: 'Test JWT: ''alg:none'' bypass, weak HMAC secret (brute-force), RS256→HS256 algorithm confusion, missing expiration,
+    no signature validation, or claims injection (e.g. role=admin).'
+  related_mitre_attack:
+  - T1078
+  - T1556
+  related_cwe:
+  - CWE-287
+  - CWE-347
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-APIT-05
+  name: Testing for XML External Entity (XXE)
+  category: APIs
+  description: 'Test XXE: inject DOCTYPE with external entity in XML payloads (SOAP, SVG upload, OOXML docs). Can read local
+    files, perform SSRF, or DoS via billion laughs attack. Disable DTD processing in parser config.'
+  related_mitre_attack:
+  - T1190
+  - T1083
+  related_cwe:
+  - CWE-611
+  - CWE-776
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-APIT-06
+  name: Testing for Server-Side Request Forgery (API-specific)
+  category: APIs
+  description: 'Test SSRF on API endpoints that accept URLs: webhook config, image fetch, PDF generation, link preview. Inject
+    internal URLs to read cloud metadata (169.254.169.254), scan internal network, or pivot to internal admin APIs.'
+  related_mitre_attack:
+  - T1190
+  - T1046
+  related_cwe:
+  - CWE-918
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-APIT-07
+  name: Testing for Open API Specifications (Swagger)
+  category: APIs
+  description: 'Test OpenAPI/Swagger docs: are they publicly accessible? Do they leak internal endpoints? Are there deprecated
+    endpoints still functional? Is the spec accurate vs actual API behavior?'
+  related_mitre_attack:
+  - T1590
+  - T1190
+  related_cwe:
+  - CWE-200
+  applicable_to_web_mvp: true
+- wstg_id: WSTG-APIT-08
+  name: Testing for API Rate Limiting
+  category: APIs
+  description: 'Test API rate limits: are sensitive endpoints (login, password reset, OTP verification) rate-limited? Can
+    attacker bypass via header rotation (X-Forwarded-For), IP rotation, or account enumeration via timing differences?'
+  related_mitre_attack:
+  - T1110
+  - T1190
+  related_cwe:
+  - CWE-799
+  - CWE-307
+  applicable_to_web_mvp: true

@@ -90,3 +90,12 @@ msgpack>=1.0.7
 # ---------- Auth (W1-F will use these) ----------
 authlib>=1.4.0
 python-jose>=3.3.0
+
+
+# ---------- Multi-Agent Orchestration (W9) ----------
+# LangGraph — multi-agent runtime for 3 orchestration modes:
+#   - Deep          (parallel sub-agents via task delegation)
+#   - Plan-Execute  (planner → executor → replanner loop)
+#   - Supervisor    (transfer to expert agents — default mode)
+# Replaces Eino ADK (Go) from CyberStrikeAI source.
+langgraph>=0.2.0

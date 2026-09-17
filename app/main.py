@@ -33,6 +33,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from fastapi import Body
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.auth.manager import (
     AuthError,
@@ -100,11 +101,35 @@ class StartScanRequest(BaseModel):
     user_prompt: str = Field("", description="Natural-language prompt (e.g. 'Scan for SQL injection')")
 
 
+class LLMSettingsRequest(BaseModel):
+    provider: str
+    base_url: str
+    model: str
+    max_total_tokens: int = 4096
+    max_completion_tokens: int = 2048
+    temperature: float = 0.7
+    api_key: str
+    hitl_audit_provider: str
+    hitl_audit_base_url: str
+    hitl_audit_model: str
+    hitl_audit_api_key: str
+
+
 class HealthResponse(BaseModel):
     status: str = "ok"
     version: str
     environment: str
     db_connected: bool
+
+
+class CreateConversationRequest(BaseModel):
+    title: str | None = "New conversation"
+
+
+class SendMessageRequest(BaseModel):
+    content: str
+    scan_id: str | None = None
+    metadata: dict[str, Any] | None = None
 
 
 # ---------- Auth dependency ----------
@@ -182,6 +207,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as e:
         logger.error("Failed to bootstrap admin user", error=str(e))
         # Don't crash — allow app to start (user can retry login later)
+
+    # ----- W8-E: Seed methodology catalogs (WSTG + ATT&CK) -----
+    try:
+        from app.methodology.seeder import seed_all_catalogs
+        async with async_session() as session:
+            result = await seed_all_catalogs(session)
+            await session.commit()
+            logger.info(
+                "Methodology catalogs seeded",
+                wstg_inserted=result["wstg"]["inserted"],
+                wstg_updated=result["wstg"]["updated"],
+                attack_inserted=result["attack"]["inserted"],
+                attack_updated=result["attack"]["updated"],
+            )
+    except Exception as e:
+        logger.error("Failed to seed methodology catalogs", error=str(e))
+        # Don't crash — app can still run without catalogs (tools won't have WSTG/ATT&CK tags)
 
     yield
 
@@ -306,36 +348,12 @@ def create_app() -> FastAPI:
         import uuid as uuid_mod
         scan_id = f"scan_{uuid_mod.uuid4().hex[:12]}"
 
-        # W4-D fix: Create Scan row in DB (so FK constraints work)
-        from app.db.models.scan import Scan
-        import uuid as uuid_mod2
-        scan = Scan(
-            id=scan_id,
-            user_id=uuid_mod2.UUID(user.id),
-            target=req.target,
-            target_type="web_app" if req.target.startswith("http") else "single_host",
-            agent_mode="supervisor",
-            user_prompt=req.user_prompt,
-            status="running",
-            progress=0,
-            scope_json={"hosts": [req.target]},
-        )
-        session.add(scan)
-        await session.commit()
-
-        # Run agent
+        # Run agent (W3-A: synchronous — W3-B will use Celery)
         result = await agent_run_scan(
             target=req.target,
             user_prompt=req.user_prompt,
             scan_id=scan_id,
         )
-
-        # Update scan status
-        scan.status = result.status
-        scan.progress = 100
-        import datetime
-        scan.completed_at = datetime.datetime.now(datetime.UTC)
-        await session.commit()
 
         return {
             "scan_id": result.scan_id,
@@ -381,18 +399,37 @@ def create_app() -> FastAPI:
     @app.get("/api/scans/{scan_id}/events", tags=["scans"])
     async def scan_events(
         scan_id: str,
-        user: UserResponse = Depends(get_current_user),
+        token: str | None = None,
+        session: AsyncSession = Depends(get_async_session),
     ) -> StreamingResponse:
         """SSE event stream for a scan — real-time progress.
 
-        Connect with EventSource (browser) or curl -N (CLI):
-            curl -N -H "Authorization: Bearer <token>" \\
-                http://localhost:8000/api/scans/scan_abc123/events
+        Authentication: Bearer token via query param `?token=<access_token>`.
+        (EventSource browser API does not support custom headers, so we
+        accept the token as a query parameter instead.)
+
+        Connect with EventSource (browser):
+            const es = new EventSource(`/api/scans/${scanId}/events?token=${accessToken}`);
+
+        Or with curl (CLI):
+            curl -N "http://localhost:8000/api/scans/scan_abc123/events?token=eyJ..."
 
         Events:
             scan_started, scan_progress, finding_detected,
-            hitl_approval_required, scan_complete, scan_error, heartbeat
+            hitl_approval_required, hitl_decision_made,
+            scan_complete, scan_error, heartbeat
         """
+        # Verify token (query param for EventSource compatibility)
+        from app.auth.manager import decode_access_token, InvalidTokenError
+        if not token:
+            raise HTTPException(status_code=401, detail="Token required (?token=<access_token>)")
+        try:
+            payload = decode_access_token(token)
+            if payload.get("type") != "access":
+                raise HTTPException(status_code=401, detail="Invalid token type")
+        except InvalidTokenError as e:
+            raise HTTPException(status_code=401, detail=f"Invalid token: {e}") from e
+
         async def event_generator():
             async for event in event_bus.subscribe(scan_id):
                 yield f"data: {json.dumps(event)}\n\n"
@@ -778,16 +815,410 @@ def create_app() -> FastAPI:
             ],
         }
 
-    # ---------- Root endpoint ----------
-    @app.get("/", tags=["system"])
-    async def root() -> dict[str, str]:
-        """Root — basic info."""
+    # ---------- Conversation + Chat endpoints (W7-D) ----------
+    from app.conversation.manager import ConversationManager
+    from app.db.models.conversation import Conversation, ChatMessage
+    from pydantic import BaseModel as PydanticBaseModel
+
+    conversation_router = APIRouter(prefix="/api/conversations", tags=["conversations"])
+
+    @conversation_router.post("")
+    async def create_conversation(
+        req: CreateConversationRequest = Body(...),
+        session: AsyncSession = Depends(get_async_session),
+        user: UserResponse = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """Create a new chat conversation."""
+        import uuid as uuid_mod
+        mgr = ConversationManager(session)
+        conv = await mgr.create_conversation(
+            user_id=uuid_mod.UUID(user.id),
+            title=req.title or "New conversation",
+        )
+        await session.commit()
         return {
-            "name": "VAPT-AI",
-            "version": settings.app_version,
-            "docs": "/docs",
-            "health": "/health",
+            "id": str(conv.id),
+            "title": conv.title,
+            "message_count": conv.message_count,
+            "created_at": conv.created_at.isoformat() if conv.created_at else None,
         }
+
+    @conversation_router.get("")
+    async def list_conversations(
+        include_archived: bool = False,
+        limit: int = 200,
+        offset: int = 0,
+        session: AsyncSession = Depends(get_async_session),
+        user: UserResponse = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """List all conversations for the current user (newest first)."""
+        import uuid as uuid_mod
+        mgr = ConversationManager(session)
+        convs = await mgr.list_conversations(
+            user_id=uuid_mod.UUID(user.id),
+            include_archived=include_archived,
+            limit=min(limit, 200),
+            offset=offset,
+        )
+        return {
+            "count": len(convs),
+            "conversations": [
+                {
+                    "id": str(c.id),
+                    "title": c.title,
+                    "summary": c.summary,
+                    "is_archived": c.is_archived,
+                    "message_count": c.message_count,
+                    "last_message_at": c.last_message_at.isoformat() if c.last_message_at else None,
+                    "created_at": c.created_at.isoformat() if c.created_at else None,
+                }
+                for c in convs
+            ],
+        }
+
+    @conversation_router.get("/{conversation_id}")
+    async def get_conversation(
+        conversation_id: str,
+        session: AsyncSession = Depends(get_async_session),
+        user: UserResponse = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """Get a conversation + all its messages."""
+        import uuid as uuid_mod
+        mgr = ConversationManager(session)
+        result = await mgr.get_conversation_with_messages(
+            uuid_mod.UUID(conversation_id),
+            user_id=uuid_mod.UUID(user.id),
+        )
+        if result is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        return result
+
+    @conversation_router.post("/{conversation_id}/messages")
+    async def send_message(
+        conversation_id: str,
+        req: SendMessageRequest = Body(...),
+        session: AsyncSession = Depends(get_async_session),
+        user: UserResponse = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """Add a message to a conversation.
+
+        Typically the frontend sends a user message here, then triggers a
+        scan separately (POST /api/scans/start). The scan_id can be linked
+        back to this message via the scan_id field.
+        """
+        import uuid as uuid_mod
+        mgr = ConversationManager(session)
+
+        # Verify conversation exists + belongs to user
+        conv = await mgr.get_conversation(
+            uuid_mod.UUID(conversation_id),
+            user_id=uuid_mod.UUID(user.id),
+        )
+        if conv is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+        msg = await mgr.add_message(
+            conversation_id=uuid_mod.UUID(conversation_id),
+            role="user",
+            content=req.content,
+            scan_id=req.scan_id,
+            metadata=req.metadata,
+        )
+        await session.commit()
+        return {
+            "id": str(msg.id),
+            "conversation_id": str(msg.conversation_id),
+            "role": msg.role,
+            "content": msg.content,
+            "scan_id": msg.scan_id,
+            "metadata": msg.metadata_json,
+            "sequence": msg.sequence,
+            "created_at": msg.created_at.isoformat() if msg.created_at else None,
+        }
+
+    @conversation_router.post("/{conversation_id}/assistant-message")
+    async def add_assistant_message(
+        conversation_id: str,
+        req: SendMessageRequest = Body(...),
+        session: AsyncSession = Depends(get_async_session),
+        user: UserResponse = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """Add an assistant message to a conversation (after scan completes).
+
+        The frontend calls this after receiving scan results to persist the
+        AI's response in the chat history.
+        """
+        import uuid as uuid_mod
+        mgr = ConversationManager(session)
+
+        conv = await mgr.get_conversation(
+            uuid_mod.UUID(conversation_id),
+            user_id=uuid_mod.UUID(user.id),
+        )
+        if conv is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+        msg = await mgr.add_message(
+            conversation_id=uuid_mod.UUID(conversation_id),
+            role="assistant",
+            content=req.content,
+            scan_id=req.scan_id,
+            metadata=req.metadata,
+        )
+        await session.commit()
+        return {
+            "id": str(msg.id),
+            "conversation_id": str(msg.conversation_id),
+            "role": msg.role,
+            "content": msg.content,
+            "scan_id": msg.scan_id,
+            "metadata": msg.metadata_json,
+            "sequence": msg.sequence,
+            "created_at": msg.created_at.isoformat() if msg.created_at else None,
+        }
+
+    @conversation_router.delete("/{conversation_id}")
+    async def delete_conversation(
+        conversation_id: str,
+        session: AsyncSession = Depends(get_async_session),
+        user: UserResponse = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """Delete a conversation + all its messages (CASCADE)."""
+        import uuid as uuid_mod
+        mgr = ConversationManager(session)
+        deleted = await mgr.delete_conversation(uuid_mod.UUID(conversation_id))
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        await session.commit()
+        return {"status": "ok", "deleted": True}
+
+    @conversation_router.patch("/{conversation_id}")
+    async def update_conversation(
+        conversation_id: str,
+        req: CreateConversationRequest = Body(...),
+        session: AsyncSession = Depends(get_async_session),
+        user: UserResponse = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """Update conversation title."""
+        import uuid as uuid_mod
+        mgr = ConversationManager(session)
+        conv = await mgr.update_conversation(
+            uuid_mod.UUID(conversation_id),
+            title=req.title,
+        )
+        if conv is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        await session.commit()
+        return {
+            "id": str(conv.id),
+            "title": conv.title,
+            "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
+        }
+
+    app.include_router(conversation_router)
+
+    # ---------- W8-G: Methodology + CVE + Scope Violation endpoints ----------
+    from app.routes.w8g_methodology import create_methodology_router
+    app.include_router(create_methodology_router(get_current_user, UserResponse))
+
+    # ---------- LLM Settings endpoints (W7-D-v2) ----------
+    # Stores LLM provider config in vapt_users.settings JSONB column.
+    # Frontend reads/writes via GET/POST /api/settings/llm.
+    from app.db.models.user import User
+    from pydantic import field_validator, ConfigDict
+
+    settings_router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+    @settings_router.get("/llm")
+    async def get_llm_settings(
+        session: AsyncSession = Depends(get_async_session),
+        user: UserResponse = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """Get current LLM + HITL audit agent config for the user."""
+        import uuid as uuid_mod
+        result = await session.execute(
+            select(User).where(User.id == uuid_mod.UUID(user.id))
+        )
+        db_user = result.scalar_one_or_none()
+        if db_user is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        settings = db_user.settings or {}
+        llm = settings.get("llm", {})
+        # Never return the actual API key — return masked version
+        masked = {**llm}
+        if masked.get("api_key"):
+            masked["api_key"] = "•" * 8 + masked["api_key"][-4:] if len(masked["api_key"]) > 4 else "****"
+        if masked.get("hitl_audit_api_key"):
+            masked["hitl_audit_api_key"] = "•" * 8 + masked["hitl_audit_api_key"][-4:] if len(masked["hitl_audit_api_key"]) > 4 else "****"
+        return {"llm": masked}
+
+    @settings_router.post("/llm")
+    async def save_llm_settings(
+        req: LLMSettingsRequest = Body(...),
+        session: AsyncSession = Depends(get_async_session),
+        user: UserResponse = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """Save LLM + HITL audit agent config for the user.
+
+        API keys are stored in vapt_users.settings JSONB column (encrypted at
+        rest via PostgreSQL-level encryption — W8+ will add Fernet encryption).
+        For MVP, keys are stored as-is (single-user internal tool).
+        """
+        import uuid as uuid_mod
+        result = await session.execute(
+            select(User).where(User.id == uuid_mod.UUID(user.id))
+        )
+        db_user = result.scalar_one_or_none()
+        if db_user is None:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Get existing settings (preserve other keys)
+        settings = dict(db_user.settings or {})
+
+        # Get existing LLM config (to preserve API key if frontend sent masked)
+        existing_llm = settings.get("llm", {})
+
+        # Build new LLM config
+        new_llm = {
+            "provider": req.provider,
+            "base_url": req.base_url,
+            "model": req.model,
+            "max_total_tokens": req.max_total_tokens,
+            "max_completion_tokens": req.max_completion_tokens,
+            "temperature": req.temperature,
+            "hitl_audit_provider": req.hitl_audit_provider,
+            "hitl_audit_base_url": req.hitl_audit_base_url,
+            "hitl_audit_model": req.hitl_audit_model,
+        }
+
+        # Preserve existing API key if frontend sent a masked version (••••)
+        if req.api_key and not req.api_key.startswith("•"):
+            new_llm["api_key"] = req.api_key
+        elif existing_llm.get("api_key"):
+            new_llm["api_key"] = existing_llm["api_key"]
+
+        if req.hitl_audit_api_key and not req.hitl_audit_api_key.startswith("•"):
+            new_llm["hitl_audit_api_key"] = req.hitl_audit_api_key
+        elif existing_llm.get("hitl_audit_api_key"):
+            new_llm["hitl_audit_api_key"] = existing_llm["hitl_audit_api_key"]
+
+        settings["llm"] = new_llm
+        db_user.settings = settings
+        await session.commit()
+
+        return {"status": "ok", "message": "LLM settings saved"}
+
+    @settings_router.post("/llm/test")
+    async def test_llm_connection(
+        req: LLMSettingsRequest = Body(...),
+        user: UserResponse = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """Test LLM connection by making a simple API call.
+
+        W7-D-v2: placeholder — actual test will use litellm.acompletion in W8.
+        """
+        if not req.api_key or req.api_key.startswith("•"):
+            return {"success": False, "error": "API key required (cannot test with masked key)"}
+        if not req.model:
+            return {"success": False, "error": "Model name required"}
+        if not req.base_url:
+            return {"success": False, "error": "Base URL required"}
+        # TODO W8: actual litellm test call
+        return {
+            "success": True,
+            "message": f"Config looks valid (provider={req.provider}, model={req.model}). Actual connection test in W8.",
+        }
+
+    app.include_router(settings_router)
+
+    # ---------- Panic button + scan registry (W7-C) ----------
+    from app.pentest.scan_registry import scan_registry
+
+    @app.post("/api/scans/{scan_id}/abort", tags=["scans"])
+    async def abort_scan(
+        scan_id: str,
+        reason: str = "user_panic_button",
+        run_cleanup: bool = True,
+        user: UserResponse = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """Panic button — abort a running scan immediately.
+
+        W7-C: safety net for Option C (A-in-the-Loop). Even though the audit
+        agent reviews every destructive op, the user can still abort the
+        entire scan mid-flight if something looks wrong.
+
+        Flow:
+            1. Set abort_event → agent loop exits on next turn check
+            2. Kill all registered subprocess PIDs (SIGKILL process group)
+            3. Run scripts/cleanup_scan.sh (removes sqlmap/msf/nuclei artifacts)
+            4. Emit SSE event 'scan_error' with abort reason
+            5. Return summary
+
+        The agent loop should call `await scan_registry.is_aborted(scan_id)`
+        each turn and exit if True.
+        """
+        # Emit SSE event so frontend can show "aborting..." status
+        from app.pentest.events import emit_scan_error
+        await emit_scan_error(scan_id, f"Scan aborted: {reason}")
+
+        result = await scan_registry.abort_scan(
+            scan_id=scan_id,
+            reason=reason,
+            run_cleanup=run_cleanup,
+        )
+        return result
+
+    @app.get("/api/scans/active", tags=["scans"])
+    async def list_active_scans(
+        user: UserResponse = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """List all currently-active scans (registered in scan_registry)."""
+        scan_ids = scan_registry.list_active_scans()
+        return {
+            "active_count": len(scan_ids),
+            "scan_ids": scan_ids,
+        }
+
+    # ---------- W9: Orchestration endpoints (multi-agent modes) ----------
+    # Exposes 3 orchestration modes: deep, plan_execute, supervisor
+    # via POST /api/orchestration/scans/start-mode + introspection endpoints.
+    from app.routes.orchestration import router as orch_router
+    app.include_router(orch_router)
+
+    # ---------- Frontend SPA static mount (W7-D-v2) ----------
+    from fastapi.staticfiles import StaticFiles
+    from pathlib import Path as _Path
+
+    _FRONTEND_DIR = _Path(__file__).resolve().parent.parent / "frontend"
+    if _FRONTEND_DIR.is_dir():
+        # Mount /static → frontend/static/ (CSS, JS, images)
+        app.mount(
+            "/static",
+            StaticFiles(directory=str(_FRONTEND_DIR / "static")),
+            name="frontend-static",
+        )
+
+        # SPA fallback: serve index.html for /, /chat, /login, /reports, etc.
+        # (client-side hash router handles the rest)
+        @app.get("/{full_path:path}", include_in_schema=False)
+        async def spa_fallback(full_path: str):
+            """Serve index.html for all non-API routes (SPA fallback).
+
+            API routes (/api/*, /docs, /health, /openapi.json, /static/*) are
+            matched first by FastAPI. Everything else → index.html.
+            """
+            # Block API paths from being caught by this catch-all
+            if full_path.startswith(("api/", "docs", "health", "openapi.json", "redoc", "static/")):
+                raise HTTPException(status_code=404, detail="Not found")
+            index_path = _FRONTEND_DIR / "index.html"
+            if not index_path.is_file():
+                raise HTTPException(status_code=404, detail="Frontend not built")
+            from fastapi.responses import FileResponse
+            return FileResponse(str(index_path), media_type="text/html")
+
+        logger.info("Frontend SPA mounted at / (serving from %s)", _FRONTEND_DIR)
+    else:
+        logger.warning("Frontend directory not found: %s", _FRONTEND_DIR)
 
     logger.info("FastAPI app created", routes=[
         "/health", "/", "/docs", "/redoc", "/openapi.json",

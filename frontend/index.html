@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VAPT-AI — Autonomous Pentest Platform</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🛡️</text></svg>" />
+</head>
+<body>
+  <!-- App shell — all pages rendered here by JS router -->
+  <div id="app">
+    <!-- Loading state shown until JS loads -->
+    <div class="loading-screen">
+      <div class="loading-spinner"></div>
+      <p>Loading VAPT-AI...</p>
+    </div>
+  </div>
+
+  <!-- Toast container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- Modal container (for dialogs) -->
+  <div id="modal-container"></div>
+
+  <!-- All JS loaded as ES modules -->
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

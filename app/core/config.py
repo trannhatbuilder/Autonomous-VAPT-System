@@ -111,6 +111,13 @@ class Settings(BaseSettings):
     mcp_metasploit_enabled: bool = Field(default=True, validation_alias="VAPT_AI_MCP_METASPLOIT_ENABLED")
     mcp_scope_enforce: bool = Field(default=True, validation_alias="VAPT_AI_MCP_SCOPE_ENFORCE")
 
+    # ---------- HITL (W7-B — Option C: A-in-the-Loop) ----------
+    # Default mode for new scans. Per-scan override via vapt_scans.hitl_mode column.
+    #   audit_agent (default, MVP) — LLM critic reviews destructive ops, no human blocking
+    #   human_block                — blocking channel waits for human decision (deferred)
+    #   auto_approve (debug only)  — skip review entirely
+    hitl_mode: str = Field(default="audit_agent", validation_alias="VAPT_AI_HITL_MODE")
+
     # ---------- Metasploit RPC ----------
     msf_rpc_host: str = Field(default="127.0.0.1", validation_alias="MSF_RPC_HOST")
     msf_rpc_port: int = Field(default=55553, validation_alias="MSF_RPC_PORT")
@@ -122,6 +129,25 @@ class Settings(BaseSettings):
     msf_rpc_ssl: bool = Field(default=False, validation_alias="MSF_RPC_SSL")
     msf_rpc_timeout: int = Field(default=60, validation_alias="MSF_RPC_TIMEOUT")
 
+    # ---------- NVD / CVE (W8-B) ----------
+    nvd_enabled: bool = Field(default=True, validation_alias="VAPT_AI_NVD_ENABLED")
+    nvd_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias="VAPT_AI_NVD_API_KEY",
+        description="Optional NVD API key (raises rate limit from 5 to 50 req/30s). "
+                    "Request one at https://nvd.nist.gov/developers/request-an-api-key",
+    )
+    nvd_cache_ttl_hours: int = Field(
+        default=24,
+        validation_alias="VAPT_AI_NVD_CACHE_TTL_HOURS",
+        description="Cache TTL in hours. NVD updates daily, so 24h is reasonable.",
+    )
+    nvd_timeout_seconds: int = Field(
+        default=15,
+        validation_alias="VAPT_AI_NVD_TIMEOUT_SECONDS",
+        description="Per-request HTTP timeout (NVD can be slow).",
+    )
+    
     # ---------- Paths ----------
     @property
     def project_root(self) -> Path:

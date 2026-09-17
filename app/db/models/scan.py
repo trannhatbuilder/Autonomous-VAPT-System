@@ -46,6 +46,14 @@ class Scan(Base, StringPrimaryKey, TimestampMixin):
         String(32), nullable=False, default="supervisor", server_default="supervisor"
     )  # deep / plan_execute / supervisor
 
+    # HITL mode (W7-B — Option C: A-in-the-Loop)
+    # audit_agent (default, MVP) — LLM critic reviews destructive ops, no human blocking
+    # human_block                — blocking channel waits for human decision (deferred)
+    # auto_approve (debug only)  — skip review entirely
+    hitl_mode: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="audit_agent", server_default="audit_agent"
+    )
+
     # Natural-language prompt (flexible — AI auto-interprets intent)
     user_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     # AI-parsed intent breakdown (mode + scope + goal + estimated_steps)

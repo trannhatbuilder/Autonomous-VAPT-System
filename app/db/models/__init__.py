@@ -61,6 +61,12 @@ from app.db.models.kg import KGEdge, KGNode, KGScanSnapshot
 from app.db.models.replay import ReplayTrace
 from app.db.models.rl import RLCheckpoint, RLTransition
 
+# W7-D — Chat conversations (2 tables)
+from app.db.models.conversation import ChatMessage, Conversation
+
+# W8-E — ATT&CK catalog (1 table)
+from app.db.models.attack_catalog import AttackTechniqueCatalog
+
 __all__ = [
     # User
     "User",
@@ -88,6 +94,8 @@ __all__ = [
     # Methodology
     "WSTGMethodologyCatalog",
     "SkillExecution",
+    # Attack Technique Catalog
+    "AttackTechniqueCatalog",
     # RL
     "RLCheckpoint",
     "RLTransition",
@@ -97,4 +105,7 @@ __all__ = [
     "KGScanSnapshot",
     # Replay
     "ReplayTrace",
+    # W7-D — Chat
+    "Conversation",
+    "ChatMessage",
 ]
