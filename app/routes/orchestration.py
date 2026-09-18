@@ -48,6 +48,12 @@ from app.db.session import get_async_session
 from app.auth.manager import decode_access_token, InvalidTokenError
 from app.agents.registry import agent_registry, AgentMetadata
 from app.agents.base import create_agent, AgentRunResult
+from app.skills import (
+    skill_loader,
+    get_skills_for_agent,
+    get_agents_for_skill,
+    get_mapping_stats,
+)
 from app.orchestration.base import OrchestratorMode, generate_scan_id
 from app.orchestration.mode_selector import (
     ModeSelectionInput,
@@ -305,6 +311,162 @@ async def invoke_agent(
     return response
 
 
+# ---------- W11-S6: Skill endpoints ----------
+
+@router.get("/skills")
+async def list_skills() -> dict[str, Any]:
+    """List all 24 skills (W11-S6 NEW).
+
+    Returns summary metadata for all skills (no body load — fast).
+    Use GET /api/orchestration/skills/{name} for full body (progressive disclosure).
+
+    Returns:
+        {
+            "total_count": 24,
+            "skills": [
+                {"name": "web-attack-methods", "description": "...", "tags": [...], ...},
+                ...
+            ],
+            "by_tag": {"web": [...], "sqli": [...], ...},
+            "stats": {"total_skills": 24, "total_agents_with_skills": 13, ...}
+        }
+    """
+    skills_summaries = [m.to_dict() for m in skill_loader.list_skills()]
+
+    # Build by_tag index
+    by_tag: dict[str, list[str]] = {}
+    for m in skill_loader.list_skills():
+        for tag in m.tags:
+            by_tag.setdefault(tag, []).append(m.name)
+
+    return {
+        "total_count": skill_loader.total_count,
+        "skills": skills_summaries,
+        "by_tag": by_tag,
+        "stats": get_mapping_stats(),
+        "note": (
+            "W11-S6: 24 skill packages loaded from app/skills/. "
+            "Use GET /api/orchestration/skills/{name} for full body. "
+            "Use GET /api/orchestration/agents/{name}/skills for agent→skills mapping."
+        ),
+    }
+
+
+@router.get("/skills/{name}")
+async def get_skill(name: str) -> dict[str, Any]:
+    """Get single skill with full body (W11-S6 NEW — progressive disclosure).
+
+    Args:
+        name: Skill name (e.g. "web-attack-methods")
+
+    Returns:
+        SkillManifest.to_dict() + body + dir_path + skill_md_path.
+
+    Raises:
+        404: if skill not found in SkillLoader.
+    """
+    manifest = skill_loader.get_manifest(name)
+    if manifest is None:
+        available = skill_loader.list_skill_names()
+        raise HTTPException(
+            status_code=404,
+            detail=f"Skill {name!r} not found. Available: {available}",
+        )
+    try:
+        skill = skill_loader.load_skill(name)  # loads body
+    except Exception as e:
+        logger.exception("Failed to load skill body: %s", name)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load skill {name!r}: {e}",
+        ) from e
+
+    return skill.to_dict(include_body=True)
+
+
+@router.get("/agents/{name}/skills")
+async def get_agent_skills(name: str) -> dict[str, Any]:
+    """List skills mapped to a specific agent (W11-S6 NEW).
+
+    Returns skill manifests (no body) that should auto-load when this agent runs.
+
+    Args:
+        name: Agent name (e.g. "recon", "penetration")
+
+    Returns:
+        {
+            "agent_name": "recon",
+            "skills_count": 3,
+            "skills": [<SkillManifest.to_dict()>, ...]
+        }
+
+    Raises:
+        404: if agent not found in registry.
+    """
+    # Validate agent exists
+    meta = agent_registry.get_agent(name)
+    if meta is None:
+        available = sorted(agent_registry.metadata.keys())
+        raise HTTPException(
+            status_code=404,
+            detail=f"Agent {name!r} not found. Available: {available}",
+        )
+
+    skill_names = get_skills_for_agent(name)
+    skills_manifests = []
+    for skill_name in skill_names:
+        m = skill_loader.get_manifest(skill_name)
+        if m is not None:
+            skills_manifests.append(m.to_dict())
+
+    return {
+        "agent_name": name,
+        "agent_display_name": meta.display_name,
+        "skills_count": len(skills_manifests),
+        "skills": skills_manifests,
+    }
+
+
+@router.get("/skills/{name}/agents")
+async def get_skill_agents(name: str) -> dict[str, Any]:
+    """List agents that should auto-load this skill (W11-S6 NEW — reverse mapping).
+
+    Args:
+        name: Skill name (e.g. "web-attack-methods")
+
+    Returns:
+        {
+            "skill_name": "web-attack-methods",
+            "agents_count": 2,
+            "agents": [<agent metadata>, ...]
+        }
+
+    Raises:
+        404: if skill not found.
+    """
+    manifest = skill_loader.get_manifest(name)
+    if manifest is None:
+        available = skill_loader.list_skill_names()
+        raise HTTPException(
+            status_code=404,
+            detail=f"Skill {name!r} not found. Available: {available}",
+        )
+
+    agent_names = get_agents_for_skill(name)
+    agents_metadata = []
+    for agent_name in agent_names:
+        m = agent_registry.get_agent(agent_name)
+        if m is not None:
+            agents_metadata.append(m.to_dict())
+
+    return {
+        "skill_name": name,
+        "skill_description": manifest.description,
+        "agents_count": len(agents_metadata),
+        "agents": agents_metadata,
+    }
+
+
 @router.post("/scans/start-mode")
 async def start_mode_scan(
     req: StartModeScanRequest = Body(...),
@@ -386,3 +548,117 @@ async def start_mode_scan(
     response = result.to_dict()
     response["mode_selection"] = selection_info
     return response
+
+
+# ---------- W12-S10: Harness endpoints ----------
+
+class VerifyFindingRequest(BaseModel):
+    """Request body for POST /api/orchestration/harness/verify (W12-S10)."""
+    title: str = Field(..., description="Finding title")
+    endpoint: str = Field(..., description="Affected endpoint URL")
+    vuln_type: str = Field(..., description="Vulnerability type (sqli, xss, rce, ...)")
+    cvss_vector: str = Field(..., description="CVSS v3.1 vector string")
+    evidence_provided: str = Field("", description="Agent-supplied evidence (NOT trusted)")
+    method: str = Field("GET", description="HTTP method")
+    payload: str = Field("", description="Payload used (for PoC replay)")
+    severity: str = Field("medium", description="Severity claim")
+    wstg_id: str = Field("", description="OWASP WSTG v4.2 ID")
+    cwe_id: str = Field("", description="CWE ID")
+    mitre_attack: str = Field("", description="MITRE ATT&CK technique ID")
+    evidence_layers: list[str] | None = Field(None, description="Evidence layer names present")
+    reasoning_score: float | None = Field(None, ge=0.0, le=1.0, description="LLM reasoning quality")
+    kg_probability: float | None = Field(None, ge=0.0, le=1.0, description="KG edge probability")
+
+
+class ValidateCVSSRequest(BaseModel):
+    """Request body for POST /api/orchestration/harness/validate-cvss (W12-S10)."""
+    vector: str = Field(..., description="CVSS v3.1 vector string to validate")
+
+
+@router.post("/harness/verify")
+async def verify_finding_endpoint(
+    req: VerifyFindingRequest = Body(...),
+) -> dict[str, Any]:
+    """Verify a finding dict through the evidence auditor (W12-S10 NEW).
+
+    Runs all verification layers:
+        1. CVSS vector validation
+        2. 5 verification strategies (security headers, server disclosure,
+           cookie security, XSS reflection, info disclosure)
+        3. PoC validation (regex-based fallback or Playwright)
+        4. 4-dim confidence scoring (Evidence 0.35 + Reasoning 0.25 +
+           Verification 0.30 + Historical 0.10)
+        5. Accept/reject verdict (threshold 0.6)
+
+    Returns:
+        AuditorVerdict.to_dict() with accepted flag + all layer results +
+        rejection_reason (if rejected) + recommendations.
+    """
+    from app.harness import EvidenceAuditor
+
+    finding_dict: dict[str, Any] = {
+        "title": req.title,
+        "endpoint": req.endpoint,
+        "vuln_type": req.vuln_type,
+        "cvss_vector": req.cvss_vector,
+        "evidence_provided": req.evidence_provided,
+        "method": req.method,
+        "payload": req.payload,
+        "severity": req.severity,
+        "wstg_id": req.wstg_id,
+        "cwe_id": req.cwe_id,
+        "mitre_attack": req.mitre_attack,
+    }
+    if req.evidence_layers is not None:
+        finding_dict["evidence_layers"] = req.evidence_layers
+    if req.reasoning_score is not None:
+        finding_dict["reasoning_score"] = req.reasoning_score
+    if req.kg_probability is not None:
+        finding_dict["kg_probability"] = req.kg_probability
+
+    auditor = EvidenceAuditor()
+    try:
+        verdict = auditor.verify_finding(finding_dict)
+    except Exception as e:
+        logger.exception("Auditor verify failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Auditor failed: {e}",
+        ) from e
+
+    return verdict.to_dict()
+
+
+@router.post("/harness/validate-cvss")
+async def validate_cvss_endpoint(
+    req: ValidateCVSSRequest = Body(...),
+) -> dict[str, Any]:
+    """Validate a CVSS v3.1 vector string (W12-S10 NEW).
+
+    Parses the vector + calculates base score + determines severity.
+    Reuses app/evidence/cvss.py (W2) via CVSSValidator wrapper.
+
+    Returns:
+        CVSSValidationResult.to_dict() with valid flag + base_score + severity.
+    """
+    from app.harness import CVSSValidator
+
+    validator = CVSSValidator()
+    result = validator.validate(req.vector)
+    return result.to_dict()
+
+
+@router.get("/harness/stats")
+async def harness_stats_endpoint() -> dict[str, Any]:
+    """Get evidence auditor stats (W12-S10 NEW).
+
+    Returns stats from the underlying VulnerabilityVerifier (total claims,
+    by_status counts, by_method counts) + auditor configuration.
+
+    Returns:
+        Dict with verifier_stats + poc_validator + confidence_scorer + min_confidence.
+    """
+    from app.harness import EvidenceAuditor
+
+    auditor = EvidenceAuditor()
+    return auditor.get_stats()

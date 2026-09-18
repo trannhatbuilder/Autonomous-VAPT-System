@@ -118,9 +118,20 @@ class AgentMetadata:
     orchestration_mode: str | None
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dict (for FastAPI response + JSON serialization)."""
+        """Serialize to dict (for FastAPI response + JSON serialization).
+
+        W11-S7: includes `skills` field with list of skill names mapped
+        to this agent (auto-loaded via SkillLoader + agent_mapping).
+        """
         d = asdict(self)
         d["tool_allowlist"] = list(self.tool_allowlist)  # tuple → list for JSON
+        # W11-S7: include mapped skills (lazy-loaded from agent_mapping)
+        try:
+            from app.skills import get_skills_for_agent
+            d["skills"] = get_skills_for_agent(self.name)
+        except Exception:
+            # If skills package not yet loaded (e.g. during bootstrap), return empty list
+            d["skills"] = []
         return d
 
     @property

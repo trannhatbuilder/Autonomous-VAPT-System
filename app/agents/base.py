@@ -1,5 +1,5 @@
 """
-VAPT-AI Base Agent — W10-S3.
+VAPT-AI Base Agent — W10-S3 / W11-S5.
 
 Abstract base class for all 16 agents (3 orchestrators + 13 sub-agents).
 
@@ -11,6 +11,12 @@ Provides:
     - Decision recording + SSE event emission
     - Agent metadata lookup (safety_class, tool_allowlist, prompt_file)
     - System prompt loading from .md file (W10-S1)
+
+W11-S5 additions:
+    - Auto-load relevant skills per agent role (via SkillLoader + agent_mapping)
+    - `loaded_skills` property exposes list of skill names mapped to this agent
+    - `get_loaded_skill_manifests()` returns full SkillManifest objects
+    - `load_skill_body(name)` lazily loads a skill's Markdown body
 
 Subclasses (app/agents/specialists/*.py — W10-S4) must implement:
     - _decide_next() → (thought, tool_name, tool_args, observation)
@@ -27,23 +33,29 @@ Usage:
         user_prompt="Scan for open ports",
         task_description="Run nmap port scan on http://example.com",
     )
+    # Access auto-loaded skills
+    print(agent.loaded_skills)  # e.g. ["attack-surface-recon", "web-fingerprinting"]
+    body = agent.load_skill_body("attack-surface-recon")
     result = await agent.run()
 
 Architecture:
     ┌──────────────────────────────────────────────────┐
     │                  BaseAgent                       │
     │                                                  │
-    │  - metadata (AgentMetadata from registry)        │
+    │  - metadata (AgentMetadata from registry)       │
     │  - system_prompt (loaded from .md file)          │
+    │  - loaded_skills (auto-loaded from agent_mapping) │
     │  - decisions[] (accumulated turn log)            │
     │  - total_tokens, start_time                      │
     │                                                  │
     │  + _check_guardrails()                           │
     │  + _validate_tool_call(tool, args)               │
     │  + _record_decision(decision)                    │
-    │  + _emit_progress_event(decision)                │
+    │  + _emit_progress_event(decision)                 │
     │  + run() abstract                                │
     │  + _decide_next() abstract                       │
+    │  + loaded_skills property (W11-S5)              │
+    │  + load_skill_body(name) (W11-S5)               │
     └──────────────────────────────────────────────────┘
                          △
                          │
@@ -66,6 +78,12 @@ HITL integration (W10 stub):
     - Destructive agents (safety_class="destructive") have is_destructive=True
     - W10 only marks metadata; actual HITL gate wiring is W12 (evidence auditor)
     - For now, destructive agents record decisions but don't actually execute tools
+
+Skill integration (W11-S5):
+    - On __init__, BaseAgent calls get_skills_for_agent(self.AGENT_NAME)
+    - Returns list of skill names mapped to this agent (from SKILL.md frontmatter)
+    - Skills are NOT loaded into memory at init — only manifest summaries
+    - Skill body loaded on demand via load_skill_body(name) (progressive disclosure)
 """
 from __future__ import annotations
 
@@ -126,6 +144,7 @@ class AgentRunResult:
     error: str | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     completed_at: datetime | None = None
+    loaded_skills: list[str] = field(default_factory=list)  # W11-S5
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -152,6 +171,7 @@ class AgentRunResult:
             "total_tokens": self.total_tokens,
             "duration_seconds": self.duration_seconds,
             "error": self.error,
+            "loaded_skills": self.loaded_skills,  # W11-S5
         }
 
 
@@ -170,9 +190,11 @@ class BaseAgent:
         - Decision recording (_record_decision)
         - SSE event emission (_emit_progress_event)
         - Final result construction (_finalize)
+        - Auto-loaded skills (W11-S5: loaded_skills property)
 
     W10 stub: subclasses' _decide_next returns deterministic canned response.
-    W11+ will replace _decide_next with LiteLLM call using self.system_prompt.
+    W11+ will replace _decide_next with LiteLLM call using self.system_prompt
+    + relevant skill bodies (load_skill_body).
     """
 
     # Subclasses MUST override
@@ -209,10 +231,16 @@ class BaseAgent:
         # Load system prompt from .md file
         self.system_prompt: str = agent_registry.load_prompt(self.AGENT_NAME)
 
+        # W11-S5: Auto-load skill names mapped to this agent (manifests only,
+        # bodies loaded on demand via load_skill_body()).
+        from app.skills import get_skills_for_agent
+        self._loaded_skill_names: list[str] = get_skills_for_agent(self.AGENT_NAME)
+
         logger.info(
-            "Agent initialized: scan=%s agent=%s safety=%s tools=%d prompt_len=%d",
+            "Agent initialized: scan=%s agent=%s safety=%s tools=%d prompt_len=%d skills=%d",
             self.scan_id, self.AGENT_NAME, self.metadata.safety_class,
             len(self.metadata.tool_allowlist), len(self.system_prompt),
+            len(self._loaded_skill_names),
         )
 
     # ---------- Properties ----------
@@ -241,6 +269,73 @@ class BaseAgent:
     def tool_allowlist(self) -> tuple[str, ...]:
         """Tools this agent is allowed to invoke."""
         return self.metadata.tool_allowlist
+
+    @property
+    def loaded_skills(self) -> list[str]:
+        """W11-S5: List of skill names mapped to this agent (auto-loaded).
+
+        Returns a copy to prevent external mutation.
+        """
+        return list(self._loaded_skill_names)
+
+    # ---------- Skill access (W11-S5) ----------
+
+    def get_loaded_skill_manifests(self) -> list[Any]:
+        """Get full SkillManifest objects for this agent's loaded skills.
+
+        Returns:
+            List of SkillManifest instances (one per loaded skill name).
+            Skills that fail to load are skipped (with a warning log).
+        """
+        from app.skills import skill_loader
+        manifests = []
+        for skill_name in self._loaded_skill_names:
+            m = skill_loader.get_manifest(skill_name)
+            if m is None:
+                logger.warning(
+                    "Skill %r mapped to agent %r but not found in SkillLoader",
+                    skill_name, self.AGENT_NAME,
+                )
+                continue
+            manifests.append(m)
+        return manifests
+
+    def load_skill_body(self, skill_name: str) -> str:
+        """Load the Markdown body of a skill (progressive disclosure).
+
+        Args:
+            skill_name: Skill name (must be in self.loaded_skills for proper
+                        attribution, but any registered skill can be loaded).
+
+        Returns:
+            Skill body as Markdown string.
+
+        Raises:
+            KeyError: if skill_name not found in SkillLoader.
+        """
+        from app.skills import skill_loader
+        return skill_loader.load_skill_body(skill_name)
+
+    def get_skill_context_for_llm(self) -> str:
+        """Build a context string with skill summaries for LLM prompts.
+
+        W11 stub: returns a formatted string listing all loaded skills with
+        their names + descriptions. W12+ will use this in LLM prompts to
+        give the agent awareness of available playbooks.
+
+        Returns:
+            Formatted string like:
+                Loaded skills:
+                - web-attack-methods: OWASP WSTG web attack taxonomy...
+                - post-exploitation: Post-exploitation playbook...
+        """
+        manifests = self.get_loaded_skill_manifests()
+        if not manifests:
+            return "(no skills loaded for this agent)"
+        lines = ["Loaded skills:"]
+        for m in manifests:
+            lines.append(f"- {m.name}: {m.description}")
+        return "\n".join(lines)
 
     # ---------- Guardrails (D18) ----------
 
@@ -327,6 +422,7 @@ class BaseAgent:
             duration_seconds=time.time() - self.start_time,
             error=error,
             completed_at=datetime.now(UTC),
+            loaded_skills=list(self._loaded_skill_names),  # W11-S5
         )
 
     # ---------- Abstract interface ----------
@@ -392,7 +488,8 @@ class BaseAgent:
             - observation: tool result or reasoning output
 
         W10 stub: subclasses return canned response per agent role.
-        W11+ will replace with LiteLLM call using self.system_prompt.
+        W11+ will replace with LiteLLM call using self.system_prompt +
+        relevant skill bodies (self.get_skill_context_for_llm()).
         """
         raise NotImplementedError(
             f"{self.__class__.__name__}._decide_next() not implemented. "
