@@ -1185,6 +1185,10 @@ def create_app() -> FastAPI:
     from app.routes.orchestration import router as orch_router
     app.include_router(orch_router)
 
+    # ---------- W14-S8: C2 Routes ----------
+    from app.routes.c2 import router as c2_router
+    app.include_router(c2_router)
+
     # ---------- Frontend SPA static mount (W7-D-v2) ----------
     from fastapi.staticfiles import StaticFiles
     from pathlib import Path as _Path

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -662,3 +663,268 @@ async def harness_stats_endpoint() -> dict[str, Any]:
 
     auditor = EvidenceAuditor()
     return auditor.get_stats()
+
+# ============================================================
+# W13-S2: End-to-End Pipeline endpoint
+# ============================================================
+
+class StartPipelineRequest(BaseModel):
+    """Request body for POST /api/orchestration/scans/start-pipeline (W13-S2)."""
+    target: str = Field(..., description="Target URL or IP (e.g. http://localhost:8080/)")
+    user_prompt: str = Field("", description="Natural-language scan goal")
+    mode: str = Field(
+        "auto",
+        description='Orchestration mode: "supervisor" | "deep" | "plan_execute" | "auto"',
+    )
+    transfer_targets: list[str] | None = Field(
+        None,
+        description="Optional (supervisor mode): override the 6-phase kill-chain agent sequence.",
+    )
+    findings_override: list[dict] | None = Field(
+        None,
+        description="Optional canned findings (test mode). When provided, the orchestrator "
+                    "is bypassed and findings are fed directly into auditor + persistence + "
+                    "report. Each dict must match PipelineFinding fields.",
+    )
+
+
+@router.post("/scans/start-pipeline")
+async def start_pipeline_scan(
+    req: StartPipelineRequest = Body(...),
+    session: AsyncSession = Depends(get_async_session),
+) -> dict[str, Any]:
+    """Start the VAPT-AI v3.2 end-to-end scan pipeline (W13-S2 NEW).
+
+    This is the W13 entry point that wires together all W1-W12 subsystems:
+        consent_check → blackboard init → orchestrator (LangGraph supervisor
+        with 6-phase transfer_targets: recon → attack-surface-enumeration →
+        vulnerability-triage → penetration (HITL) → privilege-escalation (HITL)
+        → reporting-remediation) → auditor → persist findings → generate
+        PDF + SARIF report → cleanup.
+
+    W13 stub: runs synchronously and returns the full result. For long-running
+    scans in production, dispatch via Celery task `scan.run_vapt` instead:
+        from workers.scan_tasks import run_vapt_scan_task
+        run_vapt_scan_task.delay(target=..., mode=..., ...)
+
+    Authentication: pass Bearer token in Authorization header.
+    """
+    from app.pentest.scan_pipeline import (
+        run_scan_pipeline,
+        PipelineFinding,
+        DVWA_FIXTURE_FINDINGS,
+    )
+
+    scan_id = generate_scan_id()
+
+    # Convert dict findings → PipelineFinding dataclasses
+    pipeline_findings: list[PipelineFinding] | None = None
+    if req.findings_override:
+        pipeline_findings = [PipelineFinding(**f) for f in req.findings_override]
+
+    logger.info(
+        "Starting VAPT pipeline: scan=%s target=%s mode=%s override=%s",
+        scan_id, req.target, req.mode, bool(pipeline_findings),
+    )
+
+    try:
+        result = await run_scan_pipeline(
+            target=req.target,
+            user_prompt=req.user_prompt,
+            mode=req.mode,
+            transfer_targets=req.transfer_targets,
+            scan_id=scan_id,
+            findings_override=pipeline_findings,
+        )
+    except Exception as e:
+        logger.exception("Pipeline failed: scan=%s", scan_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Pipeline failed: {e}",
+        ) from e
+
+    return result.to_dict()
+
+
+@router.get("/scans/{scan_id}/pipeline-result")
+async def get_pipeline_result(
+    scan_id: str,
+    session: AsyncSession = Depends(get_async_session),
+) -> dict[str, Any]:
+    """Get the persisted Scan row + result_summary for a pipeline run (W13-S2 NEW).
+
+    Returns:
+        Dict with scan_id, status, progress, target, started_at, completed_at,
+        result_summary (findings_total, findings_by_severity, report_pdf_path,
+        report_sarif_path, etc.), error (if any).
+    """
+    from app.db.models.scan import Scan
+    scan_row = await session.get(Scan, scan_id)
+    if scan_row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Scan {scan_id!r} not found",
+        )
+    return {
+        "scan_id": scan_row.id,
+        "status": scan_row.status,
+        "progress": scan_row.progress,
+        "target": scan_row.target,
+        "mode": scan_row.agent_mode,
+        "user_prompt": scan_row.user_prompt,
+        "started_at": scan_row.started_at.isoformat() if scan_row.started_at else None,
+        "completed_at": scan_row.completed_at.isoformat() if scan_row.completed_at else None,
+        "result_summary": scan_row.result_summary,
+        "error": scan_row.error,
+    }
+
+
+@router.get("/scans/dvwa-fixture-findings")
+async def get_dvwa_fixture_findings() -> dict[str, Any]:
+    """Return the 5-finding DVWA fixture for testing (W13-S2 NEW).
+
+    Returns the standard DVWA fixture (SQLi, XSS, cmd_injection, LFI, RCE)
+    used by W13-S5 integration tests + manual pipeline testing.
+
+    Clients can POST these to /scans/start-pipeline as findings_override
+    to exercise the full pipeline (auditor → persist → report) without
+    needing a live DVWA target.
+    """
+    from app.pentest.scan_pipeline import DVWA_FIXTURE_FINDINGS
+    return {
+        "count": len(DVWA_FIXTURE_FINDINGS),
+        "findings": [f.to_dict() for f in DVWA_FIXTURE_FINDINGS],
+    }
+
+
+# ============================================================
+# W13-S4: Report download endpoints
+# ============================================================
+
+@router.get("/scans/{scan_id}/report.pdf")
+async def download_pdf_report(
+    scan_id: str,
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Download the PDF report for a scan (W13-S4 NEW).
+
+    Generates the PDF on-demand if it does not yet exist on disk.
+    Returns a StreamingResponse with Content-Type: application/pdf.
+
+    Authentication: pass Bearer token in Authorization header.
+    """
+    from fastapi.responses import StreamingResponse
+    from app.report import generate_pdf_report
+    from app.db.models.scan import Scan
+
+    # Verify scan exists
+    scan_row = await session.get(Scan, scan_id)
+    if scan_row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Scan {scan_id!r} not found",
+        )
+
+    # Generate PDF (uses DB session for finding/evidence collection)
+    pdf_path = await generate_pdf_report(scan_id, session)
+    if pdf_path is None:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate PDF report for scan {scan_id!r}",
+        )
+
+    pdf_path = Path(pdf_path)
+    if not pdf_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"PDF report file not found on disk: {pdf_path}",
+        )
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="vapt-ai_{scan_id}.pdf"',
+    }
+
+    async def _stream():
+        with open(pdf_path, "rb") as f:
+            while chunk := f.read(64 * 1024):
+                yield chunk
+
+    return StreamingResponse(_stream(), media_type="application/pdf", headers=headers)
+
+
+@router.get("/scans/{scan_id}/report.sarif")
+async def download_sarif_report(
+    scan_id: str,
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Download the SARIF 2.1.0 report for a scan (W13-S4 NEW).
+
+    Generates the SARIF JSON on-demand if it does not yet exist on disk.
+    Returns a StreamingResponse with Content-Type: application/json.
+
+    Authentication: pass Bearer token in Authorization header.
+    """
+    from fastapi.responses import StreamingResponse
+    from app.report import generate_sarif_report
+    from app.db.models.scan import Scan
+
+    # Verify scan exists
+    scan_row = await session.get(Scan, scan_id)
+    if scan_row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Scan {scan_id!r} not found",
+        )
+
+    # Generate SARIF
+    sarif_path = await generate_sarif_report(scan_id, session)
+    if sarif_path is None:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate SARIF report for scan {scan_id!r}",
+        )
+
+    sarif_path = Path(sarif_path)
+    if not sarif_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"SARIF report file not found on disk: {sarif_path}",
+        )
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="vapt-ai_{scan_id}.sarif.json"',
+    }
+
+    async def _stream():
+        with open(sarif_path, "rb") as f:
+            while chunk := f.read(64 * 1024):
+                yield chunk
+
+    return StreamingResponse(_stream(), media_type="application/json", headers=headers)
+
+
+@router.get("/scans/{scan_id}/reports")
+async def list_scan_reports(scan_id: str) -> dict[str, Any]:
+    """List all generated report files for a scan on disk (W13-S4 NEW).
+
+    Returns a dict with available PDF + SARIF report paths + sizes.
+
+    Authentication: pass Bearer token in Authorization header.
+    """
+    from pathlib import Path as _Path
+    reports_dir = _Path(__file__).resolve().parent.parent.parent / "reports"
+    pdfs = sorted(reports_dir.glob(f"scan_{scan_id}_*.pdf"))
+    sarifs = sorted(reports_dir.glob(f"scan_{scan_id}_*.sarif.json"))
+
+    return {
+        "scan_id": scan_id,
+        "pdf_reports": [
+            {"path": str(p.name), "size_bytes": p.stat().st_size}
+            for p in pdfs
+        ],
+        "sarif_reports": [
+            {"path": str(s.name), "size_bytes": s.stat().st_size}
+            for s in sarifs
+        ],
+        "total_reports": len(pdfs) + len(sarifs),
+    }

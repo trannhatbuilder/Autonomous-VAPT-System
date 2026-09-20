@@ -523,6 +523,105 @@ def cleanup_old_scans(max_age_hours: int = 24):
 
 
 # ============================================================
+# VAPT-AI v3.2 Pipeline Task (W13-S2)
+# ============================================================
+#
+# This is the W13 entry point for the VAPT-AI end-to-end scan pipeline
+# (app.pentest.scan_pipeline.run_scan_pipeline). It runs the full
+# kill-chain: consent_check → blackboard init → orchestrator (LangGraph
+# supervisor with 6-phase transfer_targets) → auditor → persist →
+# report (PDF + SARIF) → cleanup.
+#
+# Unlike the EVVO legacy tasks above (run_scan_task, run_public_scan_task)
+# which depend on routes.deps.* + shield_engine + Postgres, this task
+# only depends on the VAPT-AI v3.2 stack: app.db.* (SQLite async) +
+# app.orchestration.* + app.harness.* + app.evidence.* + app.report.*
+#
+# The task is sync (Celery requirement) but wraps an asyncio.run() call
+# to the async pipeline. Cancellation, retry, and checkpoint behavior
+# match the EVVO task pattern for consistency.
+
+@app.task(bind=True, name="scan.run_vapt", max_retries=2, default_retry_delay=30)
+def run_vapt_scan_task(
+    self,
+    target: str,
+    user_prompt: str = "",
+    mode: str = "auto",
+    transfer_targets: list[str] | None = None,
+    scan_id: str | None = None,
+    user_id: str | None = None,
+    findings_override: list[dict] | None = None,
+):
+    """Execute the VAPT-AI v3.2 end-to-end scan pipeline (W13).
+
+    Args:
+        target: Target URL or IP (e.g. "http://localhost:8080/")
+        user_prompt: Natural-language scan goal
+        mode: Orchestration mode — "auto" | "supervisor" | "deep" | "plan_execute"
+        transfer_targets: Optional override for the agent transfer sequence.
+            Defaults to the 6-phase kill-chain (see scan_pipeline.DEFAULT_TRANSFER_TARGETS).
+        scan_id: Optional scan ID (auto-generated if None)
+        user_id: Optional user UUID (string form) for Scan.user_id FK
+        findings_override: Optional list of finding dicts (for testing).
+            Each dict must match PipelineFinding fields. When provided,
+            the orchestrator is bypassed and findings are fed directly
+            into the auditor + persistence + report stages.
+
+    Returns:
+        Dict matching ScanPipelineResult.to_dict() — includes scan_id,
+        status, findings_total, findings_by_severity, report_pdf_path,
+        report_sarif_path, duration_seconds.
+    """
+    import asyncio
+    import uuid as uuid_mod
+    from app.pentest.scan_pipeline import (
+        run_scan_pipeline,
+        PipelineFinding,
+    )
+
+    # Convert dict findings → PipelineFinding dataclasses
+    pipeline_findings: list[PipelineFinding] | None = None
+    if findings_override:
+        pipeline_findings = [
+            PipelineFinding(**f) for f in findings_override
+        ]
+
+    # Convert user_id string → UUID
+    user_uuid = uuid_mod.UUID(user_id) if user_id else None
+
+    try:
+        result = asyncio.run(run_scan_pipeline(
+            target=target,
+            user_prompt=user_prompt,
+            mode=mode,
+            transfer_targets=transfer_targets,
+            scan_id=scan_id,
+            user_id=user_uuid,
+            findings_override=pipeline_findings,
+        ))
+        return result.to_dict()
+
+    except Exception as exc:
+        # Append error event to Redis for SSE consumers
+        try:
+            sid = scan_id or "unknown"
+            append_event_redis(sid, "error",
+                f"[STATUS]: VAPT pipeline failed: {exc}",
+                None, {"error": str(exc)})
+            set_scan_state(sid, {
+                "status": "failed",
+                "completed_at": utc_now(),
+                "error": str(exc),
+            })
+        except Exception:
+            pass
+
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=30 * (2 ** self.request.retries))
+        raise
+
+
+# ============================================================
 # Worker Signals
 # ============================================================
 
