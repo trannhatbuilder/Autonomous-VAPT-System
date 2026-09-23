@@ -129,6 +129,135 @@ class Settings(BaseSettings):
     msf_rpc_ssl: bool = Field(default=False, validation_alias="MSF_RPC_SSL")
     msf_rpc_timeout: int = Field(default=60, validation_alias="MSF_RPC_TIMEOUT")
 
+    # ---------- RL (W16 — Dueling Double DQN) ----------
+    # Master plan §12 W16: ε 1.0 → 0.05 over 200 scans; PER α=0.6 β=0.4→1.0/100k.
+    rl_enabled: bool = Field(
+        default=True,
+        validation_alias="VAPT_AI_RL_ENABLED",
+        description="Master switch for RL policy. When False, agent uses rule-based fallback.",
+    )
+    rl_state_dim: int = Field(
+        default=337,
+        validation_alias="VAPT_AI_RL_STATE_DIM",
+        description="State vector dimension. Must match StateEncoder. Default 337 "
+                    "(8 scalars + 256 tech multi-hot + 32 last-vector + 32 last-tool + 9 flags).",
+    )
+    rl_action_dim: int = Field(
+        default=7,
+        validation_alias="VAPT_AI_RL_ACTION_DIM",
+        description="Action space size. Must match ACTION_SPACE. Default 7.",
+    )
+    rl_hidden_dim: int = Field(
+        default=64,
+        validation_alias="VAPT_AI_RL_HIDDEN_DIM",
+        description="Hidden layer size for value + advantage MLPs. Default 64.",
+    )
+    rl_learning_rate: float = Field(
+        default=0.001,
+        validation_alias="VAPT_AI_RL_LEARNING_RATE",
+        description="SGD learning rate for Q-network updates.",
+    )
+    rl_gamma: float = Field(
+        default=0.95,
+        validation_alias="VAPT_AI_RL_GAMMA",
+        description="Discount factor γ for future rewards.",
+    )
+    rl_tau: float = Field(
+        default=0.005,
+        validation_alias="VAPT_AI_RL_TAU",
+        description="Soft target update coefficient (Polyak averaging).",
+    )
+    rl_epsilon_start: float = Field(
+        default=1.0,
+        validation_alias="VAPT_AI_RL_EPSILON_START",
+        description="Initial exploration rate. Default 1.0 (fully random).",
+    )
+    rl_epsilon_end: float = Field(
+        default=0.05,
+        validation_alias="VAPT_AI_RL_EPSILON_END",
+        description="Final exploration rate. Default 0.05 (95% greedy).",
+    )
+    rl_epsilon_decay_scans: int = Field(
+        default=200,
+        validation_alias="VAPT_AI_RL_EPSILON_DECAY_SCANS",
+        description="Number of scans to decay ε from start → end. Default 200.",
+    )
+    rl_exploration_mode: str = Field(
+        default="epsilon_greedy",
+        validation_alias="VAPT_AI_RL_EXPLORATION_MODE",
+        description="Exploration strategy: 'epsilon_greedy' (default), 'boltzmann', or 'curiosity'.",
+    )
+    rl_boltzmann_temp_start: float = Field(
+        default=1.0,
+        validation_alias="VAPT_AI_RL_BOLTZMANN_TEMP_START",
+        description="Initial Boltzmann temperature (only used if exploration_mode='boltzmann').",
+    )
+    rl_per_alpha: float = Field(
+        default=0.6,
+        validation_alias="VAPT_AI_RL_PER_ALPHA",
+        description="PER priority exponent. 0=uniform, 1=full prioritization. Default 0.6.",
+    )
+    rl_per_beta_start: float = Field(
+        default=0.4,
+        validation_alias="VAPT_AI_RL_PER_BETA_START",
+        description="PER importance-sampling exponent start. Default 0.4.",
+    )
+    rl_buffer_size: int = Field(
+        default=50_000,
+        validation_alias="VAPT_AI_RL_BUFFER_SIZE",
+        description="In-memory PER SumTree capacity. Default 50,000 transitions.",
+    )
+    rl_batch_size: int = Field(
+        default=64,
+        validation_alias="VAPT_AI_RL_BATCH_SIZE",
+        description="PER batch size for training. Default 64.",
+    )
+
+    # ---------- KG (W17 — Dynamic Knowledge Graph) ----------
+    # Master plan §12 W17: 6 node types, 5 edge types, EGATS UCB1 bandit.
+    kg_enabled: bool = Field(
+        default=True,
+        validation_alias="VAPT_AI_KG_ENABLED",
+        description="Master switch for Knowledge Graph. When False, agent has no KG memory.",
+    )
+    kg_max_depth: int = Field(
+        default=4,
+        validation_alias="VAPT_AI_KG_MAX_DEPTH",
+        description="Max path length for get_attack_paths BFS. Default 4.",
+    )
+    kg_top_k: int = Field(
+        default=10,
+        validation_alias="VAPT_AI_KG_TOP_K",
+        description="Max paths returned by get_attack_paths. Default 10.",
+    )
+    kg_ucb_c: float = Field(
+        default=1.4142135623730951,  # sqrt(2)
+        validation_alias="VAPT_AI_KG_UCB_C",
+        description="EGATS UCB exploration constant. Default sqrt(2) ≈ 1.4142.",
+    )
+    kg_lambda_penalty: float = Field(
+        default=0.5,
+        validation_alias="VAPT_AI_KG_LAMBDA_PENALTY",
+        description="EGATS TDI penalty weight. Higher = more penalty for hard paths. Default 0.5.",
+    )
+    kg_k_min_prune: int = Field(
+        default=3,
+        validation_alias="VAPT_AI_KG_K_MIN_PRUNE",
+        description="EGATS min attempts before pruning. Paths with TDI > 0.6 after this many "
+                    "attempts are pruned. Default 3.",
+    )
+    kg_ema_alpha: float = Field(
+        default=0.3,
+        validation_alias="VAPT_AI_KG_EMA_ALPHA",
+        description="EGATS EMA smoothing for TDI. 0..1, higher = faster adaptation. Default 0.3.",
+    )
+    kg_mu_specificity: float = Field(
+        default=0.2,
+        validation_alias="VAPT_AI_KG_MU_SPECIFICITY",
+        description="EGATS inventory specificity boost. Small nudge for paths matching target "
+                    "inventory. Default 0.2.",
+    )
+
     # ---------- NVD / CVE (W8-B) ----------
     nvd_enabled: bool = Field(default=True, validation_alias="VAPT_AI_NVD_ENABLED")
     nvd_api_key: SecretStr | None = Field(

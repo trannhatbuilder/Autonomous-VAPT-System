@@ -112,8 +112,85 @@ EXPERT_AGENTS: dict[str, dict[str, Any]] = _build_legacy_expert_agents()
 # ---------- Default transfer targets ----------
 
 # W10-S5: supervisor still uses 2-expert flow (backward compat with W9 stub).
-# W11+ will allow LiteLLM to pick from all 13 sub-agents dynamically.
-DEFAULT_TRANSFER_TARGETS: list[str] = ["recon", "reporting-remediation"]
+# P3: now defaults to 4-phase web pentest flow for single-target scans.
+# Override via transfer_targets param to customize.
+DEFAULT_TRANSFER_TARGETS: list[str] = [
+    "recon",
+    "vulnerability-triage",
+    "penetration",
+    "reporting-remediation",
+]
+
+
+# ---------- P3: synthetic transfer + exit tools (LLM-callable) ----------
+
+def _build_supervisor_tools(transfer_targets: list[str]) -> list[dict[str, Any]]:
+    """Build the 2 synthetic tools the supervisor LLM can call.
+
+    The supervisor doesn't run real pentest tools — it just decides which
+    specialist to transfer to next, or to exit. The tools:
+
+        transfer(target_agent: str, task_description: str)
+            → transfer control to the named specialist with a task description
+        exit(summary: str)
+            → end the scan with a final summary
+
+    Mirrors CyberStrikeAI's adk.ExitTool + supervisor's transfer mechanism.
+    """
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "transfer",
+                "description": (
+                    "Transfer control to a specialist sub-agent. The sub-agent "
+                    "will execute its task (using its own tool allowlist) and "
+                    "return a result. After the sub-agent returns, you (the "
+                    "supervisor) will be invoked again to decide the next step."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target_agent": {
+                            "type": "string",
+                            "enum": transfer_targets,
+                            "description": "Name of the specialist to transfer to.",
+                        },
+                        "task_description": {
+                            "type": "string",
+                            "description": (
+                                "What the specialist should do. Be specific — "
+                                "include the target, the goal, and any constraints "
+                                "(e.g. 'Run nmap top-1000 + httpx on https://example.com')."
+                            ),
+                        },
+                    },
+                    "required": ["target_agent", "task_description"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "exit",
+                "description": (
+                    "End the scan with a final summary. Call this when all "
+                    "transfer targets have run and you have aggregated their "
+                    "results into a coherent summary for the user."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": "Final scan summary — what was found, severity count, recommendations.",
+                        },
+                    },
+                    "required": ["summary"],
+                },
+            },
+        },
+    ]
 
 
 # ---------- LangGraph import (lazy) ----------
@@ -162,12 +239,14 @@ class SupervisorOrchestrator(BaseOrchestrator):
         max_sub_agents: int = MAX_PARALLEL_SUBAGENTS,
         experts: dict[str, dict[str, Any]] | None = None,
         transfer_targets: list[str] | None = None,
+        llm_config: dict[str, Any] | None = None,
+        executor: Any = None,
     ):
         super().__init__(scan_id, target, user_prompt, max_decisions, max_sub_agents)
         # W9 backward compat: still accept `experts` dict override
         # W10 default: derive from agent_registry
         self.experts = experts if experts is not None else EXPERT_AGENTS
-        # W10-S5: configurable transfer sequence (defaults to W9 stub: recon → reporting-remediation)
+        # P3: configurable transfer sequence (defaults to 4-phase web pentest)
         self.transfer_targets = transfer_targets or DEFAULT_TRANSFER_TARGETS
         # Filter transfer_targets to only include registered sub-agents
         self.transfer_targets = [
@@ -178,6 +257,19 @@ class SupervisorOrchestrator(BaseOrchestrator):
             # Fallback: use first 2 sub-agents from registry
             all_subs = agent_registry.list_sub_agents()
             self.transfer_targets = [s.name for s in all_subs[:2]]
+
+        # P3: LLM config + executor for real ReAct loops (supervisor + experts)
+        # If None, falls back to W10 stub behavior (backward compat with tests)
+        self.llm_config = llm_config
+        self.executor = executor
+
+        # P3: build synthetic supervisor tools (transfer + exit)
+        self.supervisor_tools = _build_supervisor_tools(self.transfer_targets)
+
+        # P3: supervisor's chat history (kept across nodes — supervisor is
+        # called multiple times during a scan, once after each expert returns)
+        self._supervisor_messages: list[dict[str, Any]] = []
+
         self._graph = None  # lazy-compiled on first run
 
     # ---------- Graph building ----------
@@ -223,14 +315,147 @@ class SupervisorOrchestrator(BaseOrchestrator):
     async def _supervisor_node(self, state: SharedState) -> SharedState:
         """Supervisor decision node — decides which expert to transfer to next.
 
-        W9 stub: deterministic sequence based on supervisor's own call count.
-        W10-S5: now reads transfer_targets list (configurable).
-        W11+: LiteLLM call with self.system_prompt.
+        P3: replaces W10 deterministic stub with real LLM call.
+        - Builds messages: [system, user_prompt, ...prior_decisions_summary]
+        - Calls chat_completion(tools=[transfer, exit])
+        - Parses tool_call → next_agent + task_description
+        - If LLM calls exit → set next_agent=None (route to END)
+
+        Falls back to W10 stub when self.llm_config is None (for tests).
         """
         violation = self._check_guardrails()
         if violation:
             return {**state, "next_agent": None, "status": "failed", "error": violation}
 
+        # ---------- P3 dispatch ----------
+        if self.llm_config is not None:
+            return await self._supervisor_node_llm(state)
+        # W10 stub fallback
+        return await self._supervisor_node_stub(state)
+
+    async def _supervisor_node_llm(self, state: SharedState) -> SharedState:
+        """P3: real LLM-driven supervisor decision."""
+        from app.agents.llm_client import chat_completion
+        import json as _json
+
+        # Build user message (only on first supervisor call — subsequent
+        # calls append the prior expert's result to the running history)
+        if not self._supervisor_messages:
+            user_msg = (
+                f"Target: {self.target}\n\n"
+                f"User request: {self.user_prompt}\n\n"
+                f"You are the supervisor. Available specialists:\n"
+                + "\n".join(
+                    f"  - {name}: {agent_registry.get_agent(name).description}"
+                    for name in self.transfer_targets
+                    if agent_registry.get_agent(name)
+                )
+                + "\n\nDecide which specialist to transfer to first. Provide a "
+                "specific task description including the target."
+            )
+            self._supervisor_messages.append({"role": "user", "content": user_msg})
+        # else: prior expert results already appended in expert_node
+
+        # Call LLM with synthetic transfer + exit tools
+        try:
+            response = await chat_completion(
+                llm_config=self.llm_config,
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    *self._supervisor_messages,
+                ],
+                tools=self.supervisor_tools,
+                temperature=0.2,  # low temp for deterministic routing
+            )
+        except Exception as exc:
+            logger.exception("Supervisor LLM call failed: scan=%s", self.scan_id)
+            return {**state, "next_agent": None, "status": "failed",
+                    "error": f"Supervisor LLM call failed: {exc}"}
+
+        self.total_tokens += response["usage"].get("total_tokens", 0)
+
+        # Append assistant message to supervisor's running history
+        asst_msg: dict[str, Any] = {"role": "assistant", "content": response["content"] or ""}
+        if response["tool_calls"]:
+            asst_msg["tool_calls"] = [
+                {"id": tc["id"], "type": "function",
+                 "function": {"name": tc["name"], "arguments": tc["arguments"]}}
+                for tc in response["tool_calls"]
+            ]
+        self._supervisor_messages.append(asst_msg)
+
+        # Parse the (single) tool call to determine next_agent + task
+        tool_calls = response["tool_calls"] or []
+        next_agent: str | None = None
+        task_description: str = ""
+        summary: str = ""
+        thought: str = (response["content"] or "")[:500]
+
+        if tool_calls:
+            tc = tool_calls[0]  # supervisor makes 1 decision at a time
+            try:
+                args = _json.loads(tc["arguments"]) if tc["arguments"] else {}
+            except Exception:
+                args = {}
+
+            if tc["name"] == "transfer":
+                next_agent = args.get("target_agent")
+                task_description = args.get("task_description", "")
+                # Validate next_agent is in transfer_targets
+                if next_agent not in self.transfer_targets:
+                    logger.warning(
+                        "Supervisor tried to transfer to %r (not in transfer_targets=%s). Ending scan.",
+                        next_agent, self.transfer_targets,
+                    )
+                    next_agent = None
+                else:
+                    # Record the task description so expert_node can use it
+                    state["next_task_description"] = task_description
+                    thought = f"Transferring to {next_agent}: {task_description[:200]}"
+
+            elif tc["name"] == "exit":
+                summary = args.get("summary", "Scan complete.")
+                next_agent = None
+                thought = f"Exit: {summary[:200]}"
+                state["final_summary"] = summary
+        else:
+            # LLM returned text without tool_calls — treat as implicit exit
+            next_agent = None
+            summary = thought or "Supervisor ended without explicit exit."
+            state["final_summary"] = summary
+
+        # Record decision
+        turn = len(self.decisions)
+        decision = AgentDecision(
+            turn=turn,
+            thought=thought,
+            agent_name="supervisor",
+            tool_name="transfer" if next_agent else "exit",
+            tool_args={"target_agent": next_agent, "task_description": task_description}
+            if next_agent else {"summary": summary},
+            observation=(
+                f"Transferring to {next_agent} with task: {task_description[:200]}"
+                if next_agent else f"Exit: {summary[:200]}"
+            ),
+            tokens_used=response["usage"].get("total_tokens", 0),
+        )
+        self.record_decision(decision)
+        await emit_scan_progress(
+            scan_id=self.scan_id, turn=turn, thought=thought,
+            tool_name=decision.tool_name, observation=decision.observation,
+        )
+
+        return {
+            **state,
+            "next_agent": next_agent,
+            "current_agent": "supervisor",
+            "status": "running" if next_agent else "completed",
+            "decisions": self.decisions,
+            "total_tokens": self.total_tokens,
+        }
+
+    async def _supervisor_node_stub(self, state: SharedState) -> SharedState:
+        """W10 stub fallback (when llm_config is None)."""
         supervisor_turns = sum(
             1 for d in self.decisions if d.agent_name == "supervisor"
         )
@@ -261,7 +486,11 @@ class SupervisorOrchestrator(BaseOrchestrator):
         }
 
     def _stub_decide_next(self, supervisor_turns: int) -> tuple[str, str | None]:
-        """Deterministic stub: supervisor picks next expert from transfer_targets."""
+        """W10 stub: deterministic sequence based on transfer_targets list.
+
+        P3: kept for backward compat when llm_config is None (tests).
+        Production callers should always pass llm_config.
+        """
         if supervisor_turns < len(self.transfer_targets):
             next_agent = self.transfer_targets[supervisor_turns]
             return (
@@ -273,20 +502,92 @@ class SupervisorOrchestrator(BaseOrchestrator):
     def _make_expert_node(self, expert_name: str):
         """Factory: create an async node function for a specific expert.
 
-        W10-S5: looks up agent metadata from registry instead of hardcoded dict.
+        P3: invokes the real specialist agent via create_agent(name).run().
+        Falls back to W10 stub when llm_config is None.
         """
         meta = agent_registry.get_agent(expert_name)
         if meta is None:
             raise ValueError(f"Unknown expert: {expert_name!r}")
 
         async def expert_node(state: SharedState) -> SharedState:
-            logger.info(
-                "Expert node executing: scan=%s expert=%s safety=%s tools=%s",
-                self.scan_id, expert_name, meta.safety_class, list(meta.tool_allowlist),
+            target = state.get("target", self.target)
+            task_description = state.get("next_task_description") or (
+                f"Run {expert_name} on {target}"
             )
 
+            # ---------- P3 dispatch ----------
+            if self.llm_config is not None and self.executor is not None:
+                # Real sub-agent invocation
+                from app.agents.base import create_agent
+                logger.info(
+                    "Expert node executing (P3 real): scan=%s expert=%s safety=%s tools=%s",
+                    self.scan_id, expert_name, meta.safety_class, list(meta.tool_allowlist),
+                )
+                agent = create_agent(
+                    agent_name=expert_name,
+                    scan_id=self.scan_id,
+                    target=target,
+                    task_description=task_description,
+                    user_prompt=self.user_prompt,
+                )
+                result = await agent.run(
+                    llm_config=self.llm_config,
+                    executor=self.executor,
+                )
+
+                # Append the agent's final summary to supervisor's history so
+                # the next supervisor decision has context
+                if result.decisions:
+                    last_obs = result.decisions[-1].observation or "(no observation)"
+                else:
+                    last_obs = "(agent produced no decisions)"
+                self._supervisor_messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[Result from {expert_name} on {target}]\n"
+                        f"Task: {task_description}\n"
+                        f"Status: {result.status}\n"
+                        f"Decisions: {len(result.decisions)}\n"
+                        f"Findings: {len(result.findings)}\n"
+                        f"Tokens: {result.total_tokens}\n"
+                        f"Last observation: {last_obs[:500]}\n"
+                        f"Findings list: {result.findings[:5]}"
+                    ),
+                })
+
+                # Aggregate findings into the orchestrator's findings list
+                for f in result.findings:
+                    self.findings.append({**f, "source_agent": expert_name})
+
+                # Record a high-level decision for the orchestrator's log
+                turn = len(self.decisions)
+                decision = AgentDecision(
+                    turn=turn,
+                    thought=f"Expert {expert_name} executed (P3 real). "
+                            f"safety={meta.safety_class} decisions={len(result.decisions)} "
+                            f"findings={len(result.findings)}",
+                    agent_name=expert_name,
+                    tool_name=meta.tool_allowlist[0] if meta.tool_allowlist else None,
+                    tool_args={"target": target, "task_description": task_description[:200]},
+                    observation=f"{expert_name} returned: status={result.status}, "
+                                f"decisions={len(result.decisions)}, findings={len(result.findings)}",
+                    tokens_used=result.total_tokens,
+                )
+                self.record_decision(decision)
+                self.agents_involved.add(expert_name)
+                await emit_scan_progress(
+                    scan_id=self.scan_id, turn=turn, thought=decision.thought,
+                    tool_name=decision.tool_name, observation=decision.observation[:500],
+                )
+
+                return {**state, "current_agent": expert_name, "decisions": self.decisions}
+
+            # ---------- W10 stub fallback ----------
+            logger.info(
+                "Expert node executing (W10 stub): scan=%s expert=%s",
+                self.scan_id, expert_name,
+            )
             turn = len(self.decisions)
-            target = state.get("target", self.target)
             observation = self._stub_expert_observe(expert_name, target)
 
             decision = AgentDecision(
@@ -304,12 +605,19 @@ class SupervisorOrchestrator(BaseOrchestrator):
                 tool_name=decision.tool_name, observation=observation[:500],
             )
 
+            # Append stub result to supervisor history too (so W10 path
+            # still feeds the supervisor LLM if llm_config is later added)
+            self._supervisor_messages.append({
+                "role": "user",
+                "content": f"[Stub result from {expert_name} on {target}]\n{observation}",
+            })
+
             return {**state, "current_agent": expert_name, "decisions": self.decisions}
 
         return expert_node
 
     def _stub_expert_observe(self, expert_name: str, target: str) -> str:
-        """W10 stub: return canned observation per expert."""
+        """W10 stub: return canned observation per expert. P3 deprecated."""
         if expert_name == "recon":
             return (
                 f"Recon on {target} (W10 stub): nmap found ports 22, 80, 443; "
@@ -320,7 +628,6 @@ class SupervisorOrchestrator(BaseOrchestrator):
                 "Reporting (W10 stub): aggregated 0 findings from blackboard. "
                 "Recommend full scan with Deep mode for thorough coverage."
             )
-        # Generic fallback for any other expert_name (when transfer_targets is customized)
         meta = agent_registry.get_agent(expert_name)
         return f"Expert {expert_name} ({meta.display_name if meta else 'unknown'}) executed (W10 stub)."
 
@@ -383,8 +690,13 @@ async def run_supervisor_scan(
     scan_id: str | None = None,
     experts: dict[str, dict[str, Any]] | None = None,
     transfer_targets: list[str] | None = None,
+    llm_config: dict[str, Any] | None = None,
+    executor: Any = None,
 ) -> OrchestratorResult:
     """One-shot: run a scan with the Supervisor orchestrator.
+
+    P3: now accepts llm_config + executor for real LLM-driven execution.
+    If llm_config is None, falls back to W10 stub behavior (for tests).
 
     Args:
         target: Target URL or IP
@@ -392,9 +704,12 @@ async def run_supervisor_scan(
         scan_id: Optional scan ID (auto-generated if None)
         experts: Optional legacy experts dict (W9 backward compat — prefer transfer_targets)
         transfer_targets: Optional list of agent names to transfer to in sequence.
-            Defaults to ["recon", "reporting-remediation"] (W9 stub).
-            Can include any of the 13 sub-agents in the registry, e.g.:
-            ["recon", "vulnerability-triage", "penetration", "reporting-remediation"]
+            Defaults to P3 4-phase web pentest flow:
+                ["recon", "vulnerability-triage", "penetration", "reporting-remediation"]
+        llm_config: User LLM config from DB (provider, api_key, model, ...).
+            Required for real LLM execution. None = W10 stub.
+        executor: SubprocessExecutor with scope guard for the scan target.
+            Required for real tool execution. None = no tools run.
 
     Returns:
         OrchestratorResult with decisions, findings, agents_involved.
@@ -408,5 +723,7 @@ async def run_supervisor_scan(
         user_prompt=user_prompt,
         experts=experts,
         transfer_targets=transfer_targets,
+        llm_config=llm_config,
+        executor=executor,
     )
     return await orchestrator.run()

@@ -16,7 +16,7 @@ export async function renderSettings(container) {
     <div class="page-container">
       <div class="page-header">
         <h1 class="page-title">Settings</h1>
-        <p class="page-subtitle">Configure LLM provider + HITL audit agent</p>
+        <p class="page-subtitle">Configure LLM provider for the AI agent</p>
       </div>
 
       <div id="settings-content">
@@ -114,57 +114,6 @@ function renderSettingsForm(container, llm) {
       </div>
     </div>
 
-    <!-- Section 2: HITL Audit Agent Config -->
-    <div class="settings-section">
-      <div class="card">
-        <div class="settings-section-title" style="margin-bottom: 16px">
-          🛡️ HITL Audit Agent Configuration
-        </div>
-        <p style="font-size: 13px; color: var(--text-tertiary); margin-bottom: 20px">
-          Separate model for the audit agent that reviews destructive operations.
-          Leave empty to reuse the main AI channel config.
-        </p>
-
-        <div class="settings-form">
-          <div class="form-row">
-            <div class="form-group">
-              <label for="hitl-provider">Audit Provider</label>
-              <select id="hitl-provider" class="input">
-                <option value="" ${!llm.hitl_audit_provider ? 'selected' : ''}>Reuse main model config</option>
-                <option value="openai" ${llm.hitl_audit_provider === 'openai' ? 'selected' : ''}>OpenAI / OpenAI-compatible</option>
-                <option value="anthropic" ${llm.hitl_audit_provider === 'anthropic' ? 'selected' : ''}>Anthropic (Claude)</option>
-                <option value="glm" ${llm.hitl_audit_provider === 'glm' ? 'selected' : ''}>GLM (Zhipu)</option>
-                <option value="minimax" ${llm.hitl_audit_provider === 'minimax' ? 'selected' : ''}>Minimax</option>
-                <option value="deepseek" ${llm.hitl_audit_provider === 'deepseek' ? 'selected' : ''}>DeepSeek</option>
-                <option value="groq" ${llm.hitl_audit_provider === 'groq' ? 'selected' : ''}>Groq</option>
-                <option value="google" ${llm.hitl_audit_provider === 'google' ? 'selected' : ''}>Google (Gemini)</option>
-                <option value="ollama" ${llm.hitl_audit_provider === 'ollama' ? 'selected' : ''}>Ollama (local)</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label for="hitl-model">Audit Model</label>
-              <input type="text" id="hitl-model" class="input" placeholder="gpt-4o-mini / glm-4-flash (recommend cheap model)" value="${escapeHtml(llm.hitl_audit_model || '')}" />
-            </div>
-          </div>
-
-          <div class="form-row">
-            <div class="form-group">
-              <label for="hitl-base-url">Audit Base URL</label>
-              <input type="text" id="hitl-base-url" class="input" placeholder="Leave empty to reuse main" value="${escapeHtml(llm.hitl_audit_base_url || '')}" />
-            </div>
-            <div class="form-group">
-              <label for="hitl-api-key">Audit API Key</label>
-              <input type="password" id="hitl-api-key" class="input" placeholder="Leave empty to reuse main" value="${escapeHtml(llm.hitl_audit_api_key || '')}" />
-            </div>
-          </div>
-
-          <div style="margin-top: 16px">
-            <button class="btn btn-primary" id="save-hitl-btn">💾 Save HITL Config</button>
-          </div>
-        </div>
-      </div>
-    </div>
-
     <!-- Section 3: System Info -->
     <div class="settings-section">
       <div class="card">
@@ -223,7 +172,6 @@ function renderSettingsForm(container, llm) {
   // Attach handlers
   document.getElementById('save-llm-btn').addEventListener('click', saveLLMSettings);
   document.getElementById('test-llm-btn').addEventListener('click', testLLMConnection);
-  document.getElementById('save-hitl-btn').addEventListener('click', saveLLMSettings);
   document.getElementById('logout-btn').addEventListener('click', logout);
 }
 
@@ -236,10 +184,6 @@ async function collectLLMFormData() {
     max_total_tokens: parseInt(document.getElementById('llm-max-total-tokens').value) || 120000,
     max_completion_tokens: parseInt(document.getElementById('llm-max-completion-tokens').value) || 16384,
     temperature: parseFloat(document.getElementById('llm-temperature').value) || 0.7,
-    hitl_audit_provider: document.getElementById('hitl-provider').value,
-    hitl_audit_base_url: document.getElementById('hitl-base-url').value.trim(),
-    hitl_audit_api_key: document.getElementById('hitl-api-key').value,
-    hitl_audit_model: document.getElementById('hitl-model').value.trim(),
   };
 }
 

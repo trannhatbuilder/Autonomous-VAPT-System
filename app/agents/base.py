@@ -427,27 +427,420 @@ class BaseAgent:
 
     # ---------- Abstract interface ----------
 
-    async def run(self) -> AgentRunResult:
+    async def run(
+        self,
+        llm_config: dict[str, Any] | None = None,
+        executor: Any = None,
+    ) -> AgentRunResult:
         """Execute the agent's task. Returns final result.
 
-        Default implementation:
-            1. Check guardrails
-            2. Call _decide_next() to get one decision (W10 stub: 1 decision per run)
-            3. Record decision + emit SSE
-            4. Finalize with status='completed'
+        P3: now dispatches to _run_react_loop() — the real LLM + tool
+        execution loop. Falls back to the W10 stub _decide_next() only
+        when llm_config is None (backward compat with tests).
 
-        Subclasses can override to implement multi-step ReAct loops (W11+).
+        Args:
+            llm_config: User's LLM config from DB (provider, api_key, model, ...).
+                Required for real LLM-driven execution. If None, falls back
+                to the W10 stub behavior.
+            executor: SubprocessExecutor instance configured for the scan's
+                scope guard. Required for real tool execution. If None, the
+                agent loop will skip tool calls and just record the LLM's
+                thinking.
+
+        Returns:
+            AgentRunResult with decisions, findings, tokens, duration.
         """
         # Check guardrails before starting
         violation = self._check_guardrails()
         if violation:
             return self._finalize("failed", error=violation)
 
-        # Get one decision from subclass
+        # P3 dispatch
+        if llm_config is not None:
+            return await self._run_react_loop(llm_config, executor)
+
+        # W10 fallback (for tests that haven't been updated yet)
+        logger.warning(
+            "Agent %s running in W10-stub mode (no llm_config). "
+            "Pass llm_config to enable real LLM execution.",
+            self.AGENT_NAME,
+        )
+        return await self._run_w10_stub()
+
+    async def _run_react_loop(
+        self,
+        llm_config: dict[str, Any],
+        executor: Any,
+    ) -> AgentRunResult:
+        """P3: real ReAct loop using LLM + filtered tool schemas.
+
+        Mirrors CyberStrikeAI's `runEinoADKAgentLoop`:
+            1. Build messages with system_prompt + task_description
+            2. Build tool schemas filtered by self.tool_allowlist
+            3. Loop (up to max_iterations):
+                a. Call LLM via litellm.chat_completion(messages, tools)
+                b. If LLM returns tool_calls:
+                    - For each tool_call:
+                        - Validate against tool_allowlist (defense in depth)
+                        - If self.is_destructive:
+                            → use executor.execute_with_hitl(...) (HITL gate)
+                          else:
+                            → use execute_tool_call(...) via ExecutionService
+                        - Append tool_result to messages
+                    - Continue loop
+                c. If LLM returns content only (no tool_calls):
+                    - LLM is done thinking — append assistant message
+                    - Break (assume LLM calls implicit "exit" by returning text)
+            4. Finalize with status + decisions + tokens
+
+        Each iteration records an AgentDecision + emits an SSE event.
+
+        Args:
+            llm_config: User LLM config (provider, api_key, model, ...)
+            executor: SubprocessExecutor with scope guard for this scan
+
+        Returns:
+            AgentRunResult with all decisions recorded
+        """
+        from app.agents.llm_client import chat_completion
+        from app.agents.tool_bridge import build_tool_schemas, execute_tool_call
+
+        # ---------- Build initial messages ----------
+        user_msg = (
+            f"Target: {self.target}\n\n"
+            f"Task: {self.task_description or '(no specific task)'}\n\n"
+            f"User context: {self.user_prompt or '(no user prompt)'}\n\n"
+            f"Begin your task. Use the tools available to you. "
+            f"When you have completed your task, return a final summary "
+            f"as your last message (without tool calls)."
+        )
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": user_msg},
+        ]
+
+        # ---------- Build tool schemas filtered by allowlist ----------
+        # tool_allowlist contains binary names (e.g. "nmap", "httpx").
+        # build_tool_schemas takes tool_names filter matching YAML tool names.
+        allowed = list(self.tool_allowlist) if self.tool_allowlist else None
+        tool_schemas = build_tool_schemas(tool_names=allowed)
+
+        # Add `record_finding` + `exit` tools to every agent so they can
+        # persist findings + signal completion (the `exit` tool is interpreted
+        # by the agent loop as "stop and return").
+        # build_tool_schemas already adds both of these automatically.
+
+        logger.info(
+            "Agent %s starting ReAct loop | scan=%s | tools=%d | max_iter=%d | destructive=%s",
+            self.AGENT_NAME, self.scan_id,
+            len(self.tool_allowlist), self.max_iterations, self.is_destructive,
+        )
+
+        # ---------- ReAct loop ----------
+        for iteration in range(self.max_iterations):
+            turn = len(self.decisions)
+
+            # ---------- P5 minimal: context budget cap ----------
+            # If messages list grows beyond 50 entries (each tool call adds
+            # 2 messages: assistant + tool result), drop the middle ones to
+            # prevent unbounded context growth. Keep:
+            #   - first 4 messages (system + initial user + first 2 LLM/tool pairs)
+            #   - last 30 messages (most recent context for decision-making)
+            # This is a HARD cap — true CyberStrikeAI parity would use a
+            # summarize middleware (LLM call to compress older context), but
+            # that's expensive (extra LLM call per scan). Defer to P5-real.
+            MAX_MESSAGES = 50
+            KEEP_HEAD = 4
+            KEEP_TAIL = 30
+            if len(messages) > MAX_MESSAGES:
+                dropped = len(messages) - KEEP_HEAD - KEEP_TAIL
+                logger.info(
+                    "Agent %s context cap: %d messages → %d (dropped %d middle)",
+                    self.AGENT_NAME, len(messages), KEEP_HEAD + KEEP_TAIL, dropped,
+                )
+                messages = messages[:KEEP_HEAD] + messages[-KEEP_TAIL:]
+
+            try:
+                # Call LLM
+                response = await chat_completion(
+                    llm_config=llm_config,
+                    messages=messages,
+                    tools=tool_schemas,
+                )
+
+                self.total_tokens += response["usage"].get("total_tokens", 0)
+
+                # Append assistant message to history
+                assistant_msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": response["content"] or "",
+                }
+                if response["tool_calls"]:
+                    assistant_msg["tool_calls"] = [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": tc["arguments"],
+                            },
+                        }
+                        for tc in response["tool_calls"]
+                    ]
+                messages.append(assistant_msg)
+
+                # If LLM returned no tool_calls, treat as implicit exit
+                if not response["tool_calls"]:
+                    thought = (response["content"] or "")[:500]
+                    logger.info(
+                        "Agent %s implicit exit at iter %d | thought=%s",
+                        self.AGENT_NAME, iteration + 1, thought[:80],
+                    )
+                    decision = AgentDecision(
+                        turn=turn,
+                        agent_name=self.AGENT_NAME,
+                        thought=thought,
+                        tool_name=None,
+                        tool_args={},
+                        observation="(implicit exit — LLM returned text without tool_calls)",
+                        tokens_used=response["usage"].get("total_tokens", 0),
+                    )
+                    self._record_decision(decision)
+                    await self._emit_progress_event(decision)
+                    break
+
+                # ---------- Execute each tool call ----------
+                for tc in response["tool_calls"]:
+                    tool_name = tc["name"]
+                    try:
+                        import json as _json
+                        tool_args = _json.loads(tc["arguments"]) if tc["arguments"] else {}
+                    except Exception:
+                        tool_args = {}
+
+                    # Defense-in-depth: re-validate against allowlist
+                    # (the LLM might hallucinate a tool name not in our schema)
+                    if tool_name not in ("record_vulnerability", "exit"):
+                        if tool_name not in self.tool_allowlist:
+                            logger.warning(
+                                "TOOL_ALLOWLIST_VIOLATION | agent=%s | tool=%s | allowed=%s",
+                                self.AGENT_NAME, tool_name, list(self.tool_allowlist),
+                            )
+                            tool_output = (
+                                f"TOOL_ALLOWLIST_VIOLATION: tool {tool_name!r} is not "
+                                f"allowed for agent {self.AGENT_NAME!r}. "
+                                f"Allowed: {list(self.tool_allowlist)}"
+                            )
+                            decision = AgentDecision(
+                                turn=turn, agent_name=self.AGENT_NAME,
+                                thought=f"Tried to call {tool_name} (not allowed)",
+                                tool_name=tool_name, tool_args=tool_args,
+                                observation=tool_output,
+                                tokens_used=response["usage"].get("total_tokens", 0),
+                            )
+                            self._record_decision(decision)
+                            await self._emit_progress_event(decision)
+                            messages.append({
+                                "role": "tool", "tool_call_id": tc["id"],
+                                "content": tool_output,
+                            })
+                            continue
+
+                    # ---------- P3.2: HITL gate for destructive agents ----------
+                    if self.is_destructive and tool_name not in ("record_vulnerability", "exit"):
+                        # Destructive tool — route through execute_with_hitl
+                        # so the HITL gate (audit_agent mode by default)
+                        # reviews the tool call before execution.
+                        tool_output = await self._execute_destructive_with_hitl(
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                            executor=executor,
+                            reasoning=f"Agent {self.AGENT_NAME} requested {tool_name}",
+                        )
+                    elif tool_name == "exit":
+                        # Exit tool — break out of loop
+                        final_summary = tool_args.get("summary", "Agent task complete.")
+                        logger.info(
+                            "Agent %s explicit exit | iter=%d | summary=%s",
+                            self.AGENT_NAME, iteration + 1, final_summary[:100],
+                        )
+                        decision = AgentDecision(
+                            turn=turn, agent_name=self.AGENT_NAME,
+                            thought=f"Agent called exit: {final_summary[:200]}",
+                            tool_name="exit", tool_args=tool_args,
+                            observation=final_summary,
+                            tokens_used=response["usage"].get("total_tokens", 0),
+                        )
+                        self._record_decision(decision)
+                        await self._emit_progress_event(decision)
+                        return self._finalize("completed")
+
+                    elif tool_name == "record_vulnerability":
+                        # Bypass executor — direct DB insert via tool_bridge
+                        tool_output = await execute_tool_call(
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                            target=self.target,
+                            scan_id=self.scan_id,
+                            executor=executor,
+                        )
+                        # Record as a finding for this agent's result
+                        self.findings.append({
+                            "title": tool_args.get("title"),
+                            "severity": tool_args.get("severity"),
+                            "vuln_type": tool_args.get("vuln_type"),
+                            "target": tool_args.get("target", self.target),
+                        })
+                    else:
+                        # Normal tool — execute via ExecutionService (P2 path)
+                        tool_output = await execute_tool_call(
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                            target=self.target,
+                            scan_id=self.scan_id,
+                            executor=executor,
+                        )
+
+                    # Record decision + emit SSE
+                    thought_preview = (response["content"] or "")[:200]
+                    decision = AgentDecision(
+                        turn=turn,
+                        agent_name=self.AGENT_NAME,
+                        thought=thought_preview or f"Called {tool_name}",
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        observation=tool_output[:500],
+                        tokens_used=response["usage"].get("total_tokens", 0),
+                    )
+                    self._record_decision(decision)
+                    await self._emit_progress_event(decision)
+
+                    # Append tool result to messages for next LLM round
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": tool_output,
+                    })
+
+            except Exception as exc:
+                logger.exception(
+                    "Agent %s ReAct loop error at iter %d: %s",
+                    self.AGENT_NAME, iteration + 1, exc,
+                )
+                return self._finalize("failed", error=str(exc))
+
+        # Reached max_iterations without explicit exit
+        if len(self.decisions) >= self.max_iterations:
+            logger.warning(
+                "Agent %s hit max_iterations=%d",
+                self.AGENT_NAME, self.max_iterations,
+            )
+            return self._finalize("max_iterations")
+
+        return self._finalize("completed")
+
+    async def _execute_destructive_with_hitl(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        executor: Any,
+        reasoning: str,
+    ) -> str:
+        """P3.2: route destructive tool calls through execute_with_hitl.
+
+        Mirrors CyberStrikeAI's hitl_middleware pattern. For agents with
+        safety_class="destructive" (penetration, privilege-escalation,
+        lateral-movement, persistence-maintenance, impact-exfiltration),
+        every tool call is routed through:
+            1. HITLManager.request_and_wait() — asks AuditAgent (LLM) or
+               user to approve/reject
+            2. If approved: SubprocessExecutor.execute() via ExecutionService
+            3. If rejected: returns ToolResult.error (no subprocess runs)
+            4. If suggest_alternative: rebuild command from suggested_args
+
+        Args:
+            tool_name, tool_args: the destructive tool call
+            executor: SubprocessExecutor (must have execute_with_hitl method)
+            reasoning: agent's reasoning for the call (sent to HITL reviewer)
+
+        Returns:
+            String observation for the LLM (tool output or rejection reason)
+        """
+        # Build the actual command (same as execute_tool_call does)
+        from app.tools.loader import load_all_tools
+        from app.mcp.execution_service import get_execution_service, ExecutionStatus
+
+        all_tools = load_all_tools()
+        tool_def = all_tools.get(tool_name)
+        if tool_def is None:
+            return f"Error: destructive tool {tool_name!r} not found in tool registry"
+
+        try:
+            args = tool_def.build_command_args(**tool_args)
+        except Exception as exc:
+            return f"Error building args for {tool_name}: {exc}"
+
+        cmd = [tool_def.command] + args
+
+        # Submit via ExecutionService with HITL-wrapped run closure
+        svc = get_execution_service()
+
+        async def run_with_hitl(cancel_event) -> dict[str, Any]:
+            result = await executor.execute_with_hitl(
+                command=cmd,
+                target=self.target,
+                tool_name=tool_name,
+                tool_args=tool_args,
+                scan_id=self.scan_id,
+                agent_reasoning=reasoning,
+                predicted_impact=tool_def.safety_class,  # destructive
+                timeout=tool_def.timeout,
+                allowed_exit_codes=tool_def.allowed_exit_codes,
+            )
+            return result.to_dict()
+
+        execution = await svc.submit(
+            tool_name=tool_name,
+            arguments=tool_args,
+            target=self.target,
+            run=run_with_hitl,
+            scan_id=self.scan_id,
+            actor_id=self.AGENT_NAME,
+            hard_timeout=tool_def.timeout,
+        )
+
+        # Format result for LLM (same shape as execute_tool_call returns)
+        if execution.status == ExecutionStatus.COMPLETED and execution.result:
+            r = execution.result
+            parts: list[str] = []
+            if r.get("scope_violation"):
+                parts.append("SCOPE VIOLATION: target not in declared scope. Tool blocked.")
+            if r.get("stdout"):
+                parts.append(r["stdout"])
+            if r.get("stderr") and r.get("exit_code") not in (0, None):
+                parts.append(f"[stderr] {r['stderr'][:500]}")
+            if r.get("error"):
+                parts.append(f"[error] {r['error']}")
+            parts.append(f"[execution_id] {execution.id}")
+            parts.append(f"[hitl] approved (safety_class={tool_def.safety_class})")
+            return "\n".join(parts)
+        else:
+            return (
+                f"[error] HITL blocked execution of {tool_name}: "
+                f"{execution.error or execution.status.value}\n"
+                f"[execution_id] {execution.id}\n"
+                f"[hitl] status={execution.status.value}"
+            )
+
+    async def _run_w10_stub(self) -> AgentRunResult:
+        """W10 fallback: 1-decision stub via _decide_next().
+
+        Kept for backward compat with tests that don't pass llm_config.
+        P3+ callers should always pass llm_config.
+        """
         turn = len(self.decisions)
         thought, tool_name, tool_args, observation = await self._decide_next(turn)
 
-        # Validate tool call against allowlist
         if tool_name is not None:
             allowed, reason = self._validate_tool_call(tool_name, tool_args)
             if not allowed:
@@ -456,9 +849,8 @@ class BaseAgent:
                     self.AGENT_NAME, tool_name, reason,
                 )
                 observation = f"TOOL_ALLOWLIST_VIOLATION: {reason}"
-                tool_name = None  # block the call
+                tool_name = None
 
-        # Record decision
         decision = AgentDecision(
             turn=turn,
             agent_name=self.AGENT_NAME,
@@ -466,7 +858,7 @@ class BaseAgent:
             tool_name=tool_name,
             tool_args=tool_args,
             observation=observation,
-            tokens_used=100,  # stub — W11+ will use real token counting
+            tokens_used=100,
         )
         self._record_decision(decision)
         await self._emit_progress_event(decision)
@@ -477,23 +869,23 @@ class BaseAgent:
         self,
         turn: int,
     ) -> tuple[str, str | None, dict[str, Any], str]:
-        """Decide the next action. Subclasses MUST override.
+        """W10-stub decision function. DEPRECATED in P3.
+
+        P3 default behavior: BaseAgent.run() dispatches to _run_react_loop()
+        when llm_config is provided. This _decide_next() is only called by
+        the W10 fallback path (_run_w10_stub) when llm_config=None.
+
+        Subclasses that previously overrode this with canned responses can
+        keep their overrides for backward compat with the W10 path, but
+        production code should always pass llm_config.
 
         Returns:
             (thought, tool_name_or_None, tool_args, observation)
-
-            - thought: short reasoning text (2-4 sentences)
-            - tool_name: tool to invoke, or None if pure reasoning
-            - tool_args: arguments for the tool
-            - observation: tool result or reasoning output
-
-        W10 stub: subclasses return canned response per agent role.
-        W11+ will replace with LiteLLM call using self.system_prompt +
-        relevant skill bodies (self.get_skill_context_for_llm()).
         """
         raise NotImplementedError(
             f"{self.__class__.__name__}._decide_next() not implemented. "
-            f"Subclasses must override this method."
+            f"Subclasses must override this method (or always pass llm_config "
+            f"to run() to use the P3 real ReAct loop)."
         )
 
 

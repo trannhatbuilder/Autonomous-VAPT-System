@@ -1,0 +1,430 @@
+/**
+ * VAPT-AI API client.
+ *
+ * Two modes:
+ *  - LOCAL DEV (your machine): set NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+ *    in .env.local. All API calls go to that absolute URL (no Caddy gateway).
+ *  - SANDBOX (preview.space-z.ai): no env var. All calls use relative paths
+ *    with XTransformPort=8000 query param (per Caddy gateway rule).
+ *
+ * Auth: JWT access + refresh tokens stored in localStorage.
+ *  - On 401 response, automatically refreshes once + retries the call.
+ *  - On refresh failure, clears tokens + redirects to login.
+ */
+
+/**
+ * Build the API base URL + port-routing strategy.
+ * Returns { baseUrl: string, useXTransformPort: boolean }.
+ *
+ * - If NEXT_PUBLIC_API_BASE_URL is set (local dev): use absolute URL, no port routing.
+ * - If not set (sandbox): use relative path with XTransformPort=8000 query param.
+ */
+function getApiConfig(): { baseUrl: string; useXTransformPort: boolean } {
+  const envBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
+  if (envBaseUrl) {
+    return { baseUrl: envBaseUrl.replace(/\/$/, ""), useXTransformPort: false };
+  }
+  // Sandbox default: relative paths via Caddy
+  return { baseUrl: "", useXTransformPort: true };
+}
+
+const SANDBOX_BACKEND_PORT = "8000";
+
+/** Helper: build URL — works for both local-dev absolute + sandbox relative modes. */
+function apiUrl(path: string, params?: Record<string, string | number | boolean | undefined>): string {
+  const { baseUrl, useXTransformPort } = getApiConfig();
+  const url = new URL(path, baseUrl || (typeof window !== "undefined" ? window.location.origin : "http://localhost"));
+  if (useXTransformPort) {
+    url.searchParams.set("XTransformPort", SANDBOX_BACKEND_PORT);
+  }
+  if (params) {
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null) {
+        url.searchParams.set(key, String(value));
+      }
+    }
+  }
+  // For local dev: return absolute URL (e.g., http://localhost:8000/api/auth/login)
+  // For sandbox: return relative path (e.g., /api/auth/login?XTransformPort=8000)
+  if (baseUrl) {
+    return url.toString();
+  }
+  return url.toString().replace(window.location.origin, "");
+}
+
+/** Token storage helpers (localStorage — single-user internal tool). */
+export const tokenStorage = {
+  getAccessToken(): string | null {
+    if (typeof window === "undefined") return null;
+    return localStorage.getItem("vapt_access_token");
+  },
+  getRefreshToken(): string | null {
+    if (typeof window === "undefined") return null;
+    return localStorage.getItem("vapt_refresh_token");
+  },
+  setTokens(accessToken: string, refreshToken: string): void {
+    if (typeof window === "undefined") return;
+    localStorage.setItem("vapt_access_token", accessToken);
+    localStorage.setItem("vapt_refresh_token", refreshToken);
+  },
+  clearTokens(): void {
+    if (typeof window === "undefined") return;
+    localStorage.removeItem("vapt_access_token");
+    localStorage.removeItem("vapt_refresh_token");
+  },
+};
+
+export class ApiError extends Error {
+  status: number;
+  detail: any;
+  constructor(message: string, status: number, detail?: any) {
+    super(message);
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+/** Refresh the access token using the refresh token. Returns new tokens or throws. */
+async function refreshAccessToken(): Promise<{ access_token: string; refresh_token: string }> {
+  const refreshToken = tokenStorage.getRefreshToken();
+  if (!refreshToken) {
+    throw new ApiError("No refresh token", 401);
+  }
+  const res = await fetch(apiUrl("/api/auth/refresh"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new ApiError("Refresh failed", res.status, detail);
+  }
+  const data = await res.json();
+  tokenStorage.setTokens(data.access_token, data.refresh_token);
+  return data;
+}
+
+/**
+ * Authenticated fetch wrapper.
+ * - Adds Authorization: Bearer <access_token> header
+ * - On 401: tries refreshAccessToken() once, then retries the original call.
+ * - On repeated 401: clears tokens + throws ApiError(401) — caller should redirect to login.
+ */
+export async function apiFetch<T = any>(
+  path: string,
+  options: RequestInit = {},
+  params?: Record<string, string | number | boolean | undefined>,
+): Promise<T> {
+  const accessToken = tokenStorage.getAccessToken();
+  const headers: Record<string, string> = {
+    ...(options.headers as Record<string, string> || {}),
+  };
+  if (accessToken) {
+    headers["Authorization"] = `Bearer ${accessToken}`;
+    headers["Content-Type"] = "application/json";
+  }
+
+  const doFetch = async (): Promise<Response> => {
+    return fetch(apiUrl(path, params), {
+      ...options,
+      headers,
+    });
+  };
+
+  let res = await doFetch();
+
+  if (res.status === 401) {
+    // Try refresh + retry once
+    try {
+      await refreshAccessToken();
+      headers["Authorization"] = `Bearer ${tokenStorage.getAccessToken()}`;
+      res = await doFetch();
+    } catch (refreshErr) {
+      tokenStorage.clearTokens();
+      throw new ApiError("Session expired. Please log in again.", 401);
+    }
+  }
+
+  if (!res.ok) {
+    // Read body ONCE as text, then try to parse as JSON
+    // (avoids "body stream already read" error from calling both .json() + .text())
+    let detail: any;
+    const text = await res.text();
+    try { detail = JSON.parse(text); } catch { detail = text; }
+    const message =
+      (detail && (detail.detail || detail.message)) ||
+      `HTTP ${res.status}: ${res.statusText}`;
+    throw new ApiError(message, res.status, detail);
+  }
+
+  // 204 No Content
+  if (res.status === 204) return undefined as T;
+  // Empty body
+  const text = await res.text();
+  if (!text) return undefined as T;
+  return JSON.parse(text) as T;
+}
+
+/** Unauthenticated fetch — used only for /api/auth/login. */
+export async function apiLogin(email: string, password: string): Promise<{
+  access_token: string;
+  refresh_token: string;
+  user: { id: string; email: string; role: string; display_name: string | null };
+}> {
+  const res = await fetch(apiUrl("/api/auth/login"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!res.ok) {
+    // Read body ONCE as text, then try to parse as JSON
+    let detail: any;
+    const text = await res.text();
+    try { detail = JSON.parse(text); } catch { detail = text; }
+    const message =
+      (detail && (detail.detail || detail.message)) ||
+      `HTTP ${res.status}: ${res.statusText}`;
+    throw new ApiError(message, res.status, detail);
+  }
+  return res.json();
+}
+
+/** GET /api/auth/me — verify access token validity. */
+export async function getMe(): Promise<{ id: string; email: string; role: string; display_name: string | null }> {
+  return apiFetch("/api/auth/me");
+}
+
+/** POST /api/scans/start — start a scan, returns scan_id immediately. */
+export async function startScan(target: string, userPrompt: string): Promise<{
+  scan_id: string;
+  target: string;
+  user_prompt: string;
+  status: string;
+  message: string;
+}> {
+  return apiFetch("/api/scans/start", {
+    method: "POST",
+    body: JSON.stringify({ target, user_prompt: userPrompt }),
+  });
+}
+
+/** GET /api/scans/{scan_id}/blackboard — get blackboard summary. */
+export async function getBlackboard(scanId: string): Promise<any> {
+  return apiFetch(`/api/scans/${scanId}/blackboard`);
+}
+
+/** GET /api/scans/{scan_id}/facts — get facts for a scan. */
+export async function getFacts(scanId: string, factType?: string): Promise<any> {
+  const params: Record<string, string | undefined> = {};
+  if (factType) params.fact_type = factType;
+  return apiFetch(`/api/scans/${scanId}/facts`, undefined, params);
+}
+
+/** GET /mcp/tools/definitions — list all 32 YAML tool definitions. */
+export async function getTools(): Promise<{
+  tools_count: number;
+  tools: Array<{
+    name: string;
+    command: string;
+    category: string;
+    short_description: string;
+    wstg_ids: string[];
+    mitre_attack: string[];
+    safety_class: string;
+    parameters: string[];
+    timeout: number;
+  }>;
+}> {
+  return apiFetch("/mcp/tools/definitions");
+}
+
+/** GET /api/orchestration/agents — list all 16 agents (3 orchestrators + 13 specialists). */
+export async function getAgents(): Promise<{
+  agents_count: number;
+  agents: Array<{
+    name: string;
+    display_name: string;
+    description: string;
+    safety_class: string;
+    tool_allowlist: string[];
+    is_destructive: boolean;
+    prompt_file: string;
+  }>;
+}> {
+  return apiFetch("/api/orchestration/agents");
+}
+
+/** GET /api/mcp/executions — list tool executions. */
+export async function getExecutions(scanId?: string, limit: number = 50): Promise<{
+  executions_count: number;
+  executions: Array<any>;
+}> {
+  const params: Record<string, string | number | undefined> = { limit };
+  if (scanId) params.scan_id = scanId;
+  return apiFetch("/api/mcp/executions", undefined, params);
+}
+
+/** POST /api/mcp/executions/{id}/cancel — panic button for single execution. */
+export async function cancelExecution(executionId: string): Promise<{
+  cancelled: boolean;
+  execution_id: string;
+  final_status: string | null;
+  reason: string;
+}> {
+  return apiFetch(`/api/mcp/executions/${executionId}/cancel`, { method: "POST" });
+}
+
+/** POST /api/mcp/scans/{scan_id}/abort — bulk panic button. */
+export async function abortScan(scanId: string): Promise<{
+  scan_id: string;
+  cancelled_executions: number;
+  message: string;
+}> {
+  return apiFetch(`/api/mcp/scans/${scanId}/abort`, { method: "POST" });
+}
+
+/** GET /api/settings/llm — fetch current user's LLM config (api_key masked). */
+export async function getLLMSettings(): Promise<{
+  llm: {
+    provider?: string;
+    api_key?: string;  // masked
+    model?: string;
+    base_url?: string;
+    max_total_tokens?: number;
+    max_completion_tokens?: number;
+    temperature?: number;
+    hitl_audit_api_key?: string;  // masked
+  };
+}> {
+  return apiFetch("/api/settings/llm");
+}
+
+/** POST /api/settings/llm — save LLM config. */
+export async function saveLLMSettings(config: {
+  provider: string;
+  api_key: string;
+  model: string;
+  base_url?: string;
+  max_total_tokens?: number;
+  max_completion_tokens?: number;
+  temperature?: number;
+}): Promise<{ status: string; message: string }> {
+  return apiFetch("/api/settings/llm", {
+    method: "POST",
+    body: JSON.stringify(config),
+  });
+}
+
+/** POST /api/settings/llm/test — test LLM connection. */
+export async function testLLMConnection(config: {
+  provider: string;
+  api_key: string;
+  model: string;
+  base_url?: string;
+}): Promise<{ success: boolean; message?: string; error?: string }> {
+  return apiFetch("/api/settings/llm/test", {
+    method: "POST",
+    body: JSON.stringify(config),
+  });
+}
+
+/** GET /api/findings — list all findings (paginated). */
+export async function getFindings(params?: {
+  scan_id?: string;
+  severity?: string;
+  verified?: "true" | "false";
+  limit?: number;
+  offset?: number;
+}): Promise<{
+  findings: Array<{
+    id: string;
+    scan_id: string;
+    name: string;
+    vuln_type: string;
+    severity: string;
+    cvss_vector: string | null;
+    cvss_score: number;
+    location: string;
+    description: string;
+    remediation: string;
+    poc_status: string;
+    verified: boolean;
+    created_at: string;
+  }>;
+  total: number;
+}> {
+  return apiFetch("/api/findings", undefined, params as any);
+}
+
+/** GET /api/scans/active — list active scans. */
+export async function getActiveScans(): Promise<{
+  active_scans: Array<{
+    scan_id: string;
+    target: string;
+    started_at: string;
+    user_prompt: string;
+    status: string;
+    progress: number;
+  }>;
+  count: number;
+}> {
+  return apiFetch("/api/scans/active");
+}
+
+/** POST /api/scans/{scan_id}/abort — abort a scan (separate from abort-tools). */
+export async function abortScanPipeline(scanId: string): Promise<any> {
+  return apiFetch(`/api/scans/${scanId}/abort`, { method: "POST" });
+}
+
+/** GET /api/hitl/pending/{scan_id} — list pending HITL approvals. */
+export async function getPendingHITLApprovals(scanId: string): Promise<{
+  approvals: Array<any>;
+  count: number;
+}> {
+  return apiFetch(`/api/hitl/pending/${scanId}`);
+}
+
+/** POST /api/hitl/{approval_id}/approve — approve a HITL request. */
+export async function approveHITL(approvalId: string, comment?: string): Promise<any> {
+  return apiFetch(`/api/hitl/${approvalId}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ comment: comment || "" }),
+  });
+}
+
+/** POST /api/hitl/{approval_id}/abort — reject a HITL request. */
+export async function rejectHITL(approvalId: string, comment?: string): Promise<any> {
+  return apiFetch(`/api/hitl/${approvalId}/abort`, {
+    method: "POST",
+    body: JSON.stringify({ comment: comment || "" }),
+  });
+}
+
+/**
+ * Build SSE endpoint URL for scan events.
+ * Returns a full URL with the access_token as query param
+ * (EventSource browser API doesn't support custom headers, so we pass
+ * the token as a query param — same as CyberStrikeAI's pattern).
+ *
+ * Mode-aware:
+ *  - Local dev: http://localhost:8000/api/scans/{id}/events?token=xxx
+ *  - Sandbox: /api/scans/{id}/events?XTransformPort=8000&token=xxx
+ */
+export function getScanEventsUrl(scanId: string): string {
+  const accessToken = tokenStorage.getAccessToken();
+  const { baseUrl, useXTransformPort } = getApiConfig();
+  const url = new URL(
+    `/api/scans/${scanId}/events`,
+    baseUrl || (typeof window !== "undefined" ? window.location.origin : "http://localhost"),
+  );
+  if (useXTransformPort) {
+    url.searchParams.set("XTransformPort", SANDBOX_BACKEND_PORT);
+  }
+  if (accessToken) {
+    url.searchParams.set("token", accessToken);
+  }
+  if (baseUrl) {
+    return url.toString();
+  }
+  return url.toString().replace(window.location.origin, "");
+}

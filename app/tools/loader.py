@@ -238,11 +238,72 @@ def list_tools() -> list[ToolDef]:
 
 # ---------- MCP registration ----------
 
+def _build_scope_for_target(target: str):
+    """Build a permissive-but-safe ScopeGuard for one scan target.
+
+    P1: allows the target host + any subdomain of its base domain.
+    Example: target="https://pentest-ground.com:4280/" allows:
+        - pentest-ground.com
+        - *.pentest-ground.com  (any subdomain)
+    IPs discovered via DNS resolution during recon still need to be added
+    explicitly (P2 will add a runtime scope-expand API).
+
+    Returns a configured ScopeGuard instance.
+    """
+    from app.sandbox.scope_guard import ScopeGuard, ScopeRule
+    from urllib.parse import urlparse
+    import ipaddress
+
+    if not target:
+        return ScopeGuard(declared_scope=[])  # empty scope = blocks all target checks
+
+    # Extract host from URL/IP
+    host = target
+    if "://" in target:
+        try:
+            parsed = urlparse(target)
+            host = parsed.hostname or target
+        except Exception:
+            pass
+
+    rules: list[ScopeRule] = []
+
+    # If it's an IP, allow that exact IP
+    try:
+        ip = ipaddress.ip_address(host)
+        rules.append(ScopeRule(host=str(ip)))
+    except ValueError:
+        # It's a hostname — allow exact + wildcard subdomain
+        rules.append(ScopeRule(host=host))
+        # Also allow *.host (subdomain glob)
+        # E.g. host="pentest-ground.com" → allow "*.pentest-ground.com"
+        if "." in host:
+            rules.append(ScopeRule(host=f"*.{host}"))
+
+    return ScopeGuard(declared_scope=rules)
+
+
 def register_tools_with_mcp(mcp_server) -> None:
     """Register all loaded tools as MCP tools on the FastMCP server.
 
     Each tool becomes callable via MCP tools/call.
     The MCP tool's input schema is derived from the YAML parameters.
+
+    P1: real subprocess execution via SubprocessExecutor.
+    P2: tool_func now routes through ExecutionService — the single
+    substrate for all tool calls (both MCP HTTP + agent loop).
+    Benefits:
+        - Hard timeout (per-tool — kills the asyncio.Task if SubprocessExecutor
+          hangs on I/O)
+        - Cancellation (panic button — cancel by execution_id)
+        - Concurrency cap (default 16 — semaphore limits parallel tools)
+        - In-memory status dict (queried via get_tool_execution meta-tool)
+        - Normalized result shape (all tool results funnel through one place)
+
+    Per-call scope: built from the `target` kwarg (every YAML tool defines
+    `target` as the first positional parameter). Subdomain glob is added
+    automatically so recon-discovered subdomains of the declared target
+    are still in scope.
 
     Usage (in app/main.py or app/mcp/server.py):
         from app.tools.loader import load_all_tools, register_tools_with_mcp
@@ -250,42 +311,118 @@ def register_tools_with_mcp(mcp_server) -> None:
         load_all_tools()
         register_tools_with_mcp(mcp_server)
     """
-    from mcp.server.fastmcp import FastMCP
+    from app.sandbox.executor import SubprocessExecutor
+    from app.mcp.execution_service import (
+        get_execution_service, ExecutionStatus,
+    )
+
+    svc = get_execution_service()
 
     for tool in _loaded_tools.values():
-        # Define a closure that captures the tool — FastMCP decorator
-        # needs a unique function per tool.
         def make_tool_func(tool_def: ToolDef):
-            input_schema = tool_def.to_mcp_input_schema()
-
             async def tool_func(**kwargs: Any) -> str:
-                """Execute the tool via subprocess + return output.
+                """Execute the tool via ExecutionService + SubprocessExecutor.
 
-                W2-A: returns a placeholder — actual subprocess execution
-                is W3 task (SubprocessExecutor).
+                P2: routes through ExecutionService for unified timeout/cancel/
+                status tracking. Same substrate as the agent loop's
+                execute_tool_call() — both paths share identical semantics.
+
+                Args (passed by LLM via MCP tools/call):
+                    target: Target IP/hostname/URL (required — always param #1)
+                    ...other params per YAML schema (ports, scan_type, etc.)
+
+                Returns:
+                    JSON string. Shape depends on final execution status:
+                        COMPLETED      → {status:"executed", stdout, exit_code, ...}
+                        HARD_TIMEOUT   → {status:"hard_timeout", error, execution_id}
+                        CANCELLED      → {status:"cancelled", error, execution_id}
+                        FAILED         → {status:"failed", error, execution_id}
                 """
                 import json
+
+                target = kwargs.get("target", "")
                 args = tool_def.build_command_args(**kwargs)
-                return json.dumps({
+                cmd = [tool_def.command] + args
+                cmd_str = " ".join(cmd)
+
+                scope_guard = _build_scope_for_target(target)
+                executor = SubprocessExecutor(scope_guard=scope_guard)
+
+                logger.info(
+                    "MCP tool execute | tool=%s | target=%s | cmd=%s",
+                    tool_def.name, target, cmd_str[:120],
+                )
+
+                # The run closure — ExecutionService wraps this with timeout
+                # + cancel + concurrency cap. Closure receives cancel_event
+                # but SubprocessExecutor doesn't poll it (relies on asyncio.Task
+                # cancellation propagating to subprocess via process-group kill).
+                async def run(cancel_event) -> dict[str, Any]:
+                    result = await executor.execute(
+                        command=cmd,
+                        target=target,
+                        timeout=tool_def.timeout,
+                        allowed_exit_codes=tool_def.allowed_exit_codes,
+                        scan_id=kwargs.get("_scan_id"),
+                        actor_id=kwargs.get("_actor_id", "mcp_caller"),
+                    )
+                    return result.to_dict()
+
+                execution = await svc.submit(
+                    tool_name=tool_def.name,
+                    arguments=kwargs,
+                    target=target,
+                    run=run,
+                    scan_id=kwargs.get("_scan_id"),
+                    actor_id=kwargs.get("_actor_id", "mcp_caller"),
+                    hard_timeout=tool_def.timeout,
+                )
+
+                # Build response based on final status
+                response: dict[str, Any] = {
                     "tool": tool_def.name,
-                    "command": tool_def.command,
-                    "args": args,
+                    "command": cmd_str,
+                    "target": target,
                     "wstg_ids": tool_def.wstg_ids,
                     "mitre_attack": tool_def.mitre_attack,
                     "safety_class": tool_def.safety_class,
-                    "status": "not_executed",
-                    "message": "W2-A skeleton — subprocess execution is W3 task",
-                }, indent=2)
+                    "execution_id": execution.id,
+                    "status": execution.status.value,
+                    "duration_seconds": execution.duration_seconds,
+                }
 
-            # Set metadata for MCP schema generation
+                if execution.status == ExecutionStatus.COMPLETED and execution.result:
+                    result = execution.result
+                    response.update({
+                        "exit_code": result.get("exit_code"),
+                        "stdout": result.get("stdout", ""),
+                        "stderr": result.get("stderr", ""),
+                        "truncated": result.get("truncated", False),
+                        "spill_path": result.get("spill_path"),
+                        "scope_violation": result.get("scope_violation", False),
+                    })
+                    # Override "status" to "executed" for backward compat with
+                    # the field the agent loop expects (was "executed" | "error")
+                    response["status"] = "executed" if result.get("success") else (
+                        "scope_violation" if result.get("scope_violation") else "error"
+                    )
+                else:
+                    # Terminal but not completed (timeout/cancel/fail)
+                    response["error"] = execution.error or "Unknown error"
+                    response["hint"] = (
+                        "Poll status via get_tool_execution(execution_id="
+                        f"{execution.id}) or retry with different parameters."
+                    )
+
+                return json.dumps(response, indent=2, ensure_ascii=False)
+
             tool_func.__name__ = tool.name
             tool_func.__doc__ = tool.description
             return tool_func
 
         func = make_tool_func(tool)
-        # Register with FastMCP
         mcp_server.tool(name=tool.name, description=tool.short_description or tool.description[:200])(func)
-        logger.info("Registered MCP tool: %s", tool.name)
+        logger.info("Registered MCP tool: %s (ExecutionService-backed — P2)", tool.name)
 
 
 if __name__ == "__main__":

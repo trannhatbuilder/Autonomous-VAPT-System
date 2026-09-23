@@ -104,3 +104,6 @@ Thumbs.db
 desktop.ini
 
 VAPT-AI.zip
+node_modules
+frontend/.next/
+frontend/node_modules/

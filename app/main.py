@@ -27,7 +27,7 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
 import structlog
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
@@ -109,10 +109,6 @@ class LLMSettingsRequest(BaseModel):
     max_completion_tokens: int = 2048
     temperature: float = 0.7
     api_key: str
-    hitl_audit_provider: str
-    hitl_audit_base_url: str
-    hitl_audit_model: str
-    hitl_audit_api_key: str
 
 
 class HealthResponse(BaseModel):
@@ -225,11 +221,198 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.error("Failed to seed methodology catalogs", error=str(e))
         # Don't crash — app can still run without catalogs (tools won't have WSTG/ATT&CK tags)
 
+    # ----- W16: Bootstrap RL policy + experience store -----
+    try:
+        await _bootstrap_rl()
+    except Exception as e:
+        logger.error("Failed to bootstrap RL", error=str(e))
+        # Don't crash — agent can fall back to rule-based if RL unavailable
+
+    # ----- W17: Bootstrap Knowledge Graph -----
+    try:
+        await _bootstrap_kg()
+    except Exception as e:
+        logger.error("Failed to bootstrap KG", error=str(e))
+        # Don't crash — agent can run without KG (no path ranking)
+
     yield
 
     # ----- Shutdown -----
     logger.info("VAPT-AI shutting down")
+
+    # ----- W17: Persist KG to SQL on shutdown -----
+    try:
+        await _shutdown_kg()
+    except Exception as e:
+        logger.error("Failed to persist KG on shutdown", error=str(e))
+
+    # ----- W16: Save RL checkpoint on shutdown (if RL was bootstrapped) -----
+    try:
+        await _shutdown_rl()
+    except Exception as e:
+        logger.error("Failed to save RL checkpoint on shutdown", error=str(e))
+
     await dispose_async_engine()
+
+
+# ---------- W16: RL bootstrap / shutdown helpers ----------
+
+# Module-level singletons (populated by _bootstrap_rl, used by /api/rl/* endpoints)
+_rl_policy: Any = None  # PentestPolicy
+_rl_store: Any = None   # ExperienceStore
+
+
+async def _bootstrap_rl() -> None:
+    """Initialize PentestPolicy + ExperienceStore and load latest checkpoint.
+
+    Called from lifespan startup. Populates the module-level _rl_policy and
+    _rl_store singletons that /api/rl/* endpoints read.
+    """
+    global _rl_policy, _rl_store
+
+    if not settings.rl_enabled:
+        logger.info("RL disabled (VAPT_AI_RL_ENABLED=false) — skipping bootstrap")
+        return
+
+    try:
+        from app.rl import PentestPolicy, ExperienceStore, load_latest_checkpoint
+    except ImportError as e:
+        logger.error("RL module import failed — RL disabled", error=str(e))
+        return
+
+    # Construct policy with settings from config.py
+    policy = PentestPolicy(
+        epsilon_start=settings.rl_epsilon_start,
+        epsilon_end=settings.rl_epsilon_end,
+        # Recompute per-episode decay from scan count
+        epsilon_decay=(
+            (settings.rl_epsilon_end / settings.rl_epsilon_start)
+            ** (1.0 / max(1, settings.rl_epsilon_decay_scans))
+        ),
+        temperature_start=settings.rl_boltzmann_temp_start,
+        exploration_mode=settings.rl_exploration_mode,
+    )
+
+    # Override Q-learner hyperparams from settings
+    policy.q.lr = settings.rl_learning_rate
+    policy.q.gamma = settings.rl_gamma
+    policy.q.tau = settings.rl_tau
+
+    # ExperienceStore
+    store = ExperienceStore(max_buffer=settings.rl_buffer_size)
+
+    # Load latest SQL checkpoint (restores weights + ε + step)
+    try:
+        meta = await load_latest_checkpoint(policy.q, policy)
+        if meta:
+            logger.info(
+                "RL checkpoint restored",
+                step=meta.get("step", 0),
+                epsilon=meta.get("epsilon", policy.epsilon),
+                episodes=meta.get("episodes", 0),
+            )
+        else:
+            logger.info("RL starting fresh (no checkpoint found)")
+    except Exception as e:
+        logger.warning("RL checkpoint load failed — starting fresh", error=str(e))
+
+    _rl_policy = policy
+    _rl_store = store
+    logger.info(
+        "RL bootstrapped",
+        exploration_mode=policy.exploration_mode,
+        epsilon=policy.epsilon,
+        state_dim=settings.rl_state_dim,
+        action_dim=settings.rl_action_dim,
+        buffer_size=settings.rl_buffer_size,
+    )
+
+
+async def _shutdown_rl() -> None:
+    """Save RL checkpoint on shutdown (best-effort)."""
+    if _rl_policy is None:
+        return
+    try:
+        from app.rl import save_checkpoint
+        checkpoint_id = await save_checkpoint(
+            q_learner=_rl_policy.q,
+            policy=_rl_policy,
+            scan_id=None,
+            total_reward=0.0,
+        )
+        if checkpoint_id:
+            logger.info("RL checkpoint saved on shutdown", checkpoint_id=checkpoint_id)
+    except Exception as e:
+        logger.warning("RL shutdown checkpoint failed", error=str(e))
+
+
+# ---------- W17: KG bootstrap / shutdown helpers ----------
+
+async def _bootstrap_kg() -> None:
+    """Initialize Knowledge Graph singleton: load from SQL, seed if empty.
+
+    Called from lifespan startup. Populates the module-level get_kg()
+    singleton that /api/kg/* endpoints read.
+    """
+    if not settings.kg_enabled:
+        logger.info("KG disabled (VAPT_AI_KG_ENABLED=false) — skipping bootstrap")
+        return
+
+    try:
+        from app.kg import get_kg, load_kg_from_db, seed_all
+    except ImportError as e:
+        logger.error("KG module import failed — KG disabled", error=str(e))
+        return
+
+    kg = get_kg()
+
+    # Try loading from SQL first (separate session — isolates transaction errors)
+    loaded_from_db = False
+    try:
+        async with async_session() as session:
+            loaded_kg = await load_kg_from_db(session)
+            if loaded_kg.graph.number_of_nodes() > 0:
+                kg.graph = loaded_kg.graph
+                loaded_from_db = True
+                logger.info(
+                    "KG loaded from DB",
+                    nodes=kg.graph.number_of_nodes(),
+                    edges=kg.graph.number_of_edges(),
+                )
+    except Exception as e:
+        logger.warning("KG DB load failed — will seed in-memory", error=str(e)[:200])
+
+    # If not loaded from DB, seed from catalogs
+    if not loaded_from_db:
+        logger.info("KG not in DB — seeding from catalogs (in-memory only)")
+        result = seed_all(kg)
+        logger.info(
+            "KG seeded (in-memory)",
+            nodes_inserted=result["total_nodes_inserted"],
+            edges_inserted=result["total_edges_inserted"],
+            errors=result["total_errors"],
+        )
+        # Skip SQL persist for now — KGNode table lacks unique constraint on (node_type, name)
+        # so on_conflict_do_update fails. KG works fully in-memory. SQL persist deferred to
+        # a future migration that adds the unique constraint.
+
+    logger.info(
+        "KG bootstrapped",
+        nodes=kg.graph.number_of_nodes(),
+        edges=kg.graph.number_of_edges(),
+    )
+
+
+async def _shutdown_kg() -> None:
+    """Persist KG to SQL on shutdown (best-effort).
+
+    Currently skipped — KGNode table lacks unique constraint for on_conflict_do_update.
+    KG works fully in-memory; SQL persist deferred to future migration.
+    """
+    if not settings.kg_enabled:
+        return
+    # Skip SQL persist — KG is in-memory only for now
+    logger.info("KG shutdown — in-memory only (SQL persist deferred)")
 
 
 # ---------- App factory ----------
@@ -249,7 +432,15 @@ def create_app() -> FastAPI:
     # ---------- Middleware ----------
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[settings.app_url, "http://localhost:5173", "http://localhost:8000"],
+        allow_origins=[
+            settings.app_url,
+            "http://localhost:5173",     # Vite default
+            "http://localhost:8000",     # FastAPI self
+            "http://localhost:3000",     # Next.js dev server
+            "http://127.0.0.1:3000",     # Next.js dev server (alt)
+            "http://127.0.0.1:5173",     # Vite alt
+            "http://127.0.0.1:8000",     # FastAPI alt
+        ],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -341,42 +532,47 @@ def create_app() -> FastAPI:
         session: AsyncSession = Depends(get_async_session),
         user: UserResponse = Depends(get_current_user),
     ) -> dict[str, Any]:
-        """Start a new scan. Returns scan_id + result.
+        """Start a new scan — returns scan_id immediately, runs pipeline async.
 
-        W3-A: runs synchronously (blocking). W3-B will make it async via Celery + SSE.
+        HFX fix: Previously this blocked until scan completed, meaning SSE
+        events were all buffered before the frontend could connect. Now
+        returns scan_id immediately and runs the pipeline in background
+        via asyncio.create_task(). The frontend connects SSE immediately
+        and receives real-time events.
         """
+        from app.orchestration.base import generate_scan_id
         import uuid as uuid_mod
-        scan_id = f"scan_{uuid_mod.uuid4().hex[:12]}"
+        import asyncio
 
-        # Run agent (W3-A: synchronous — W3-B will use Celery)
-        result = await agent_run_scan(
-            target=req.target,
-            user_prompt=req.user_prompt,
-            scan_id=scan_id,
-        )
+        scan_id = generate_scan_id()
+
+        # Return scan_id IMMEDIATELY — don't block
+        # The frontend will connect SSE right away and receive real-time events
+
+        # Launch pipeline in background (non-blocking)
+        async def _run_pipeline_background():
+            from app.pentest.scan_pipeline import run_scan_pipeline
+            try:
+                await run_scan_pipeline(
+                    target=req.target,
+                    user_prompt=req.user_prompt,
+                    mode="auto",
+                    scan_id=scan_id,
+                    user_id=uuid_mod.UUID(user.id),
+                )
+            except Exception as e:
+                from app.pentest.events import emit_scan_error
+                logger.error("Background pipeline failed: scan=%s error=%s", scan_id, e)
+                await emit_scan_error(scan_id, str(e))
+
+        asyncio.create_task(_run_pipeline_background())
 
         return {
-            "scan_id": result.scan_id,
-            "target": result.target,
-            "user_prompt": result.user_prompt,
-            "status": result.status,
-            "decisions_count": len(result.decisions),
-            "total_tokens": result.total_tokens,
-            "duration_seconds": result.duration_seconds,
-            "findings": result.findings,
-            "error": result.error,
-            "decisions": [
-                {
-                    "turn": d.turn,
-                    "thought": d.thought,
-                    "tool_name": d.tool_name,
-                    "tool_args": d.tool_args,
-                    "observation": d.observation[:500] if d.observation else "",
-                    "tokens_used": d.tokens_used,
-                    "timestamp": d.timestamp.isoformat(),
-                }
-                for d in result.decisions
-            ],
+            "scan_id": scan_id,
+            "target": req.target,
+            "user_prompt": req.user_prompt,
+            "status": "running",
+            "message": "Scan started. Connect SSE to receive real-time events.",
         }
 
     @scan_router.get("/tools")
@@ -763,6 +959,11 @@ def create_app() -> FastAPI:
     from app.mcp.server import list_tools_sync, mcp_server
     from app.tools.loader import load_all_tools, list_tools as list_tool_defs, register_tools_with_mcp
 
+    # P2: register 3 execution-control meta-tools (get/wait/cancel_tool_execution)
+    # BEFORE the YAML security tools so they appear first in tools/list.
+    from app.mcp.execution_control_tools import register_execution_control_tools
+    register_execution_control_tools(mcp_server)
+
     # W2-A: Load all 10 tool YAMLs + register as MCP tools
     load_all_tools()
     register_tools_with_mcp(mcp_server)
@@ -813,6 +1014,104 @@ def create_app() -> FastAPI:
                 }
                 for t in tools
             ],
+        }
+
+    # ---------- P2: ExecutionService HTTP endpoints (frontend panic button) ----------
+    from app.mcp.execution_service import get_execution_service, ExecutionStatus
+
+    @app.get("/api/mcp/executions", tags=["mcp"])
+    async def list_executions(
+        scan_id: str | None = None,
+        limit: int = 50,
+        user: UserResponse = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """List recent tool executions (newest first). Optional filter by scan_id.
+
+        Used by:
+            - Frontend admin panel (debug visibility)
+            - HITL review screen (show what's currently running)
+            - Panic button modal (list running tools for a scan)
+        """
+        svc = get_execution_service()
+        if scan_id:
+            execs = await svc.list_for_scan(scan_id)
+        else:
+            execs = await svc.list_all(limit=limit)
+        return {
+            "executions_count": len(execs),
+            "executions": [e.to_dict() for e in execs],
+        }
+
+    @app.get("/api/mcp/executions/{execution_id}", tags=["mcp"])
+    async def get_execution(
+        execution_id: str,
+        user: UserResponse = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """Get a single tool execution by ID."""
+        svc = get_execution_service()
+        execution = await svc.get(execution_id)
+        if execution is None:
+            raise HTTPException(status_code=404, detail=f"Execution {execution_id} not found")
+        return execution.to_dict()
+
+    @app.post("/api/mcp/executions/{execution_id}/wait", tags=["mcp"])
+    async def wait_execution(
+        execution_id: str,
+        timeout: int = 30,
+        user: UserResponse = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """Wait up to N seconds for an execution to complete.
+
+        Frontend uses this when polling a long-running scan tool.
+        """
+        svc = get_execution_service()
+        timeout = max(1, min(timeout, 300))
+        execution = await svc.wait(execution_id, timeout=timeout)
+        if execution is None:
+            raise HTTPException(status_code=404, detail=f"Execution {execution_id} not found")
+        return execution.to_dict()
+
+    @app.post("/api/mcp/executions/{execution_id}/cancel", tags=["mcp"])
+    async def cancel_execution(
+        execution_id: str,
+        user: UserResponse = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """Cancel a running tool execution. Panic button.
+
+        Returns 200 with cancelled=false if the execution was already finished
+        (not an error — idempotent cancel).
+        """
+        svc = get_execution_service()
+        ok = await svc.cancel(execution_id)
+        execution = await svc.get(execution_id)
+        return {
+            "cancelled": ok,
+            "execution_id": execution_id,
+            "final_status": execution.status.value if execution else None,
+            "reason": (
+                ""
+                if ok
+                else (f"Execution already in terminal status: {execution.status.value}" if execution else "Execution not found")
+            ),
+        }
+
+    @app.post("/api/mcp/scans/{scan_id}/abort", tags=["mcp"])
+    async def abort_scan_tools(
+        scan_id: str,
+        user: UserResponse = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """Cancel ALL running tool executions for a scan. Panic button.
+
+        Called by the frontend when user clicks "Abort scan" — cancels all
+        in-flight tool subprocesses (SIGKILL the entire process group per
+        tool) and lets the scan_pipeline mark the scan as cancelled.
+        """
+        svc = get_execution_service()
+        cancelled_count = await svc.cancel_scan(scan_id)
+        return {
+            "scan_id": scan_id,
+            "cancelled_executions": cancelled_count,
+            "message": f"Cancelled {cancelled_count} running tool execution(s) for scan {scan_id}",
         }
 
     # ---------- Conversation + Chat endpoints (W7-D) ----------
@@ -1086,9 +1385,6 @@ def create_app() -> FastAPI:
             "max_total_tokens": req.max_total_tokens,
             "max_completion_tokens": req.max_completion_tokens,
             "temperature": req.temperature,
-            "hitl_audit_provider": req.hitl_audit_provider,
-            "hitl_audit_base_url": req.hitl_audit_base_url,
-            "hitl_audit_model": req.hitl_audit_model,
         }
 
         # Preserve existing API key if frontend sent a masked version (••••)
@@ -1096,11 +1392,6 @@ def create_app() -> FastAPI:
             new_llm["api_key"] = req.api_key
         elif existing_llm.get("api_key"):
             new_llm["api_key"] = existing_llm["api_key"]
-
-        if req.hitl_audit_api_key and not req.hitl_audit_api_key.startswith("•"):
-            new_llm["hitl_audit_api_key"] = req.hitl_audit_api_key
-        elif existing_llm.get("hitl_audit_api_key"):
-            new_llm["hitl_audit_api_key"] = existing_llm["hitl_audit_api_key"]
 
         settings["llm"] = new_llm
         db_user.settings = settings
@@ -1113,21 +1404,87 @@ def create_app() -> FastAPI:
         req: LLMSettingsRequest = Body(...),
         user: UserResponse = Depends(get_current_user),
     ) -> dict[str, Any]:
-        """Test LLM connection by making a simple API call.
+        """Test LLM connection by making a real 1-token API call.
 
-        W7-D-v2: placeholder — actual test will use litellm.acompletion in W8.
+        P3: now actually calls litellm.acompletion with a "ping" message.
+        Returns real success/failure based on whether the API responded.
         """
+        import asyncio
+        import litellm
+
+        # Suppress litellm's verbose logging during the test
+        litellm.suppress_debug_info = True
+
+        # Validate input
         if not req.api_key or req.api_key.startswith("•"):
             return {"success": False, "error": "API key required (cannot test with masked key)"}
         if not req.model:
             return {"success": False, "error": "Model name required"}
-        if not req.base_url:
-            return {"success": False, "error": "Base URL required"}
-        # TODO W8: actual litellm test call
-        return {
-            "success": True,
-            "message": f"Config looks valid (provider={req.provider}, model={req.model}). Actual connection test in W8.",
+        if not req.base_url and req.provider not in ("openai", "anthropic", "deepseek", "groq", "google", "ollama"):
+            return {"success": False, "error": f"Base URL required for provider {req.provider!r}"}
+
+        # Build model string with provider prefix (litellm convention)
+        provider_prefix_map = {
+            "openai": "openai",
+            "anthropic": "anthropic",
+            "deepseek": "deepseek",
+            "groq": "groq",
+            "google": "gemini",
+            "ollama": "ollama",
+            "glm": "openai",       # GLM uses OpenAI-compatible API
+            "minimax": "openai",   # MiniMax uses OpenAI-compatible API
         }
+        prefix = provider_prefix_map.get(req.provider, "openai")
+
+        # For OpenAI-compatible providers (glm, minimax) or custom base_url, don't add prefix
+        if req.provider in ("glm", "minimax") or (req.provider == "openai" and req.base_url):
+            litellm_model = req.model
+        else:
+            litellm_model = f"{prefix}/{req.model}"
+
+        params: dict[str, Any] = {
+            "model": litellm_model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "temperature": 0.0,
+            "max_tokens": 5,  # tiny response — just verify connectivity
+        }
+        if req.api_key:
+            params["api_key"] = req.api_key
+        if req.base_url:
+            params["api_base"] = req.base_url.rstrip("/")
+
+        try:
+            # 30s timeout — if OpenAI is unreachable, litellm should timeout
+            response = await asyncio.wait_for(
+                litellm.acompletion(**params),
+                timeout=30.0,
+            )
+            choice = response.choices[0]
+            content = (choice.message.content or "").strip()
+            tokens = response.usage.total_tokens if response.usage else 0
+            return {
+                "success": True,
+                "message": f"Connection OK — model={litellm_model}, response={content[:50]!r}, tokens={tokens}",
+                "model_used": litellm_model,
+                "tokens_used": tokens,
+                "finish_reason": choice.finish_reason,
+            }
+        except asyncio.TimeoutError:
+            return {
+                "success": False,
+                "error": f"Timeout after 30s — cannot reach {req.provider} endpoint. Check base_url + network.",
+                "model_used": litellm_model,
+            }
+        except Exception as exc:
+            err = str(exc)
+            # Common error → friendly message
+            if "401" in err or "Invalid API key" in err or "Incorrect API key" in err:
+                return {"success": False, "error": f"OpenAI API key invalid: {err[:200]}"}
+            if "404" in err or "model_not_found" in err:
+                return {"success": False, "error": f"Model {req.model!r} not found on {req.provider}: {err[:200]}"}
+            if "Connection" in err or "timeout" in err.lower():
+                return {"success": False, "error": f"Cannot reach {req.provider} endpoint ({req.base_url or 'default'}): {err[:200]}"}
+            return {"success": False, "error": err[:500]}
 
     app.include_router(settings_router)
 
@@ -1188,6 +1545,160 @@ def create_app() -> FastAPI:
     # ---------- W14-S8: C2 Routes ----------
     from app.routes.c2 import router as c2_router
     app.include_router(c2_router)
+
+    # ---------- W17: KG Routes ----------
+    from app.routes.kg import router as kg_router
+    app.include_router(kg_router)
+
+    # ---------- W18: Trace Routes ----------
+    from app.routes.trace import router as trace_router
+    app.include_router(trace_router)
+
+    # ---------- W16: RL Routes ----------
+    rl_router = APIRouter(prefix="/api/rl", tags=["rl"])
+
+    @rl_router.get("/stats")
+    async def get_rl_stats(current_user: UserResponse = Depends(get_current_user)):
+        """Get RL policy + experience store stats.
+
+        Returns epsilon, temperature, buffer utilization, beta progress,
+        Q-network step count, total params, and exploration mode.
+        """
+        if _rl_policy is None or _rl_store is None:
+            return {
+                "enabled": settings.rl_enabled,
+                "bootstrapped": False,
+                "message": "RL not bootstrapped (check startup logs)",
+            }
+        from app.rl import get_training_stats
+        stats = get_training_stats(_rl_policy, _rl_store)
+        return {
+            "enabled": True,
+            "bootstrapped": True,
+            "exploration_mode": _rl_policy.exploration_mode,
+            **stats,
+        }
+
+    @rl_router.post("/train")
+    async def trigger_rl_training(
+        batch_size: int = 64,
+        n_steps: int = 1,
+        current_user: UserResponse = Depends(get_current_user),
+    ):
+        """Manually trigger RL training (PER batch from in-memory buffer).
+
+        Useful for testing convergence outside of a scan. The Harness Bridge
+        (W18) will call this automatically at end of each scan.
+        """
+        if _rl_policy is None or _rl_store is None:
+            raise HTTPException(status_code=503, detail="RL not bootstrapped")
+        from app.rl import train_multi_step
+        results = train_multi_step(_rl_policy, _rl_store, n_steps=n_steps, batch_size=batch_size)
+        return {
+            "trained_steps": len(results),
+            "losses": [round(r[0], 6) for r in results],
+            "td_error_means": [
+                round(sum(abs(e) for e in r[1]) / max(1, len(r[1])), 6)
+                for r in results
+            ],
+            "epsilon_after": _rl_policy.epsilon,
+            "buffer_size": len(_rl_store),
+        }
+
+    @rl_router.get("/checkpoints")
+    async def list_rl_checkpoints(
+        limit: int = 10,
+        current_user: UserResponse = Depends(get_current_user),
+    ):
+        """List recent RL checkpoints (newest first)."""
+        from app.rl import list_checkpoints
+        checkpoints = await list_checkpoints(limit=limit)
+        return {"count": len(checkpoints), "checkpoints": checkpoints}
+
+    app.include_router(rl_router)
+
+    # ---------- W19: Findings endpoint ----------
+    findings_router = APIRouter(prefix="/api/findings", tags=["findings"])
+
+    @findings_router.get("")
+    async def list_findings(
+        scan_id: str | None = Query(None, description="Filter by scan ID"),
+        severity: str | None = Query(None, description="Filter by severity (critical/high/medium/low/info)"),
+        verified: str | None = Query(None, description="Filter by verified status (true/false)"),
+        limit: int = Query(50, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+        current_user: UserResponse = Depends(get_current_user),
+    ):
+        """List all vulnerability findings across scans.
+
+        Query params:
+            scan_id: filter by scan ID
+            severity: filter by severity (critical/high/medium/low/info)
+            verified: filter by verified status (true/false)
+            limit: max results (1-500, default 50)
+            offset: pagination offset
+        """
+        from sqlalchemy import select, func, and_
+        from app.db.models.pentest import Finding
+
+        conditions = []
+        if scan_id:
+            conditions.append(Finding.scan_id == scan_id)
+        if severity:
+            conditions.append(Finding.severity.ilike(f"%{severity}%"))
+        if verified is not None:
+            if verified.lower() == "true":
+                conditions.append(Finding.verified == True)
+            elif verified.lower() == "false":
+                conditions.append(Finding.verified == False)
+
+        async with async_session() as session:
+            # Count total
+            count_stmt = select(func.count(Finding.id))
+            if conditions:
+                count_stmt = count_stmt.where(and_(*conditions))
+            total = await session.scalar(count_stmt) or 0
+
+            # Fetch page
+            stmt = select(Finding).order_by(Finding.created_at.desc())
+            if conditions:
+                stmt = stmt.where(and_(*conditions))
+            stmt = stmt.offset(offset).limit(limit)
+            result = await session.execute(stmt)
+            findings = result.scalars().all()
+
+        return {
+            "findings": [
+                {
+                    "id": str(f.id),
+                    "scan_id": f.scan_id,
+                    "name": f.name,
+                    "vuln_type": f.vuln_type,
+                    "severity": f.severity,
+                    "cvss_vector": f.cvss_vector,
+                    "cvss_score": f.cvss_score,
+                    "location": f.location,
+                    "cwe_id": f.cwe_id,
+                    "cve_id": f.cve_id,
+                    "wstg_test_id": f.wstg_test_id,
+                    "mitre_attack_technique": f.mitre_attack_technique,
+                    "mitre_attack_tactic": f.mitre_attack_tactic,
+                    "poc_status": f.poc_status,
+                    "poc_tier": f.poc_tier,
+                    "exploit_method": f.exploit_method,
+                    "remediation": f.remediation,
+                    "verified": f.verified,
+                    "false_positive": f.false_positive,
+                    "created_at": f.created_at.isoformat() if f.created_at else None,
+                }
+                for f in findings
+            ],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+        }
+
+    app.include_router(findings_router)
 
     # ---------- Frontend SPA static mount (W7-D-v2) ----------
     from fastapi.staticfiles import StaticFiles

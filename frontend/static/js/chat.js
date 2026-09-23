@@ -325,7 +325,8 @@ async function sendMessage() {
   renderMessages();
   document.getElementById('chat-title').textContent = activeConversation.title;
 
-  // Start scan
+  // Start scan — CyberStrikeAI pattern: user types freely, AI extracts target.
+  // Mode is auto-selected by orchestrator (Supervisor default). No manual scope input.
   const target = extractTarget(content);
   isScanning = true;
   activeScanId = null;
@@ -336,7 +337,10 @@ async function sendMessage() {
   appendSSELog();
 
   try {
-    const scanResult = await apiPost('/api/scans/start', { target, user_prompt: content });
+    const scanResult = await apiPost('/api/scans/start', {
+      target,
+      user_prompt: content,
+    });
     activeScanId = scanResult.scan_id;
 
     // Update HITL panel to listen for this scan's events
@@ -410,8 +414,27 @@ function appendSSEEvent(event) {
   const log = document.getElementById('sse-log');
   if (!log) return;
 
+  // Skip heartbeat events (they're just keepalive)
+  if (event.event === 'heartbeat') return;
+
   const icon = getSSEIcon(event.event);
-  const text = event.thought || event.tool_name || event.error || event.comment || event.target || '';
+  // For scan_progress: tool_name contains the display text (from react_agent)
+  // For scan_started: target contains the URL
+  // For scan_complete: status + findings_count
+  // For scan_error: error message
+  let text = '';
+  if (event.event === 'scan_progress') {
+    text = event.tool_name || event.thought || '';
+  } else if (event.event === 'scan_started') {
+    text = event.target || '';
+  } else if (event.event === 'scan_complete') {
+    text = `Findings: ${event.findings_count ?? 0} | Duration: ${event.duration_seconds ? event.duration_seconds.toFixed(1) + 's' : 'N/A'}`;
+  } else if (event.event === 'scan_error') {
+    text = event.error || 'Unknown error';
+  } else {
+    text = event.thought || event.tool_name || event.error || event.comment || event.target || '';
+  }
+
   const decisionBadge = event.decision ? ` <span class="badge ${event.decision === 'approve' ? 'badge-success' : event.decision === 'reject' ? 'badge-danger' : 'badge-warning'}">${event.decision}</span>` : '';
 
   const row = el('div', { class: 'sse-event' });
