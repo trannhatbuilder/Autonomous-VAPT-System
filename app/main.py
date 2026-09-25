@@ -627,8 +627,24 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=401, detail=f"Invalid token: {e}") from e
 
         async def event_generator():
+            """SSE generator.
+
+            Yields:
+              - Real events → "data: {json}\\n\\n"  (fires EventSource.onmessage)
+              - Heartbeat  → ": ping\\n\\n"         (SSE comment — keeps TCP alive
+                                                      through Next.js proxy 30s
+                                                      timeout WITHOUT triggering
+                                                      onmessage in the browser)
+
+            Heartbeat fires every 10s when no real events (set in event_bus).
+            """
             async for event in event_bus.subscribe(scan_id):
-                yield f"data: {json.dumps(event)}\n\n"
+                # Phase E: send heartbeat as SSE comment frame (not as message)
+                # so the browser's EventSource doesn't fire onmessage for heartbeats.
+                if event.get("event") == "heartbeat":
+                    yield ": ping\n\n"
+                else:
+                    yield f"data: {json.dumps(event)}\n\n"
 
         return StreamingResponse(
             event_generator(),
@@ -1700,45 +1716,28 @@ def create_app() -> FastAPI:
 
     app.include_router(findings_router)
 
-    # ---------- Frontend SPA static mount (W7-D-v2) ----------
-    from fastapi.staticfiles import StaticFiles
-    from pathlib import Path as _Path
+    # ---------- Channels router (Phase B — CyberStrikeAI pattern) ----------
+    # Replaces the DB-stored single LLM config with YAML-based multi-channel.
+    # Endpoints: GET/POST /api/channels, PUT/DELETE /api/channels/{id},
+    #            POST /api/channels/{id}/test, POST /api/channels/test,
+    #            GET/POST /api/channels/default
+    from app.routes.channels import create_channels_router
+    channels_router = create_channels_router(get_current_user)
+    app.include_router(channels_router)
 
-    _FRONTEND_DIR = _Path(__file__).resolve().parent.parent / "frontend"
-    if _FRONTEND_DIR.is_dir():
-        # Mount /static → frontend/static/ (CSS, JS, images)
-        app.mount(
-            "/static",
-            StaticFiles(directory=str(_FRONTEND_DIR / "static")),
-            name="frontend-static",
-        )
-
-        # SPA fallback: serve index.html for /, /chat, /login, /reports, etc.
-        # (client-side hash router handles the rest)
-        @app.get("/{full_path:path}", include_in_schema=False)
-        async def spa_fallback(full_path: str):
-            """Serve index.html for all non-API routes (SPA fallback).
-
-            API routes (/api/*, /docs, /health, /openapi.json, /static/*) are
-            matched first by FastAPI. Everything else → index.html.
-            """
-            # Block API paths from being caught by this catch-all
-            if full_path.startswith(("api/", "docs", "health", "openapi.json", "redoc", "static/")):
-                raise HTTPException(status_code=404, detail="Not found")
-            index_path = _FRONTEND_DIR / "index.html"
-            if not index_path.is_file():
-                raise HTTPException(status_code=404, detail="Frontend not built")
-            from fastapi.responses import FileResponse
-            return FileResponse(str(index_path), media_type="text/html")
-
-        logger.info("Frontend SPA mounted at / (serving from %s)", _FRONTEND_DIR)
-    else:
-        logger.warning("Frontend directory not found: %s", _FRONTEND_DIR)
-
-    logger.info("FastAPI app created", routes=[
-        "/health", "/", "/docs", "/redoc", "/openapi.json",
-        "/api/auth/login", "/api/auth/refresh", "/api/auth/logout", "/api/auth/me",
-    ])
+    # ---------- Frontend note (Phase A refactor) ----------
+    # Frontend is now served exclusively by Next.js (npm run dev → port 3000).
+    # This FastAPI app is a pure JSON API server on port 8000.
+    # Next.js rewrites() proxies /api/* and /mcp/* to this port automatically.
+    # See frontend/next.config.ts and frontend/src/lib/api.ts.
+    logger.info(
+        "FastAPI app created (API-only — frontend served by Next.js on port 3000)",
+        routes=[
+            "/health", "/docs", "/redoc", "/openapi.json",
+            "/api/auth/login", "/api/auth/refresh", "/api/auth/logout", "/api/auth/me",
+            "/api/channels (CRUD + test)",
+        ],
+    )
     return app
 
 

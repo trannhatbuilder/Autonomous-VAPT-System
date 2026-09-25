@@ -27,7 +27,16 @@ Environment=PYTHONPATH=/home/nhat/VAPT-AI
 EnvironmentFile=/home/nhat/VAPT-AI/.env
 
 # Run uvicorn from venv (NOT system uvicorn)
-ExecStart=/home/nhat/VAPT-AI/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+#
+# IMPORTANT: keep --workers 1.
+# The scan SSE event bus (app/pentest/events.py) and the scan registry
+# (app/pentest/scan_registry.py) are IN-PROCESS singletons. With >1 worker the
+# POST /api/scans/start request is handled by one worker while the SSE
+# GET /api/scans/{id}/events request can be load-balanced onto another, so the
+# UI only ever receives heartbeats and never the scan_progress / tool_call
+# events — even though the scan and its tools are running fine. Multi-worker
+# support requires Redis pub/sub (see events.py "W14+ will add Redis pub/sub").
+ExecStart=/home/nhat/VAPT-AI/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
 
 Restart=always
 RestartSec=5

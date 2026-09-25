@@ -106,6 +106,84 @@ MAX_DECISIONS_PER_AGENT = 30  # D18 cap
 MAX_TOKENS_PER_SCAN = 2_000_000
 MAX_SCAN_DURATION_SECONDS = 4 * 60 * 60  # 4 hours
 
+# Context-window budget for the per-agent ReAct loop. When the running message
+# list exceeds MAX_MESSAGES we drop the middle, keeping the system/user head and
+# the most recent tail (see _cap_message_history).
+MAX_MESSAGES = 50
+KEEP_HEAD = 4
+KEEP_TAIL = 30
+
+
+def _cap_message_history(
+    messages: list[dict[str, Any]],
+    keep_head: int = KEEP_HEAD,
+    keep_tail: int = KEEP_TAIL,
+) -> list[dict[str, Any]]:
+    """Trim the middle of a ReAct history without orphaning tool calls.
+
+    OpenAI-compatible APIs (OpenAI, DeepSeek, GLM, ...) reject a request unless
+    every assistant message that carries ``tool_calls`` is immediately followed
+    by exactly one ``role: "tool"`` message per ``tool_call_id``.  A naive
+    ``messages[:keep_head] + messages[-keep_tail:]`` slice can cut between an
+    assistant tool-call message and its tool replies, which aborts the agent
+    mid-scan with::
+
+        HTTP 400: An assistant message with 'tool_calls' must be followed by
+        tool messages responding to each 'tool_call_id' ...
+
+    This helper drops whole tool-call exchanges: an assistant ``tool_calls``
+    message is kept only when ALL of its replies survived the slice, and any
+    orphaned ``tool`` message (whose assistant was sliced away) is discarded.
+
+    Args:
+        messages: Full running history (system, user, assistant, tool, ...).
+        keep_head: Number of leading messages to preserve.
+        keep_tail: Number of trailing messages to preserve.
+
+    Returns:
+        A history that is safe to send to an OpenAI-compatible endpoint.
+    """
+    if len(messages) <= keep_head + keep_tail:
+        return messages
+
+    sliced = messages[:keep_head] + messages[-keep_tail:]
+
+    out: list[dict[str, Any]] = []
+    i = 0
+    n = len(sliced)
+    while i < n:
+        msg = sliced[i]
+        role = msg.get("role")
+
+        if role == "assistant" and msg.get("tool_calls"):
+            expected = [tc.get("id") for tc in msg["tool_calls"]]
+            j = i + 1
+            replies: list[dict[str, Any]] = []
+            while j < n and sliced[j].get("role") == "tool":
+                replies.append(sliced[j])
+                j += 1
+            replied = [r.get("tool_call_id") for r in replies]
+            if replied == expected:
+                out.append(msg)
+                out.extend(replies)
+            else:
+                logger.warning(
+                    "Context cap dropped an incomplete tool-call exchange "
+                    "(expected %s, kept %s)", expected, replied,
+                )
+            i = j
+            continue
+
+        if role == "tool":
+            # Orphaned reply — its assistant tool_calls message was sliced away.
+            i += 1
+            continue
+
+        out.append(msg)
+        i += 1
+
+    return out
+
 
 # ---------- Data classes ----------
 
@@ -404,6 +482,7 @@ class BaseAgent:
             thought=decision.thought,
             tool_name=decision.tool_name,
             observation=decision.observation,
+            agent_name=self.AGENT_NAME,
         )
 
     # ---------- Finalize ----------
@@ -541,24 +620,26 @@ class BaseAgent:
             turn = len(self.decisions)
 
             # ---------- P5 minimal: context budget cap ----------
-            # If messages list grows beyond 50 entries (each tool call adds
-            # 2 messages: assistant + tool result), drop the middle ones to
-            # prevent unbounded context growth. Keep:
-            #   - first 4 messages (system + initial user + first 2 LLM/tool pairs)
-            #   - last 30 messages (most recent context for decision-making)
+            # If messages grow beyond MAX_MESSAGES (each tool call adds 2:
+            # assistant + tool result), drop the middle to prevent unbounded
+            # context growth:
+            #   - first KEEP_HEAD messages (system + initial user + early pairs)
+            #   - last KEEP_TAIL messages (most recent context)
+            # NOTE: uses _cap_message_history, which keeps tool-call/tool-result
+            # pairs intact — a naive slice produced HTTP 400 "assistant message
+            # with 'tool_calls' must be followed by tool messages" and aborted
+            # the agent mid-scan.
             # This is a HARD cap — true CyberStrikeAI parity would use a
             # summarize middleware (LLM call to compress older context), but
             # that's expensive (extra LLM call per scan). Defer to P5-real.
-            MAX_MESSAGES = 50
-            KEEP_HEAD = 4
-            KEEP_TAIL = 30
             if len(messages) > MAX_MESSAGES:
-                dropped = len(messages) - KEEP_HEAD - KEEP_TAIL
+                capped = _cap_message_history(messages, KEEP_HEAD, KEEP_TAIL)
                 logger.info(
                     "Agent %s context cap: %d messages → %d (dropped %d middle)",
-                    self.AGENT_NAME, len(messages), KEEP_HEAD + KEEP_TAIL, dropped,
+                    self.AGENT_NAME, len(messages), len(capped),
+                    len(messages) - len(capped),
                 )
-                messages = messages[:KEEP_HEAD] + messages[-KEEP_TAIL:]
+                messages = capped
 
             try:
                 # Call LLM

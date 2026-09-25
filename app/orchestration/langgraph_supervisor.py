@@ -424,6 +424,34 @@ class SupervisorOrchestrator(BaseOrchestrator):
             summary = thought or "Supervisor ended without explicit exit."
             state["final_summary"] = summary
 
+        # OpenAI-compatible APIs (OpenAI, DeepSeek, GLM, ...) reject the NEXT
+        # request unless every assistant message carrying `tool_calls` is
+        # immediately followed by one `role: "tool"` message per
+        # `tool_call_id`:
+        #   HTTP 400 "An assistant message with 'tool_calls' must be followed
+        #   by tool messages responding to each 'tool_call_id'."
+        # The supervisor's `transfer`/`exit` tools are synthetic routing tools
+        # with no real executor, so we append a short acknowledgement result
+        # for each call to keep the running history valid across turns.
+        for tc in tool_calls:
+            try:
+                tc_args = _json.loads(tc["arguments"]) if tc.get("arguments") else {}
+            except Exception:
+                tc_args = {}
+            tc_name = tc.get("name", "")
+            if tc_name == "transfer":
+                ack = {"status": "ok", "action": "transfer",
+                       "target_agent": tc_args.get("target_agent")}
+            elif tc_name == "exit":
+                ack = {"status": "ok", "action": "exit"}
+            else:
+                ack = {"status": "ok", "action": tc_name}
+            self._supervisor_messages.append({
+                "role": "tool",
+                "tool_call_id": tc.get("id", ""),
+                "content": _json.dumps(ack),
+            })
+
         # Record decision
         turn = len(self.decisions)
         decision = AgentDecision(

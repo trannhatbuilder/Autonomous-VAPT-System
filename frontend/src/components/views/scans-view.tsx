@@ -14,6 +14,9 @@ import { startScan, getScanEventsUrl, abortScan } from "../../lib/api";
 import { useToast } from "../../hooks/use-toast";
 
 interface ScanEvent {
+  // Backend emits the event name under "event" (e.g. {"event": "scan_progress"}).
+  // Older/other emitters may use "type"; onmessage normalizes it into `type`.
+  event?: string;
   type: string;  // scan_started | scan_progress | scan_complete | scan_error | finding_detected | hitl_approval_required
   turn?: number;
   progress?: number;
@@ -73,32 +76,62 @@ export function ScansView() {
 
       // Connect SSE
       const url = getScanEventsUrl(result.scan_id);
+      console.log("[VAPT-SSE] Connecting to:", url);
       const es = new EventSource(url);
       eventSourceRef.current = es;
 
+      es.onopen = () => {
+        console.log("[VAPT-SSE] Connection opened");
+      };
+
       es.onmessage = (e) => {
         try {
-          const data: ScanEvent = JSON.parse(e.data);
+          const raw: ScanEvent = JSON.parse(e.data);
+          // Backend sends the event name as "event" (e.g. {"event": "scan_progress"}),
+          // while the UI (colors, EventLine, completion checks) keys off "type".
+          // Normalize once here so every downstream consumer sees `type`.
+          const evtName = (raw as any).event || (raw as any).type || "unknown";
+          // Filter out heartbeat events (defensive — backend now sends heartbeats
+          // as SSE comment frames ": ping\n\n" which don't trigger onmessage,
+          // but in case they leak through, don't pollute the events list)
+          if (evtName === "heartbeat") return;
+          const data: ScanEvent = { ...raw, type: evtName };
+
           setEvents((prev) => [...prev, data]);
           if (data.progress !== undefined) {
             setProgress(data.progress);
           }
-          if (data.type === "scan_complete") {
+          if (evtName === "scan_complete") {
+            console.log("[VAPT-SSE] Scan complete:", data);
             setStatus("completed");
             setProgress(100);
             es.close();
-          } else if (data.type === "scan_error") {
+          } else if (evtName === "scan_error") {
+            console.error("[VAPT-SSE] Scan error:", data);
             setStatus("error");
             es.close();
           }
         } catch (err) {
-          console.warn("Failed to parse SSE event:", e.data);
+          console.warn("[VAPT-SSE] Failed to parse SSE event:", e.data);
         }
       };
 
-      es.onerror = () => {
-        // Don't close on transient errors — EventSource auto-reconnects
-        console.warn("SSE error (will auto-reconnect)");
+      es.onerror = (e: any) => {
+        // EventSource auto-reconnects on transient errors.
+        // Log details for debugging — readyState tells us what's happening:
+        //   0=CONNECTING, 1=OPEN, 2=CLOSED
+        const state = es.readyState;
+        const stateName = state === 0 ? "CONNECTING" : state === 1 ? "OPEN" : "CLOSED";
+        console.warn(`[VAPT-SSE] Error (readyState=${stateName}). Will auto-reconnect if not CLOSED.`);
+        // If CLOSED, it means the connection gave up — surface the error to UI
+        if (state === 2) {
+          setStatus("error");
+          toast({
+            title: "SSE connection lost",
+            description: "Scan status stream disconnected. Check backend log.",
+            variant: "destructive",
+          });
+        }
       };
     } catch (err: any) {
       setStatus("error");

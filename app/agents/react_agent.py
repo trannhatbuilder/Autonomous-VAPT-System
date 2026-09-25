@@ -71,8 +71,12 @@ async def _preflight_llm_check(llm_config: dict[str, Any]) -> tuple[bool, str]:
             tools=None,  # no tools — just a minimal call
             temperature=0.0,
         )
-        # If we got a response with content, we're good
-        if response.get("content") is not None or response.get("usage"):
+        # A 2xx response proves the key/base_url/model are valid. Reasoning
+        # models may leave `content` empty (their answer sits in
+        # `reasoning_content`), so accept reasoning output and usage too.
+        content = (response.get("content") or "").strip()
+        reasoning = (response.get("reasoning_content") or "").strip()
+        if content or reasoning or response.get("tool_calls") or response.get("usage"):
             return True, ""
         return False, "LLM returned empty response — check provider config"
     except Exception as exc:
@@ -81,7 +85,7 @@ async def _preflight_llm_check(llm_config: dict[str, Any]) -> tuple[bool, str]:
         if "401" in msg or "Invalid API key" in msg or "Incorrect API key" in msg:
             return False, (
                 f"OpenAI API key invalid or unauthorized. "
-                f"Go to Settings → API Key and re-enter the key. "
+                f"Go to Settings → AI Channels and re-enter the key. "
                 f"Underlying error: {msg}"
             )
         if "404" in msg or "model_not_found" in msg or "does not exist" in msg:

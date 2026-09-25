@@ -1,45 +1,84 @@
 """
-VAPT-AI LLM Client — multi-provider LLM wrapper using litellm.
+VAPT-AI LLM Client — Phase B (CyberStrikeAI pattern).
 
-Reads user's LLM config from DB (vapt_users.settings.llm) and provides
-a unified async chat_completion() interface for the ReAct agent loop.
+Backward-compatible shim for the existing agent loop
+(app/agents/react_agent.py, app/agents/base.py, app/orchestration/langgraph_supervisor.py).
 
-Supports: openai, anthropic, glm (z.ai), minimax, deepseek, groq, google, ollama
-via litellm's provider routing.
+Loads the **default channel** from `config.yaml` (via app.core.channels)
+and delegates to app.core.llm_client.chat_completion (native httpx — no litellm).
+
+Existing call sites stay unchanged:
+    llm_config = await get_user_llm_config(session, str(user_id))
+    response = await chat_completion(llm_config, messages, tools, temperature)
+
+The `llm_config` dict now contains keys:
+    provider, base_url, api_key, model, max_total_tokens,
+    max_completion_tokens, temperature, channel_id, reasoning
 """
 from __future__ import annotations
 
 import logging
 from typing import Any
 
+from app.core.channels import Channel, get_default_channel
+from app.core.llm_client import (
+    LLMError,
+    chat_completion as _native_chat,
+    get_failover_channels,
+)
+
 logger = logging.getLogger(__name__)
 
 
+# ---------- Channel → config dict (for backward compat) ----------
+
+def _channel_to_config(channel: Channel) -> dict[str, Any]:
+    """Convert a Channel object into the dict shape expected by the agent loop."""
+    return {
+        "channel_id": channel.id,
+        "provider": channel.provider,
+        "base_url": channel.base_url,
+        "api_key": channel.api_key,
+        "model": channel.model,
+        "max_total_tokens": channel.max_total_tokens,
+        "max_completion_tokens": channel.max_completion_tokens,
+        "temperature": channel.temperature,
+        "reasoning": channel.reasoning or {},
+        "failover_channels": list(channel.failover_channels or []),
+    }
+
+
 async def get_user_llm_config(session: Any, user_id: str) -> dict[str, Any]:
-    """Load LLM config from user's settings in DB.
+    """Return LLM config as a dict (same shape as Phase A).
 
-    Returns dict with: provider, base_url, api_key, model,
-    max_total_tokens, max_completion_tokens, temperature
+    Phase B: ignores `user_id` (config.yaml is shared, single-tenant).
+    Loads the **default channel**. Raises ValueError if none configured.
     """
-    import uuid as uuid_mod
-    from sqlalchemy import select
-    from app.db.models.user import User
-
-    result = await session.execute(
-        select(User).where(User.id == uuid_mod.UUID(user_id))
-    )
-    db_user = result.scalar_one_or_none()
-    if db_user is None:
-        raise ValueError(f"User {user_id} not found")
-
-    settings = db_user.settings or {}
-    llm = settings.get("llm", {})
-    if not llm.get("provider"):
+    channel = get_default_channel()
+    if channel is None:
         raise ValueError(
-            "LLM not configured. Go to Settings → configure LLM provider, "
-            "API key, and model name."
+            "LLM not configured. Open Settings → Channels and configure at least "
+            "one channel with provider, base_url, api_key, and model. "
+            "Config file: config.yaml (project root)."
         )
-    return llm
+    return _channel_to_config(channel)
+
+
+def get_channel_config(channel_id: str | None = None) -> dict[str, Any]:
+    """Synchronous helper — load a specific channel by id (or default).
+
+    Useful for non-async contexts (e.g. module-level setup).
+    """
+    from app.core.channels import get_channel, get_default_channel
+    if channel_id:
+        ch = get_channel(channel_id)
+        if ch is None:
+            raise ValueError(f"Channel {channel_id!r} not found in config.yaml")
+        return _channel_to_config(ch)
+    ch = get_default_channel()
+    if ch is None:
+        raise ValueError("No LLM channel configured. Edit config.yaml.")
+    return _channel_to_config(ch)
 
 
 def build_litellm_params(
@@ -48,69 +87,15 @@ def build_litellm_params(
     tools: list[dict[str, Any]] | None = None,
     temperature: float | None = None,
 ) -> dict[str, Any]:
-    """Build litellm.acompletion() kwargs from user LLM config.
+    """Deprecated — kept for backward compat.
 
-    litellm uses model prefix routing:
-        openai/    → OpenAI / OpenAI-compatible
-        anthropic/ → Claude
-        glm/       → GLM (z.ai) — litellm maps to openai-compatible
-        minimax/   → MiniMax
-        deepseek/  → DeepSeek
-        groq/      → Groq
-        gemini/    → Google Gemini
-        ollama/    → Ollama (local)
+    Returns a config dict suitable for the native client (not litellm).
     """
-    provider = llm_config.get("provider", "openai")
-    model = llm_config.get("model", "gpt-4o-mini")
-    api_key = llm_config.get("api_key", "")
-    base_url = llm_config.get("base_url", "")
-    max_tokens = llm_config.get("max_completion_tokens", 4096)
-    temp = temperature if temperature is not None else llm_config.get("temperature", 0.7)
-
-    # Build model string with provider prefix
-    # litellm convention: "provider/model_name"
-    provider_prefix_map = {
-        "openai": "openai",
-        "anthropic": "anthropic",
-        "glm": "openai",         # GLM uses OpenAI-compatible API
-        "minimax": "openai",     # MiniMax uses OpenAI-compatible API
-        "deepseek": "deepseek",
-        "groq": "groq",
-        "google": "gemini",
-        "ollama": "ollama",
-    }
-    prefix = provider_prefix_map.get(provider, "openai")
-
-    # For openai-compatible providers (glm, minimax), don't add prefix
-    # — just use model name directly with custom base_url
-    if provider in ("glm", "minimax") or (provider == "openai" and base_url):
-        litellm_model = model  # litellm auto-detects via base_url
-    elif prefix == "openai":
-        litellm_model = f"{prefix}/{model}"
-    else:
-        litellm_model = f"{prefix}/{model}"
-
-    params: dict[str, Any] = {
-        "model": litellm_model,
+    return {
         "messages": messages,
-        "temperature": temp,
-        "max_tokens": max_tokens,
+        "tools": tools,
+        "temperature": temperature if temperature is not None else llm_config.get("temperature", 0.7),
     }
-
-    # API key
-    if api_key:
-        params["api_key"] = api_key
-
-    # Base URL for OpenAI-compatible providers (GLM, MiniMax, custom OpenAI)
-    if base_url:
-        params["api_base"] = base_url.rstrip("/")
-
-    # Tools (function calling)
-    if tools:
-        params["tools"] = tools
-        params["tool_choice"] = "auto"
-
-    return params
 
 
 async def chat_completion(
@@ -119,77 +104,48 @@ async def chat_completion(
     tools: list[dict[str, Any]] | None = None,
     temperature: float | None = None,
 ) -> dict[str, Any]:
-    """Call LLM via litellm.acompletion().
+    """Call LLM via native httpx (no litellm).
+
+    Phase C: supports failover — if the primary channel returns a retryable
+    error (429/5xx/timeout/conn-error), tries each channel in
+    `llm_config["failover_channels"]` in order.
 
     Args:
-        llm_config: user LLM config from DB (provider, api_key, model, ...)
-        messages: chat messages list
-        tools: optional tool schemas for function calling
+        llm_config: dict from get_user_llm_config() — must have provider,
+                    base_url, api_key, model, max_completion_tokens, etc.
+                    Optional: failover_channels: list[str] (channel IDs).
+        messages: chat messages list (OpenAI format)
+        tools: optional tool schemas (OpenAI function calling format)
         temperature: override temperature
 
     Returns:
-        dict with:
-            content: str — LLM text response
-            tool_calls: list[dict] — tool calls if any
-            finish_reason: str — "stop" | "tool_calls" | "length"
-            usage: dict — token counts
+        dict with: content, tool_calls, finish_reason, usage,
+        channel_used (id of channel that succeeded),
+        attempts (list of {channel, status, error}).
     """
-    import litellm
-
-    # Suppress litellm's verbose logging
-    litellm.suppress_debug_info = True
-
-    params = build_litellm_params(llm_config, messages, tools, temperature)
-
-    logger.info(
-        "LLM call | model=%s | messages=%d | tools=%d | temp=%.1f",
-        params.get("model", "?"),
-        len(messages),
-        len(tools) if tools else 0,
-        params.get("temperature", 0.7),
+    # Build primary Channel from config dict
+    channel = Channel(
+        id=llm_config.get("channel_id", "default"),
+        name=llm_config.get("channel_id", "default"),
+        provider=llm_config.get("provider", "openai_compatible"),
+        base_url=llm_config.get("base_url", ""),
+        api_key=llm_config.get("api_key", ""),
+        model=llm_config.get("model", ""),
+        max_total_tokens=int(llm_config.get("max_total_tokens", 128000)),
+        max_completion_tokens=int(llm_config.get("max_completion_tokens", 4096)),
+        temperature=float(llm_config.get("temperature", 0.7)),
+        reasoning=llm_config.get("reasoning") or {},
+        failover_channels=list(llm_config.get("failover_channels") or []),
     )
-
-    try:
-        response = await litellm.acompletion(**params)
-        choice = response.choices[0]
-        message = choice.message
-
-        result: dict[str, Any] = {
-            "content": message.content or "",
-            "tool_calls": [],
-            "finish_reason": choice.finish_reason or "stop",
-            "usage": {
-                "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
-                "completion_tokens": response.usage.completion_tokens if response.usage else 0,
-                "total_tokens": response.usage.total_tokens if response.usage else 0,
-            },
-        }
-
-        # Extract tool calls if present
-        if message.tool_calls:
-            for tc in message.tool_calls:
-                result["tool_calls"].append({
-                    "id": tc.id,
-                    "name": tc.function.name,
-                    "arguments": tc.function.arguments,
-                })
-
-        logger.info(
-            "LLM response | finish=%s | content_len=%d | tool_calls=%d | tokens=%d",
-            result["finish_reason"],
-            len(result["content"]),
-            len(result["tool_calls"]),
-            result["usage"]["total_tokens"],
-        )
-        return result
-
-    except Exception as exc:
-        logger.error("LLM call failed: %s", exc)
-        raise
+    # Resolve failover Channels from IDs (silently skip missing)
+    failovers = get_failover_channels(channel)
+    return await _native_chat(channel, messages, tools, temperature, failovers)
 
 
 __all__ = [
     "get_user_llm_config",
+    "get_channel_config",
     "build_litellm_params",
     "chat_completion",
+    "LLMError",
 ]

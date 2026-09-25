@@ -1,11 +1,12 @@
 /**
- * VAPT-AI API client.
+ * VAPT-AI API client — Phase A (frontend/backend split).
  *
- * Two modes:
- *  - LOCAL DEV (your machine): set NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
- *    in .env.local. All API calls go to that absolute URL (no Caddy gateway).
- *  - SANDBOX (preview.space-z.ai): no env var. All calls use relative paths
- *    with XTransformPort=8000 query param (per Caddy gateway rule).
+ * Single mode: RELATIVE paths.
+ *  - Local dev:  Next.js rewrites() in next.config.ts proxies /api/* → http://localhost:8000
+ *  - Sandbox:    Caddy `?XTransformPort=8000` query routes to FastAPI on port 8000.
+ *
+ * No env vars required. Set NEXT_PUBLIC_API_BASE_URL only if you want to bypass
+ * the rewrite layer and call an absolute URL (e.g. a remote backend).
  *
  * Auth: JWT access + refresh tokens stored in localStorage.
  *  - On 401 response, automatically refreshes once + retries the call.
@@ -13,43 +14,60 @@
  */
 
 /**
- * Build the API base URL + port-routing strategy.
- * Returns { baseUrl: string, useXTransformPort: boolean }.
- *
- * - If NEXT_PUBLIC_API_BASE_URL is set (local dev): use absolute URL, no port routing.
- * - If not set (sandbox): use relative path with XTransformPort=8000 query param.
+ * Build the API base URL.
+ * - Default: empty string → relative paths (proxied by Next.js / Caddy).
+ * - Override: set NEXT_PUBLIC_API_BASE_URL to use absolute URLs.
  */
-function getApiConfig(): { baseUrl: string; useXTransformPort: boolean } {
+function getApiConfig(): { baseUrl: string } {
   const envBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
   if (envBaseUrl) {
-    return { baseUrl: envBaseUrl.replace(/\/$/, ""), useXTransformPort: false };
+    return { baseUrl: envBaseUrl.replace(/\/$/, "") };
   }
-  // Sandbox default: relative paths via Caddy
-  return { baseUrl: "", useXTransformPort: true };
+  return { baseUrl: "" };
 }
 
 const SANDBOX_BACKEND_PORT = "8000";
 
-/** Helper: build URL — works for both local-dev absolute + sandbox relative modes. */
+/** Helper: build URL — relative by default, absolute if NEXT_PUBLIC_API_BASE_URL set. */
 function apiUrl(path: string, params?: Record<string, string | number | boolean | undefined>): string {
-  const { baseUrl, useXTransformPort } = getApiConfig();
-  const url = new URL(path, baseUrl || (typeof window !== "undefined" ? window.location.origin : "http://localhost"));
-  if (useXTransformPort) {
-    url.searchParams.set("XTransformPort", SANDBOX_BACKEND_PORT);
-  }
-  if (params) {
-    for (const [key, value] of Object.entries(params)) {
-      if (value !== undefined && value !== null) {
-        url.searchParams.set(key, String(value));
+  const { baseUrl } = getApiConfig();
+  // If env override is set → use absolute URL
+  if (baseUrl) {
+    const url = new URL(path, baseUrl);
+    if (params) {
+      for (const [key, value] of Object.entries(params)) {
+        if (value !== undefined && value !== null) {
+          url.searchParams.set(key, String(value));
+        }
       }
     }
-  }
-  // For local dev: return absolute URL (e.g., http://localhost:8000/api/auth/login)
-  // For sandbox: return relative path (e.g., /api/auth/login?XTransformPort=8000)
-  if (baseUrl) {
     return url.toString();
   }
-  return url.toString().replace(window.location.origin, "");
+  // Sandbox preview: detect preview.space-z.ai → use XTransformPort query param.
+  // Local dev: just use relative path, Next.js rewrites will proxy it.
+  const isSandboxPreview =
+    typeof window !== "undefined" &&
+    window.location.hostname.endsWith(".space-z.ai");
+  if (isSandboxPreview) {
+    const url = new URL(path, window.location.origin);
+    url.searchParams.set("XTransformPort", SANDBOX_BACKEND_PORT);
+    if (params) {
+      for (const [key, value] of Object.entries(params)) {
+        if (value !== undefined && value !== null) {
+          url.searchParams.set(key, String(value));
+        }
+      }
+    }
+    return url.toString().replace(window.location.origin, "");
+  }
+  // Local dev: relative path
+  const search = params
+    ? "?" + Object.entries(params)
+        .filter(([_, v]) => v !== undefined && v !== null)
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+        .join("&")
+    : "";
+  return `${path}${search}`;
 }
 
 /** Token storage helpers (localStorage — single-user internal tool). */
@@ -315,7 +333,7 @@ export async function saveLLMSettings(config: {
   });
 }
 
-/** POST /api/settings/llm/test — test LLM connection. */
+/** POST /api/settings/llm/test — test LLM connection (Phase A, deprecated). */
 export async function testLLMConnection(config: {
   provider: string;
   api_key: string;
@@ -326,6 +344,107 @@ export async function testLLMConnection(config: {
     method: "POST",
     body: JSON.stringify(config),
   });
+}
+
+// ============================================================
+// Channels API (Phase B — CyberStrikeAI pattern)
+// Replaces the single LLM settings endpoints above.
+// ============================================================
+
+export interface ChannelConfig {
+  id: string;
+  name: string;
+  provider: "openai_compatible" | "claude";
+  base_url: string;
+  api_key: string;           // masked (••••1234) when read from server
+  model: string;
+  max_total_tokens: number;
+  max_completion_tokens: number;
+  temperature: number;
+  reasoning?: {
+    mode?: "auto" | "on" | "off";
+    effort?: "low" | "medium" | "high" | "max" | "xhigh";
+    budget_tokens?: number;
+  };
+  failover_channels?: string[];   // Phase C: list of channel IDs for fallback
+}
+
+export interface ChannelTestResult {
+  success: boolean;
+  model?: string;
+  latency_ms?: number;
+  error?: string;
+  status_code?: number | null;
+  response_preview?: string;
+  response_body?: string | null;  // Phase C: first 500 chars of upstream error body
+  channel_id?: string;
+}
+
+/** GET /api/channels — list all channels (api_key masked). */
+export async function listChannels(): Promise<{
+  channels_count: number;
+  default_channel: string | null;
+  config_path: string;
+  channels: ChannelConfig[];
+}> {
+  return apiFetch("/api/channels");
+}
+
+/** GET /api/channels/{id} — fetch one channel (api_key masked). */
+export async function getChannel(channelId: string): Promise<ChannelConfig> {
+  return apiFetch(`/api/channels/${channelId}`);
+}
+
+/** POST /api/channels — create a new channel. */
+export async function createChannel(channel: ChannelConfig): Promise<{
+  status: string;
+  channel: ChannelConfig;
+}> {
+  return apiFetch("/api/channels", {
+    method: "POST",
+    body: JSON.stringify(channel),
+  });
+}
+
+/** PUT /api/channels/{id} — update an existing channel. */
+export async function updateChannel(channelId: string, channel: ChannelConfig): Promise<{
+  status: string;
+  channel: ChannelConfig;
+}> {
+  return apiFetch(`/api/channels/${channelId}`, {
+    method: "PUT",
+    body: JSON.stringify(channel),
+  });
+}
+
+/** DELETE /api/channels/{id} — delete a channel. */
+export async function deleteChannel(channelId: string): Promise<{ status: string; deleted: string }> {
+  return apiFetch(`/api/channels/${channelId}`, { method: "DELETE" });
+}
+
+/** POST /api/channels/test — test channel config inline (no save). */
+export async function testChannelInline(channel: ChannelConfig): Promise<ChannelTestResult> {
+  return apiFetch("/api/channels/test", {
+    method: "POST",
+    // 256 tokens: reasoning models need headroom for their hidden
+    // chain-of-thought before any visible content is produced.
+    body: JSON.stringify({ ...channel, max_completion_tokens: 256, temperature: 0.0 }),
+  });
+}
+
+/** POST /api/channels/{id}/test — test an already-saved channel. */
+export async function testSavedChannel(channelId: string): Promise<ChannelTestResult> {
+  return apiFetch(`/api/channels/${channelId}/test`, { method: "POST" });
+}
+
+/** GET /api/channels/default — get default channel id. */
+export async function getDefaultChannel(): Promise<{ default_channel: string | null }> {
+  return apiFetch("/api/channels/default");
+}
+
+/** POST /api/channels/default/{id} — set default channel. */
+export async function setDefaultChannel(channelId: string): Promise<{ status: string; default_channel: string }> {
+  return apiFetch(`/api/channels/default/${channelId}`, { method: "POST" });
 }
 
 /** GET /api/findings — list all findings (paginated). */
@@ -402,22 +521,27 @@ export async function rejectHITL(approvalId: string, comment?: string): Promise<
 
 /**
  * Build SSE endpoint URL for scan events.
- * Returns a full URL with the access_token as query param
+ * Returns a relative URL with the access_token as query param
  * (EventSource browser API doesn't support custom headers, so we pass
  * the token as a query param — same as CyberStrikeAI's pattern).
  *
  * Mode-aware:
- *  - Local dev: http://localhost:8000/api/scans/{id}/events?token=xxx
- *  - Sandbox: /api/scans/{id}/events?XTransformPort=8000&token=xxx
+ *  - Local dev: /api/scans/{id}/events?token=xxx  (Next.js rewrites → :8000)
+ *  - Sandbox:   /api/scans/{id}/events?XTransformPort=8000&token=xxx
+ *  - Override:  http://<host>/api/scans/{id}/events?token=xxx
  */
 export function getScanEventsUrl(scanId: string): string {
   const accessToken = tokenStorage.getAccessToken();
-  const { baseUrl, useXTransformPort } = getApiConfig();
+  const { baseUrl } = getApiConfig();
   const url = new URL(
     `/api/scans/${scanId}/events`,
     baseUrl || (typeof window !== "undefined" ? window.location.origin : "http://localhost"),
   );
-  if (useXTransformPort) {
+  // Sandbox preview: detect preview.space-z.ai → add XTransformPort.
+  const isSandboxPreview =
+    typeof window !== "undefined" &&
+    window.location.hostname.endsWith(".space-z.ai");
+  if (!baseUrl && isSandboxPreview) {
     url.searchParams.set("XTransformPort", SANDBOX_BACKEND_PORT);
   }
   if (accessToken) {
