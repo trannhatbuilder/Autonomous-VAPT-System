@@ -76,6 +76,7 @@ from app.pentest.events import (
     emit_scan_complete,
     emit_scan_error,
     emit_scan_progress,
+    emit_phase_change,
     emit_scan_started,
 )
 
@@ -471,6 +472,7 @@ class SupervisorOrchestrator(BaseOrchestrator):
         await emit_scan_progress(
             scan_id=self.scan_id, turn=turn, thought=thought,
             tool_name=decision.tool_name, observation=decision.observation,
+            agent_name="supervisor", progress=20 + turn * 2,
         )
 
         return {
@@ -503,6 +505,7 @@ class SupervisorOrchestrator(BaseOrchestrator):
         await emit_scan_progress(
             scan_id=self.scan_id, turn=turn, thought=thought,
             tool_name=decision.tool_name, observation=decision.observation,
+            agent_name="supervisor", progress=20 + turn * 2,
         )
 
         return {
@@ -606,6 +609,7 @@ class SupervisorOrchestrator(BaseOrchestrator):
                 await emit_scan_progress(
                     scan_id=self.scan_id, turn=turn, thought=decision.thought,
                     tool_name=decision.tool_name, observation=decision.observation[:500],
+                    agent_name=expert_name, progress=30 + turn * 2,
                 )
 
                 return {**state, "current_agent": expert_name, "decisions": self.decisions}
@@ -631,6 +635,7 @@ class SupervisorOrchestrator(BaseOrchestrator):
             await emit_scan_progress(
                 scan_id=self.scan_id, turn=turn, thought=decision.thought,
                 tool_name=decision.tool_name, observation=observation[:500],
+                agent_name=expert_name, progress=30 + turn * 2,
             )
 
             # Append stub result to supervisor history too (so W10 path

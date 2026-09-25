@@ -22,7 +22,7 @@ import {
   Loader2,
   AlertOctagon,
 } from "lucide-react";
-import { getExecutions, abortScan as cancelScan } from "../lib/api";
+import { getExecutions, abortScan as cancelScan, type ToolExecution } from "../lib/api";
 import { useToast } from "../hooks/use-toast";
 
 type ViewName = "dashboard" | "scans" | "findings" | "tools" | "settings";
@@ -47,7 +47,7 @@ function AppShell() {
   const { user, loading, isAuthenticated, logout } = useAuth();
   const [view, setView] = useState<ViewName>("dashboard");
   const [panicOpen, setPanicOpen] = useState(false);
-  const [runningExecutions, setRunningExecutions] = useState<any[]>([]);
+  const [runningExecutions, setRunningExecutions] = useState<ToolExecution[]>([]);
 
   if (loading) {
     return (
@@ -152,25 +152,66 @@ function AppShell() {
   );
 }
 
-/** Sidebar widget: shows active scan + tool execution count. */
+/** Sidebar widget: shows active scan + tool execution count.
+ *
+ * Polling strategy (Phase D fix):
+ *   - Always poll `/api/scans/active` every 15s — it's a cheap index lookup.
+ *   - Only poll `/api/mcp/executions` when there IS an active scan (saves
+ *     backend traffic + log spam when idle).
+ *   - When an active scan is present, tighten the interval to 5s so the
+ *     sidebar updates live during scans.
+ *   - When the scan completes (no more active scans), back off to 15s.
+ */
 function ActiveScanWidget() {
-  const [execs, setExecs] = useState<any[]>([]);
+  const [execs, setExecs] = useState<ToolExecution[]>([]);
   const [scans, setScans] = useState<any[]>([]);
 
   useEffect(() => {
+    let active = true;
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+
     const poll = async () => {
+      if (!active) return;
       try {
-        const [execsResp, scansResp] = await Promise.all([
-          getExecutions(undefined, 5).catch(() => ({ executions: [] })),
-          import("../lib/api").then((m) => m.getActiveScans()).catch(() => ({ active_scans: [] })),
-        ]);
-        setExecs(execsResp.executions || []);
-        setScans(scansResp.active_scans || []);
-      } catch {}
+        // Always fetch active scans — cheap lookup, tells us whether to
+        // also fetch executions
+        const scansResp = await import("../lib/api")
+          .then((m) => m.getActiveScans())
+          .catch(() => ({ active_scans: [] }));
+        if (!active) return;
+        const activeScans = scansResp.active_scans || [];
+        setScans(activeScans);
+
+        if (activeScans.length > 0) {
+          // There IS an active scan — also fetch recent tool executions
+          const execsResp = await getExecutions(undefined, 5).catch(() => ({ executions: [] }));
+          if (!active) return;
+          setExecs(execsResp.executions || []);
+          // Tighten interval to 5s during active scans for live updates
+          if (intervalId === null) {
+            intervalId = setInterval(poll, 5000);
+          }
+        } else {
+          // No active scan — clear stale executions + back off to 15s
+          setExecs([]);
+          if (intervalId !== null) {
+            clearInterval(intervalId);
+            intervalId = null;
+          }
+        }
+      } catch {
+        // swallow — network hiccup, will retry on next tick
+      }
     };
+
     poll();
-    const interval = setInterval(poll, 5000);
-    return () => clearInterval(interval);
+    // Idle interval (15s) — gets tightened to 5s when an active scan appears
+    const idleInterval = setInterval(poll, 15000);
+    return () => {
+      active = false;
+      clearInterval(idleInterval);
+      if (intervalId !== null) clearInterval(intervalId);
+    };
   }, []);
 
   if (scans.length === 0) {
@@ -200,8 +241,8 @@ function PanicModal({
   onRefresh,
 }: {
   onClose: () => void;
-  runningExecutions: any[];
-  onRefresh: (execs: any[]) => void;
+  runningExecutions: ToolExecution[];
+  onRefresh: (execs: ToolExecution[]) => void;
 }) {
   const { toast } = useToast();
   const [cancelling, setCancelling] = useState<string | null>(null);
@@ -221,6 +262,16 @@ function PanicModal({
   const running = runningExecutions.filter((e) =>
     e.status === "running" || e.status === "queued"
   );
+
+  // Group running executions by scan so we can offer one bulk-cancel
+  // button per scan. The explicit type argument is required: without it
+  // TS picks the non-generic `reduce` overload and `Object.entries()`
+  // would infer the values as `unknown`.
+  const byScan = running.reduce<Record<string, ToolExecution[]>>((acc, e) => {
+    const key = e.scan_id || "(no scan)";
+    (acc[key] = acc[key] || []).push(e);
+    return acc;
+  }, {});
 
   const handleCancelScan = async (scanId: string) => {
     setCancelling(scanId);
@@ -268,11 +319,7 @@ function PanicModal({
               <p className="text-sm text-zinc-400">
                 {running.length} tool execution(s) currently running. Cancel by scan to stop all tools for that scan.
               </p>
-              {Object.entries(running.reduce((acc, e) => {
-                const key = e.scan_id || "(no scan)";
-                (acc[key] = acc[key] || []).push(e);
-                return acc;
-              }, {} as Record<string, any[]>)).map(([scanId, execs]) => (
+              {Object.entries(byScan).map(([scanId, execs]) => (
                 <div key={scanId} className="border border-zinc-800 rounded p-3 bg-zinc-950">
                   <div className="flex items-center justify-between mb-2">
                     <div>

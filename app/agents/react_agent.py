@@ -16,7 +16,7 @@ Architecture:
     3. P1 Preflight: 1-shot LLM ping to verify OpenAI API key works
        (fail fast instead of cryptic failure mid-loop)
     4. Loop:
-        a. Call LLM via litellm with messages + tools
+        a. Call LLM via chat_completion with messages + tools
         b. If LLM returns tool_calls:
             - Emit SSE: scan_progress (thought + tool_name)
             - Execute each tool via SubprocessExecutor
@@ -264,14 +264,14 @@ async def run_react_scan(
     # base_url are all valid. If not, fail fast with a friendly error
     # instead of crashing mid-loop after spending tokens on the system
     # prompt.
-    await emit_scan_progress(scan_id, 5, "orchestrator",
-        "Đang kiểm tra cấu hình LLM (OpenAI API key, model, base_url)...")
+    await emit_scan_progress(scan_id, thought="Đang kiểm tra cấu hình LLM (OpenAI API key, model, base_url)...",
+                             agent_name="orchestrator", progress=5)
 
     ok, err = await _preflight_llm_check(llm_config)
     if not ok:
         logger.error("LLM preflight failed | scan=%s | error=%s", scan_id, err)
-        await emit_scan_progress(scan_id, 5, "orchestrator",
-            f"❌ LLM preflight thất bại: {err}")
+        await emit_scan_progress(scan_id, thought=f"❌ LLM preflight thất bại: {err}",
+                                 agent_name="orchestrator", progress=5)
         return {
             "status": "error",
             "findings_count": 0,
@@ -283,8 +283,8 @@ async def run_react_scan(
 
     logger.info("LLM preflight OK | scan=%s | model=%s",
                 scan_id, llm_config.get("model"))
-    await emit_scan_progress(scan_id, 10, "orchestrator",
-        "✅ LLM cấu hình OK. Bắt đầu ReAct loop...")
+    await emit_scan_progress(scan_id, thought="✅ LLM cấu hình OK. Bắt đầu ReAct loop...",
+                             agent_name="orchestrator", progress=10)
 
     # Build tool schemas
     tool_schemas = build_tool_schemas()
@@ -313,8 +313,8 @@ async def run_react_scan(
 
         try:
             # Call LLM
-            await emit_scan_progress(scan_id, 20 + iteration * 2, "orchestrator",
-                f"Đang suy nghĩ... (vòng {iterations}/{max_iterations})")
+            await emit_scan_progress(scan_id, thought=f"Đang suy nghĩ... (vòng {iterations}/{max_iterations})",
+                                     agent_name="orchestrator", progress=20 + iteration * 2)
 
             response = await chat_completion(
                 llm_config=llm_config,
@@ -345,8 +345,8 @@ async def run_react_scan(
                 if response["content"]:
                     logger.info("LLM thinking (no tool calls) | scan=%s | iter=%d | content=%s",
                                 scan_id, iterations, response["content"][:100])
-                    await emit_scan_progress(scan_id, 20 + iteration * 2, "orchestrator",
-                        response["content"][:200])
+                    await emit_scan_progress(scan_id, thought=response["content"][:200],
+                                             agent_name="orchestrator", progress=20 + iteration * 2)
                 continue
 
             # ── Execute tool calls ───────────────────────────────
@@ -358,8 +358,9 @@ async def run_react_scan(
                     tool_args = {}
 
                 # Emit SSE: tool_call
-                await emit_scan_progress(scan_id, 20 + iteration * 2, "orchestrator",
-                    f"🔧 Đang chạy: {tool_name}({json.dumps(tool_args, ensure_ascii=False)[:100]})")
+                await emit_scan_progress(scan_id, thought=f"🔧 Đang chạy: {tool_name}({json.dumps(tool_args, ensure_ascii=False)[:100]})",
+                                         agent_name="orchestrator", tool_name=tool_name,
+                                         progress=20 + iteration * 2)
 
                 logger.info("Tool call | scan=%s | iter=%d | tool=%s | args=%s",
                             scan_id, iterations, tool_name,
@@ -370,8 +371,8 @@ async def run_react_scan(
                     final_summary = tool_args.get("summary", "Scan complete.")
                     logger.info("Scan exit | scan=%s | iter=%d | summary=%s",
                                 scan_id, iterations, final_summary[:100])
-                    await emit_scan_progress(scan_id, 95, "orchestrator",
-                        f"✅ Hoàn thành: {final_summary[:150]}")
+                    await emit_scan_progress(scan_id, thought=f"✅ Hoàn thành: {final_summary[:150]}",
+                                             agent_name="orchestrator", progress=95)
 
                     # Count findings from DB
                     try:
@@ -414,13 +415,15 @@ async def run_react_scan(
 
                     if tool_name == "record_vulnerability":
                         findings_count += 1
-                        await emit_scan_progress(scan_id, 20 + iteration * 2, "orchestrator",
-                            f"📋 Đã ghi nhận lỗ hổng #{findings_count}")
+                        await emit_scan_progress(scan_id, thought=f"📋 Đã ghi nhận lỗ hổng #{findings_count}",
+                                                 agent_name="orchestrator", tool_name="record_vulnerability",
+                                                 progress=20 + iteration * 2)
                     else:
                         # Emit observation (truncated for SSE)
                         obs_preview = tool_output[:200].replace("\n", " ")
-                        await emit_scan_progress(scan_id, 20 + iteration * 2, "orchestrator",
-                            f"📤 Kết quả {tool_name}: {obs_preview}")
+                        await emit_scan_progress(scan_id, thought=f"📤 Kết quả {tool_name}: {obs_preview}",
+                                                 agent_name="orchestrator", tool_name=tool_name,
+                                                 progress=20 + iteration * 2)
 
                 except Exception as exc:
                     tool_output = f"Error executing {tool_name}: {exc}"
@@ -432,8 +435,9 @@ async def run_react_scan(
                         tool_output = _format_binary_not_found_hint(err_str)
                     logger.error("Tool execution error | scan=%s | tool=%s | error=%s",
                                  scan_id, tool_name, exc)
-                    await emit_scan_progress(scan_id, 20 + iteration * 2, "orchestrator",
-                        f"❌ Lỗi {tool_name}: {str(exc)[:100]}")
+                    await emit_scan_progress(scan_id, thought=f"❌ Lỗi {tool_name}: {str(exc)[:100]}",
+                                             agent_name="orchestrator", tool_name=tool_name,
+                                             progress=20 + iteration * 2)
 
                 # Append tool result to messages
                 messages.append({
@@ -456,8 +460,8 @@ async def run_react_scan(
 
     # Max iterations reached
     logger.warning("Max iterations reached | scan=%s | iter=%d", scan_id, iterations)
-    await emit_scan_progress(scan_id, 90, "orchestrator",
-        f"⚠️ Đạt giới hạn {max_iterations} vòng. Kết thúc scan.")
+    await emit_scan_progress(scan_id, thought=f"⚠️ Đạt giới hạn {max_iterations} vòng. Kết thúc scan.",
+                             agent_name="orchestrator", progress=90)
 
     return {
         "status": "max_iterations",

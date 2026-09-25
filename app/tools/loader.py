@@ -156,6 +156,7 @@ class ToolDef:
 # ---------- Loader ----------
 
 _loaded_tools: dict[str, ToolDef] = {}
+_loaded_tools_mtime: float = 0.0  # mtime of the newest YAML file at last load
 
 
 def _parse_yaml(data: dict[str, Any]) -> ToolDef:
@@ -198,16 +199,54 @@ def _parse_yaml(data: dict[str, Any]) -> ToolDef:
     )
 
 
-def load_all_tools() -> dict[str, ToolDef]:
+def load_all_tools(force_reload: bool = False) -> dict[str, ToolDef]:
     """Load all enabled tool YAMLs from app/tools/.
+
+    CACHED — only re-parses YAML files when the directory contents or any
+    YAML file's mtime has changed since the last call. Subsequent calls
+    during the same scan (including one ReAct loop's many iterations)
+    return the cached dict in O(1) without touching disk.
+
+    Args:
+        force_reload: bypass the mtime check and re-parse from disk.
+            Useful for tests / hot-reload during development.
 
     Returns dict: tool_name -> ToolDef
     """
-    global _loaded_tools
-    _loaded_tools.clear()
+    global _loaded_tools, _loaded_tools_mtime
 
+    # Compute the newest mtime across the YAML directory contents.
+    # If unchanged and cache is populated, return cache immediately.
     yaml_files = sorted(TOOLS_DIR.glob("*.yaml"))
-    logger.info("Loading tool definitions from %s (%d YAML files)", TOOLS_DIR, len(yaml_files))
+    if not yaml_files:
+        # Empty / missing dir — return whatever we have (likely empty)
+        return _loaded_tools
+
+    try:
+        newest_mtime = max(f.stat().st_mtime for f in yaml_files)
+    except OSError:
+        newest_mtime = 0.0
+
+    if (
+        not force_reload
+        and _loaded_tools
+        and newest_mtime == _loaded_tools_mtime
+    ):
+        # Cache hit — log at debug level only to keep scan logs clean
+        logger.debug(
+            "Tool cache hit (%d tools, mtime=%s) — skipping re-parse",
+            len(_loaded_tools), _loaded_tools_mtime,
+        )
+        return _loaded_tools
+
+    # Cache miss — re-parse all YAMLs from disk
+    _loaded_tools.clear()
+    _loaded_tools_mtime = newest_mtime
+
+    logger.info(
+        "Loading tool definitions from %s (%d YAML files, mtime=%s)",
+        TOOLS_DIR, len(yaml_files), newest_mtime,
+    )
 
     for yaml_file in yaml_files:
         try:
@@ -423,6 +462,15 @@ def register_tools_with_mcp(mcp_server) -> None:
         func = make_tool_func(tool)
         mcp_server.tool(name=tool.name, description=tool.short_description or tool.description[:200])(func)
         logger.info("Registered MCP tool: %s (ExecutionService-backed — P2)", tool.name)
+
+
+def reload_tools() -> dict[str, ToolDef]:
+    """Force-reload tool definitions from disk (alias for load_all_tools(force_reload=True)).
+
+    Useful when a tool YAML has been edited at runtime (e.g. during dev) —
+    safe to call from any thread, idempotent.
+    """
+    return load_all_tools(force_reload=True)
 
 
 if __name__ == "__main__":

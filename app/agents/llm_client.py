@@ -1,11 +1,11 @@
 """
-VAPT-AI LLM Client — Phase B (CyberStrikeAI pattern).
+VAPT-AI LLM Client shim — Phase B/C.
 
 Backward-compatible shim for the existing agent loop
 (app/agents/react_agent.py, app/agents/base.py, app/orchestration/langgraph_supervisor.py).
 
 Loads the **default channel** from `config.yaml` (via app.core.channels)
-and delegates to app.core.llm_client.chat_completion (native httpx — no litellm).
+and delegates to app.core.llm_client.chat_completion (native httpx).
 
 Existing call sites stay unchanged:
     llm_config = await get_user_llm_config(session, str(user_id))
@@ -81,15 +81,15 @@ def get_channel_config(channel_id: str | None = None) -> dict[str, Any]:
     return _channel_to_config(ch)
 
 
-def build_litellm_params(
+def build_chat_params(
     llm_config: dict[str, Any],
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
     temperature: float | None = None,
 ) -> dict[str, Any]:
-    """Deprecated — kept for backward compat.
+    """Build a params dict for the native client.
 
-    Returns a config dict suitable for the native client (not litellm).
+    Renamed from the deprecated `build_litellm_params` (no litellm anymore).
     """
     return {
         "messages": messages,
@@ -104,7 +104,7 @@ async def chat_completion(
     tools: list[dict[str, Any]] | None = None,
     temperature: float | None = None,
 ) -> dict[str, Any]:
-    """Call LLM via native httpx (no litellm).
+    """Call LLM via native httpx client.
 
     Phase C: supports failover — if the primary channel returns a retryable
     error (429/5xx/timeout/conn-error), tries each channel in
@@ -145,7 +145,7 @@ async def chat_completion(
 __all__ = [
     "get_user_llm_config",
     "get_channel_config",
-    "build_litellm_params",
+    "build_chat_params",
     "chat_completion",
     "LLMError",
 ]

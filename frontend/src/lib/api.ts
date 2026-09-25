@@ -272,10 +272,26 @@ export async function getAgents(): Promise<{
   return apiFetch("/api/orchestration/agents");
 }
 
+/** One tool execution, mirrors app/mcp/execution_service.py ToolExecution.to_dict(). */
+export interface ToolExecution {
+  id: string;
+  tool_name: string;
+  target: string;
+  scan_id: string | null;
+  actor_id: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled" | "hard_timeout"
+    | "background_running" | "orphaned";
+  started_at: string | null;
+  completed_at: string | null;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  duration_seconds: number;
+}
+
 /** GET /api/mcp/executions — list tool executions. */
 export async function getExecutions(scanId?: string, limit: number = 50): Promise<{
   executions_count: number;
-  executions: Array<any>;
+  executions: ToolExecution[];
 }> {
   const params: Record<string, string | number | undefined> = { limit };
   if (scanId) params.scan_id = scanId;
@@ -521,34 +537,79 @@ export async function rejectHITL(approvalId: string, comment?: string): Promise<
 
 /**
  * Build SSE endpoint URL for scan events.
- * Returns a relative URL with the access_token as query param
- * (EventSource browser API doesn't support custom headers, so we pass
- * the token as a query param — same as CyberStrikeAI's pattern).
  *
- * Mode-aware:
- *  - Local dev: /api/scans/{id}/events?token=xxx  (Next.js rewrites → :8000)
- *  - Sandbox:   /api/scans/{id}/events?XTransformPort=8000&token=xxx
- *  - Override:  http://<host>/api/scans/{id}/events?token=xxx
+ * CRITICAL — Next.js dev proxy bug:
+ *   The Next.js `rewrites()` proxy (http-proxy under the hood) BUFFERS
+ *   streaming responses. SSE streams hang indefinitely through the
+ *   proxy — the browser connects (200 OK) but receives no `data:`
+ *   frames until the proxy buffer flushes (which never happens for
+ *   a long-lived SSE stream).
+ *   Symptom: backend log shows "SSE subscriber connected" + events
+ *   being published, but the frontend shows "Waiting for events..."
+ *   forever. Browser Network tab shows the events request as
+ *   "(pending)" with no chunks arriving.
+ *
+ * Workaround:
+ *   - In LOCAL DEV (window.location.hostname is localhost or 127.0.0.1),
+ *     return an ABSOLUTE URL pointing directly at the FastAPI backend
+ *     (default http://localhost:8000). The browser connects directly
+ *     to uvicorn, bypassing the Next.js dev proxy entirely.
+ *   - Override via NEXT_PUBLIC_API_BASE_URL env var if the backend
+ *     runs on a different port/host.
+ *   - In SANDBOX PREVIEW (preview.space-z.ai), keep the relative
+ *     path — Caddy's `?XTransformPort=8000` query handles SSE
+ *     streaming correctly.
+ *
+ * Auth: JWT access token passed as `?token=<access_token>` query
+ * param (EventSource browser API doesn't support custom headers).
  */
 export function getScanEventsUrl(scanId: string): string {
   const accessToken = tokenStorage.getAccessToken();
   const { baseUrl } = getApiConfig();
-  const url = new URL(
-    `/api/scans/${scanId}/events`,
-    baseUrl || (typeof window !== "undefined" ? window.location.origin : "http://localhost"),
-  );
-  // Sandbox preview: detect preview.space-z.ai → add XTransformPort.
-  const isSandboxPreview =
+
+  // Resolve the SSE backend origin.
+  // Priority:
+  //   1. NEXT_PUBLIC_API_BASE_URL (explicit override)
+  //   2. localhost dev bypass — point directly at FastAPI :8000
+  //      to skip the Next.js dev proxy (which buffers SSE)
+  //   3. Sandbox preview — relative path (Caddy handles SSE fine)
+  let sseOrigin: string;
+  if (baseUrl) {
+    sseOrigin = baseUrl.replace(/\/$/, "");
+  } else if (
     typeof window !== "undefined" &&
-    window.location.hostname.endsWith(".space-z.ai");
-  if (!baseUrl && isSandboxPreview) {
+    (window.location.hostname === "localhost" ||
+      window.location.hostname === "127.0.0.1" ||
+      window.location.hostname === "0.0.0.0")
+  ) {
+    // Local dev bypass — connect directly to FastAPI.
+    // Read port from env if the user runs backend on a non-default port.
+    sseOrigin = process.env.NEXT_PUBLIC_SSE_BASE_URL || "http://localhost:8000";
+  } else if (
+    typeof window !== "undefined" &&
+    window.location.hostname.endsWith(".space-z.ai")
+  ) {
+    // Sandbox preview — relative path; Caddy routes via ?XTransformPort=8000
+    sseOrigin = "";
+  } else {
+    // Unknown host — assume backend is on the same origin (production)
+    sseOrigin = typeof window !== "undefined" ? window.location.origin : "";
+  }
+
+  const url = new URL(`/api/scans/${scanId}/events`, sseOrigin || "http://localhost");
+
+  // Sandbox preview needs the XTransformPort query so Caddy routes to FastAPI
+  if (
+    !baseUrl &&
+    typeof window !== "undefined" &&
+    window.location.hostname.endsWith(".space-z.ai")
+  ) {
     url.searchParams.set("XTransformPort", SANDBOX_BACKEND_PORT);
   }
   if (accessToken) {
     url.searchParams.set("token", accessToken);
   }
-  if (baseUrl) {
-    return url.toString();
-  }
-  return url.toString().replace(window.location.origin, "");
+  // Return absolute URL — EventSource requires absolute URL when origin differs
+  // from the page origin (which is exactly what we want for the dev bypass).
+  return url.toString();
 }

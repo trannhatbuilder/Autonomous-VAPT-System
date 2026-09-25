@@ -539,10 +539,42 @@ def create_app() -> FastAPI:
         returns scan_id immediately and runs the pipeline in background
         via asyncio.create_task(). The frontend connects SSE immediately
         and receives real-time events.
+
+        Phase D preflight: before launching the scan, checks that at
+        least 3 critical tools (nmap, httpx, whatweb) are installed.
+        If < 3 are available, returns HTTP 412 with the list of missing
+        tools so the user can run `./scripts/install_tools.sh` instead
+        of wasting LLM tokens on "Binary not found" loops.
         """
         from app.orchestration.base import generate_scan_id
         import uuid as uuid_mod
         import asyncio
+        import shutil
+
+        # ── Phase D preflight: tool availability check ────────────────
+        # Running an LLM-driven scan without the basic tools installed
+        # wastes API tokens — the agent tries nmap → "Binary not found"
+        # → tries httpx → "Binary not found" → ... → $0.01 wasted per
+        # scan. Catch this BEFORE we start the agent loop.
+        critical_tools = ["nmap", "httpx", "whatweb", "nuclei"]
+        missing = [t for t in critical_tools if shutil.which(t) is None]
+        # Allow scans to proceed if at least nmap OR httpx is present.
+        # (LLM can adapt to use whichever is available.)
+        if "nmap" in missing and "httpx" in missing:
+            # Both critical recon tools are missing — abort early
+            return {
+                "scan_id": None,
+                "target": req.target,
+                "user_prompt": req.user_prompt,
+                "status": "preflight_failed",
+                "message": (
+                    f"Critical tools missing: {missing}. "
+                    f"Cannot start scan — agent would burn LLM tokens retrying "
+                    f"nonexistent binaries. Run: "
+                    f"`bash scripts/install_tools.sh` (Ubuntu/Debian), then retry."
+                ),
+                "missing_tools": missing,
+            }
 
         scan_id = generate_scan_id()
 
@@ -650,9 +682,18 @@ def create_app() -> FastAPI:
             event_generator(),
             media_type="text/event-stream",
             headers={
-                "Cache-Control": "no-cache",
+                "Cache-Control": "no-cache, no-transform",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",  # disable nginx buffering
+                # Critical for cross-origin SSE (localhost:3000 → localhost:8000
+                # dev bypass). EventSource doesn't send Authorization header,
+                # so we MUST echo the requesting Origin back here (CORS middleware
+                # sometimes doesn't apply to streaming responses correctly).
+                "Access-Control-Allow-Origin": "*",  # safe — token is in query string,
+                                                    # not cookies, and only SSE reads it
+                "Access-Control-Allow-Credentials": "false",
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+                "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept",
             },
         )
 
@@ -1422,80 +1463,62 @@ def create_app() -> FastAPI:
     ) -> dict[str, Any]:
         """Test LLM connection by making a real 1-token API call.
 
-        P3: now actually calls litellm.acompletion with a "ping" message.
-        Returns real success/failure based on whether the API responded.
+        Phase C: uses the native httpx client (app.core.llm_client.test_channel)
+        instead of litellm. The native client already knows how to handle
+        OpenAI-compatible + Claude providers, with friendly error messages
+        and a 20s timeout for the "Hi" probe.
         """
-        import asyncio
-        import litellm
-
-        # Suppress litellm's verbose logging during the test
-        litellm.suppress_debug_info = True
-
         # Validate input
         if not req.api_key or req.api_key.startswith("•"):
             return {"success": False, "error": "API key required (cannot test with masked key)"}
         if not req.model:
             return {"success": False, "error": "Model name required"}
-        if not req.base_url and req.provider not in ("openai", "anthropic", "deepseek", "groq", "google", "ollama"):
-            return {"success": False, "error": f"Base URL required for provider {req.provider!r}"}
-
-        # Build model string with provider prefix (litellm convention)
-        provider_prefix_map = {
-            "openai": "openai",
-            "anthropic": "anthropic",
-            "deepseek": "deepseek",
-            "groq": "groq",
-            "google": "gemini",
-            "ollama": "ollama",
-            "glm": "openai",       # GLM uses OpenAI-compatible API
-            "minimax": "openai",   # MiniMax uses OpenAI-compatible API
-        }
-        prefix = provider_prefix_map.get(req.provider, "openai")
-
-        # For OpenAI-compatible providers (glm, minimax) or custom base_url, don't add prefix
-        if req.provider in ("glm", "minimax") or (req.provider == "openai" and req.base_url):
-            litellm_model = req.model
+        # Map provider → Channel.provider enum supported by app.core.llm_client
+        # (openai_compatible | claude). Anything else → assume openai_compatible
+        # (most third-party providers — DeepSeek, GLM, MiniMax, Groq, ... —
+        # expose an OpenAI-compatible /chat/completions endpoint).
+        if req.provider == "anthropic" or req.provider == "claude":
+            provider = "claude"
         else:
-            litellm_model = f"{prefix}/{req.model}"
+            provider = "openai_compatible"
 
-        params: dict[str, Any] = {
-            "model": litellm_model,
-            "messages": [{"role": "user", "content": "ping"}],
-            "temperature": 0.0,
-            "max_tokens": 5,  # tiny response — just verify connectivity
-        }
-        if req.api_key:
-            params["api_key"] = req.api_key
-        if req.base_url:
-            params["api_base"] = req.base_url.rstrip("/")
+        # Build an in-memory Channel object (no need to persist to config.yaml)
+        from app.core.channels import Channel
+        channel = Channel(
+            id="llm_test",
+            name="LLM test",
+            provider=provider,
+            base_url=(req.base_url or "").rstrip("/"),
+            api_key=req.api_key,
+            model=req.model,
+            max_total_tokens=req.max_total_tokens or 128000,
+            max_completion_tokens=req.max_completion_tokens or 4096,
+            temperature=req.temperature if req.temperature is not None else 0.7,
+            reasoning={},
+            failover_channels=[],
+        )
 
         try:
-            # 30s timeout — if OpenAI is unreachable, litellm should timeout
-            response = await asyncio.wait_for(
-                litellm.acompletion(**params),
-                timeout=30.0,
-            )
-            choice = response.choices[0]
-            content = (choice.message.content or "").strip()
-            tokens = response.usage.total_tokens if response.usage else 0
+            from app.core.llm_client import test_channel
+            result = await test_channel(channel)
             return {
-                "success": True,
-                "message": f"Connection OK — model={litellm_model}, response={content[:50]!r}, tokens={tokens}",
-                "model_used": litellm_model,
-                "tokens_used": tokens,
-                "finish_reason": choice.finish_reason,
-            }
-        except asyncio.TimeoutError:
-            return {
-                "success": False,
-                "error": f"Timeout after 30s — cannot reach {req.provider} endpoint. Check base_url + network.",
-                "model_used": litellm_model,
+                "success": result.get("success", False),
+                "message": (
+                    f"Connection OK — model={req.model}, "
+                    f"latency={result.get('latency_ms', '?')}ms, "
+                    f"response={result.get('response_preview', '')!r}"
+                ) if result.get("success") else result.get("error", "Unknown error"),
+                "model_used": req.model,
+                "latency_ms": result.get("latency_ms"),
+                "error": result.get("error"),
+                "response_preview": result.get("response_preview"),
+                "response_body": result.get("response_body"),
+                "status_code": result.get("status_code"),
             }
         except Exception as exc:
             err = str(exc)
-            # Common error → friendly message
             if "401" in err or "Invalid API key" in err or "Incorrect API key" in err:
-                return {"success": False, "error": f"OpenAI API key invalid: {err[:200]}"}
+                return {"success": False, "error": f"API key invalid: {err[:200]}"}
             if "404" in err or "model_not_found" in err:
                 return {"success": False, "error": f"Model {req.model!r} not found on {req.provider}: {err[:200]}"}
             if "Connection" in err or "timeout" in err.lower():

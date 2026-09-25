@@ -475,7 +475,19 @@ class BaseAgent:
         )
 
     async def _emit_progress_event(self, decision: AgentDecision) -> None:
-        """Emit SSE scan_progress event for this decision."""
+        """Emit SSE scan_progress event for this decision.
+
+        Phase D: also computes a progress % from the decision turn so the
+        frontend progress bar advances through each ReAct iteration.
+        The mapping is intentionally coarse — specialist agents don't
+        own the global progress bar (the pipeline's phase_change events
+        do), so this just nudges within the current phase window.
+        """
+        # Coarse per-iteration nudge — stays within the current phase's
+        # window because the pipeline emits phase_change events that
+        # set the progress bar to the phase boundary. This just shows
+        # the agent is making incremental progress within the phase.
+        progress = min(95, 20 + decision.turn * 3)
         await emit_scan_progress(
             scan_id=self.scan_id,
             turn=decision.turn,
@@ -483,6 +495,7 @@ class BaseAgent:
             tool_name=decision.tool_name,
             observation=decision.observation,
             agent_name=self.AGENT_NAME,
+            progress=progress,
         )
 
     # ---------- Finalize ----------
@@ -557,7 +570,7 @@ class BaseAgent:
             1. Build messages with system_prompt + task_description
             2. Build tool schemas filtered by self.tool_allowlist
             3. Loop (up to max_iterations):
-                a. Call LLM via litellm.chat_completion(messages, tools)
+                a. Call LLM via chat_completion(messages, tools)
                 b. If LLM returns tool_calls:
                     - For each tool_call:
                         - Validate against tool_allowlist (defense in depth)
@@ -583,6 +596,10 @@ class BaseAgent:
         """
         from app.agents.llm_client import chat_completion
         from app.agents.tool_bridge import build_tool_schemas, execute_tool_call
+        from app.pentest.events import (
+            emit_tool_call_started, emit_tool_call_completed,
+            emit_assistant_message, emit_thinking, emit_iteration,
+        )
 
         # ---------- Build initial messages ----------
         user_msg = (
@@ -615,9 +632,37 @@ class BaseAgent:
             len(self.tool_allowlist), self.max_iterations, self.is_destructive,
         )
 
+        # ── Phase D: consecutive-failure detector ────────────────────────
+        # If the LLM keeps trying tools that fail (binary not found, scope
+        # violation, etc.), we don't want to burn 30 iterations × API tokens
+        # before giving up. Track consecutive failures; if we exceed
+        # MAX_CONSECUTIVE_FAILURES, abort with a clear message telling the
+        # user to install missing tools.
+        MAX_CONSECUTIVE_FAILURES = 5
+        consecutive_failures = 0
+        failed_tools_seen: set[str] = set()
+
         # ---------- ReAct loop ----------
         for iteration in range(self.max_iterations):
             turn = len(self.decisions)
+
+            # Emit iteration boundary — frontend renders as a timeline divider
+            await emit_iteration(
+                scan_id=self.scan_id,
+                iteration=iteration + 1,
+                scope="sub",
+                agent_name=self.AGENT_NAME,
+                thought=f"Iteration {iteration + 1}/{self.max_iterations}",
+            )
+
+            # Emit a brief "thinking" status so the user sees the system is
+            # doing something during the (often 5-30s) LLM call.
+            await emit_thinking(
+                scan_id=self.scan_id,
+                text=f"{self.AGENT_NAME} đang suy nghĩ... (vòng {iteration + 1}/{self.max_iterations})",
+                agent_name=self.AGENT_NAME,
+                iteration=iteration + 1,
+            )
 
             # ---------- P5 minimal: context budget cap ----------
             # If messages grow beyond MAX_MESSAGES (each tool call adds 2:
@@ -677,6 +722,15 @@ class BaseAgent:
                         "Agent %s implicit exit at iter %d | thought=%s",
                         self.AGENT_NAME, iteration + 1, thought[:80],
                     )
+                    # Emit the assistant's final text as an assistant_message event
+                    # so the frontend can render it as a chat bubble.
+                    if thought:
+                        await emit_assistant_message(
+                            scan_id=self.scan_id,
+                            content=thought,
+                            agent_name=self.AGENT_NAME,
+                            iteration=iteration + 1,
+                        )
                     decision = AgentDecision(
                         turn=turn,
                         agent_name=self.AGENT_NAME,
@@ -691,8 +745,10 @@ class BaseAgent:
                     break
 
                 # ---------- Execute each tool call ----------
-                for tc in response["tool_calls"]:
+                total_tcs = len(response["tool_calls"])
+                for tc_idx, tc in enumerate(response["tool_calls"]):
                     tool_name = tc["name"]
+                    tool_call_id = tc.get("id") or f"tc_{tool_name}_{tc_idx}"
                     try:
                         import json as _json
                         tool_args = _json.loads(tc["arguments"]) if tc["arguments"] else {}
@@ -712,6 +768,19 @@ class BaseAgent:
                                 f"allowed for agent {self.AGENT_NAME!r}. "
                                 f"Allowed: {list(self.tool_allowlist)}"
                             )
+                            # Emit started + immediately failed tool_call event
+                            await emit_tool_call_started(
+                                scan_id=self.scan_id, tool_name=tool_name,
+                                tool_call_id=tool_call_id, arguments=tool_args,
+                                index=tc_idx + 1, total=total_tcs,
+                                agent_name=self.AGENT_NAME, iteration=iteration + 1,
+                            )
+                            await emit_tool_call_completed(
+                                scan_id=self.scan_id, tool_name=tool_name,
+                                tool_call_id=tool_call_id, success=False,
+                                result_preview=tool_output, error="allowlist_violation",
+                                agent_name=self.AGENT_NAME, iteration=iteration + 1,
+                            )
                             decision = AgentDecision(
                                 turn=turn, agent_name=self.AGENT_NAME,
                                 thought=f"Tried to call {tool_name} (not allowed)",
@@ -727,60 +796,128 @@ class BaseAgent:
                             })
                             continue
 
-                    # ---------- P3.2: HITL gate for destructive agents ----------
-                    if self.is_destructive and tool_name not in ("record_vulnerability", "exit"):
-                        # Destructive tool — route through execute_with_hitl
-                        # so the HITL gate (audit_agent mode by default)
-                        # reviews the tool call before execution.
-                        tool_output = await self._execute_destructive_with_hitl(
-                            tool_name=tool_name,
-                            tool_args=tool_args,
-                            executor=executor,
-                            reasoning=f"Agent {self.AGENT_NAME} requested {tool_name}",
+                    # ── Emit tool_call_started BEFORE execution ──────────
+                    # (skipped for the synthetic `exit` tool — that's a
+                    # control-flow signal, not a real tool)
+                    if tool_name != "exit":
+                        await emit_tool_call_started(
+                            scan_id=self.scan_id, tool_name=tool_name,
+                            tool_call_id=tool_call_id, arguments=tool_args,
+                            index=tc_idx + 1, total=total_tcs,
+                            agent_name=self.AGENT_NAME, iteration=iteration + 1,
                         )
-                    elif tool_name == "exit":
-                        # Exit tool — break out of loop
-                        final_summary = tool_args.get("summary", "Agent task complete.")
-                        logger.info(
-                            "Agent %s explicit exit | iter=%d | summary=%s",
-                            self.AGENT_NAME, iteration + 1, final_summary[:100],
-                        )
-                        decision = AgentDecision(
-                            turn=turn, agent_name=self.AGENT_NAME,
-                            thought=f"Agent called exit: {final_summary[:200]}",
-                            tool_name="exit", tool_args=tool_args,
-                            observation=final_summary,
-                            tokens_used=response["usage"].get("total_tokens", 0),
-                        )
-                        self._record_decision(decision)
-                        await self._emit_progress_event(decision)
-                        return self._finalize("completed")
 
-                    elif tool_name == "record_vulnerability":
-                        # Bypass executor — direct DB insert via tool_bridge
-                        tool_output = await execute_tool_call(
-                            tool_name=tool_name,
-                            tool_args=tool_args,
-                            target=self.target,
-                            scan_id=self.scan_id,
-                            executor=executor,
+                    # ── Execute ──────────────────────────────────────────
+                    tool_error: str | None = None
+                    try:
+                        # ---------- P3.2: HITL gate for destructive agents ----------
+                        if self.is_destructive and tool_name not in ("record_vulnerability", "exit"):
+                            # Destructive tool — route through execute_with_hitl
+                            # so the HITL gate (audit_agent mode by default)
+                            # reviews the tool call before execution.
+                            tool_output = await self._execute_destructive_with_hitl(
+                                tool_name=tool_name,
+                                tool_args=tool_args,
+                                executor=executor,
+                                reasoning=f"Agent {self.AGENT_NAME} requested {tool_name}",
+                            )
+                        elif tool_name == "exit":
+                            # Exit tool — break out of loop
+                            final_summary = tool_args.get("summary", "Agent task complete.")
+                            logger.info(
+                                "Agent %s explicit exit | iter=%d | summary=%s",
+                                self.AGENT_NAME, iteration + 1, final_summary[:100],
+                            )
+                            decision = AgentDecision(
+                                turn=turn, agent_name=self.AGENT_NAME,
+                                thought=f"Agent called exit: {final_summary[:200]}",
+                                tool_name="exit", tool_args=tool_args,
+                                observation=final_summary,
+                                tokens_used=response["usage"].get("total_tokens", 0),
+                            )
+                            self._record_decision(decision)
+                            await self._emit_progress_event(decision)
+                            return self._finalize("completed")
+
+                        elif tool_name == "record_vulnerability":
+                            # Bypass executor — direct DB insert via tool_bridge
+                            tool_output = await execute_tool_call(
+                                tool_name=tool_name,
+                                tool_args=tool_args,
+                                target=self.target,
+                                scan_id=self.scan_id,
+                                executor=executor,
+                            )
+                            # Record as a finding for this agent's result
+                            self.findings.append({
+                                "title": tool_args.get("title"),
+                                "severity": tool_args.get("severity"),
+                                "vuln_type": tool_args.get("vuln_type"),
+                                "target": tool_args.get("target", self.target),
+                            })
+                        else:
+                            # Normal tool — execute via ExecutionService (P2 path)
+                            tool_output = await execute_tool_call(
+                                tool_name=tool_name,
+                                tool_args=tool_args,
+                                target=self.target,
+                                scan_id=self.scan_id,
+                                executor=executor,
+                            )
+                    except Exception as exec_exc:
+                        tool_output = f"Error executing {tool_name}: {exec_exc}"
+                        tool_error = str(exec_exc)
+                        logger.exception(
+                            "Agent %s tool %s raised | iter=%d",
+                            self.AGENT_NAME, tool_name, iteration + 1,
                         )
-                        # Record as a finding for this agent's result
-                        self.findings.append({
-                            "title": tool_args.get("title"),
-                            "severity": tool_args.get("severity"),
-                            "vuln_type": tool_args.get("vuln_type"),
-                            "target": tool_args.get("target", self.target),
-                        })
-                    else:
-                        # Normal tool — execute via ExecutionService (P2 path)
-                        tool_output = await execute_tool_call(
-                            tool_name=tool_name,
-                            tool_args=tool_args,
-                            target=self.target,
-                            scan_id=self.scan_id,
-                            executor=executor,
+
+                    # ── Emit tool_call_completed AFTER execution ─────────
+                    if tool_name != "exit":
+                        # Success heuristic: tool_output starts with "Error"
+                        # or contains "[error]" → treat as failure for UI.
+                        success = (
+                            tool_error is None
+                            and not tool_output.startswith("Error")
+                            and "[error]" not in tool_output.lower()[:200]
+                            and "Binary not found" not in tool_output
+                            and "scope violation" not in tool_output.lower()[:200]
                         )
+                        preview = tool_output[:200].replace("\n", " ").strip()
+                        await emit_tool_call_completed(
+                            scan_id=self.scan_id, tool_name=tool_name,
+                            tool_call_id=tool_call_id, success=success,
+                            result_preview=preview, error=tool_error,
+                            agent_name=self.AGENT_NAME, iteration=iteration + 1,
+                        )
+
+                        # ── Phase D: consecutive-failure detection ──────
+                        if success:
+                            consecutive_failures = 0
+                            failed_tools_seen.discard(tool_name)
+                        else:
+                            consecutive_failures += 1
+                            failed_tools_seen.add(tool_name)
+                            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                                logger.error(
+                                    "Agent %s aborting: %d consecutive tool failures | scan=%s | failed_tools=%s",
+                                    self.AGENT_NAME, consecutive_failures,
+                                    self.scan_id, sorted(failed_tools_seen),
+                                )
+                                # Emit a clear error + assistant_message so the
+                                # UI surfaces the abort reason to the user.
+                                abort_msg = (
+                                    f"⚠️ Agent {self.AGENT_NAME} dừng sau "
+                                    f"{consecutive_failures} lần tool fail liên tiếp. "
+                                    f"Các tool thất bại: {sorted(failed_tools_seen)}. "
+                                    f"Có thể binary chưa cài — chạy "
+                                    f"`bash scripts/install_tools.sh` rồi retry."
+                                )
+                                await emit_assistant_message(
+                                    scan_id=self.scan_id, content=abort_msg,
+                                    agent_name=self.AGENT_NAME, iteration=iteration + 1,
+                                )
+                                return self._finalize("failed", error=abort_msg)
 
                     # Record decision + emit SSE
                     thought_preview = (response["content"] or "")[:200]

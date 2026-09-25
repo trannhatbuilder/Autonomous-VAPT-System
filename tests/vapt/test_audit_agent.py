@@ -114,7 +114,7 @@ async def test_review_approve_sync_caller():
 
 @pytest.mark.asyncio
 async def test_review_approve_async_caller():
-    """Same as above but caller is async (matches litellm.acompletion shape)."""
+    """Same as above but caller is async (matches chat_completion shape)."""
     agent = AuditAgent(
         model="gpt-4o-mini",
         mode="approval",

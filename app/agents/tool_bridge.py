@@ -29,8 +29,38 @@ from app.sandbox.scope_guard import ScopeGuard
 logger = logging.getLogger(__name__)
 
 
+# ---------- Schema cache (per-agent-toolset) ----------
+#
+# build_tool_schemas() is called once per ReAct iteration. Without a cache,
+# every iteration rebuilds the OpenAI tool schema list from the cached
+# ToolDefs — cheap relative to the YAML parse, but still O(N) per call.
+# We memoize on (frozenset(tool_names) or None-for-all).
+#
+# Cache is invalidated automatically when load_all_tools() re-parses YAMLs
+# (the underlying ToolDef objects change identity).
+
+_tool_schema_cache: dict[str, list[dict[str, Any]]] = {}
+
+
+def _cache_key(tool_names: list[str] | None) -> str:
+    """Build a hashable cache key from the tool_names filter."""
+    if tool_names is None:
+        return "__all__"
+    return "|".join(sorted(tool_names))
+
+
+def invalidate_tool_schema_cache() -> None:
+    """Drop the cached tool schemas. Call after reload_tools()."""
+    _tool_schema_cache.clear()
+
+
 def build_tool_schemas(tool_names: list[str] | None = None) -> list[dict[str, Any]]:
     """Build OpenAI-compatible tool schemas from YAML tool definitions.
+
+    CACHED — the resulting schema list is memoized per `tool_names` filter
+    so the per-iteration call inside the ReAct loop is O(1) after the
+    first call. Cache lives for the lifetime of the process; call
+    `invalidate_tool_schema_cache()` after `reload_tools()` to refresh.
 
     Args:
         tool_names: optional filter — only include these tools.
@@ -40,6 +70,11 @@ def build_tool_schemas(tool_names: list[str] | None = None) -> list[dict[str, An
         list of tool schema dicts in OpenAI function-calling format:
             [{"type": "function", "function": {"name", "description", "parameters"}}]
     """
+    key = _cache_key(tool_names)
+    cached = _tool_schema_cache.get(key)
+    if cached is not None:
+        return cached
+
     all_tools = load_all_tools()
     schemas: list[dict[str, Any]] = []
 
@@ -109,6 +144,7 @@ def build_tool_schemas(tool_names: list[str] | None = None) -> list[dict[str, An
 
     logger.info("Built %d tool schemas (%d security tools + record_vulnerability + exit)",
                 len(schemas) - 2, len(schemas) - 2)
+    _tool_schema_cache[key] = schemas
     return schemas
 
 

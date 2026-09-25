@@ -9,27 +9,142 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Badge } from "../ui/badge";
 import { Progress } from "../ui/progress";
 import { Alert, AlertDescription } from "../ui/alert";
-import { Loader2, Play, Square, RefreshCw, Activity, Terminal } from "lucide-react";
+import { Loader2, Play, Square, Activity, Terminal, ChevronDown, ChevronRight } from "lucide-react";
 import { startScan, getScanEventsUrl, abortScan } from "../../lib/api";
 import { useToast } from "../../hooks/use-toast";
 
+// ── Event types ────────────────────────────────────────────────────────────
+// Mirrors the Phase D event catalog in app/pentest/events.py.
+type EventType =
+  | "scan_started"
+  | "scan_progress"
+  | "phase_change"
+  | "iteration"
+  | "tool_call_started"
+  | "tool_call_completed"
+  | "assistant_message"
+  | "thinking"
+  | "finding_detected"
+  | "hitl_approval_required"
+  | "hitl_decision_made"
+  | "scan_complete"
+  | "scan_error"
+  | "heartbeat"
+  | "unknown";
+
 interface ScanEvent {
-  // Backend emits the event name under "event" (e.g. {"event": "scan_progress"}).
-  // Older/other emitters may use "type"; onmessage normalizes it into `type`.
   event?: string;
-  type: string;  // scan_started | scan_progress | scan_complete | scan_error | finding_detected | hitl_approval_required
+  type: EventType;
+  scan_id?: string;
+  // progress / iteration
   turn?: number;
   progress?: number;
+  iteration?: number;
+  scope?: string;
+  phase?: string;
+  message?: string;
+  // scan_progress fields
   thought?: string;
   tool_name?: string;
   observation?: string;
   agent_name?: string;
+  // tool_call_started / _completed fields
+  tool_call_id?: string;
+  arguments?: Record<string, unknown>;
+  index?: number;
+  total?: number;
+  success?: boolean;
+  result_preview?: string;
+  execution_id?: string;
+  error?: string;
+  status?: string;
+  // assistant_message
+  content?: string;
+  reasoning?: string;
+  // thinking
+  text?: string;
+  // finding_detected
   finding_id?: string;
   vuln_type?: string;
   severity?: string;
   location?: string;
+  // terminal
+  findings_count?: number;
+  duration_seconds?: number;
+  // hitl
+  hitl_id?: string;
+  target?: string;
+  predicted_impact?: string;
+  decision?: string;
+  decided_by?: string;
+  comment?: string;
+  // housekeeping
+  // Unix epoch seconds (backend sends `time.time()`), NOT an ISO string.
+  timestamp?: number;
+}
+
+// ── Per-tool-call status tracker ───────────────────────────────────────────
+// Mirrors CyberStrikeAI's toolCallStatusMap: each `tool_call_started` event
+// registers a "running" entry keyed by `tool_call_id`; the matching
+// `tool_call_completed` event flips it to completed/failed. The EventLine
+// for the started event re-renders with the new status when the completed
+// event arrives (we re-scan the events list).
+interface ToolCallState {
+  tool_call_id: string;
+  tool_name: string;
+  status: "running" | "completed" | "failed";
+  args_preview: string;
+  result_preview?: string;
   error?: string;
-  timestamp?: string;
+  started_at: string;
+  completed_at?: string;
+  agent_name?: string;
+  iteration?: number;
+}
+
+/** Convert an event's unix-epoch (seconds) timestamp to an ISO string. */
+function toIso(timestamp?: number): string {
+  return timestamp ? new Date(timestamp * 1000).toISOString() : new Date().toISOString();
+}
+
+function computeToolCallStates(events: ScanEvent[]): Record<string, ToolCallState> {
+  const map: Record<string, ToolCallState> = {};
+  for (const ev of events) {
+    if (ev.type === "tool_call_started" && ev.tool_call_id) {
+      map[ev.tool_call_id] = {
+        tool_call_id: ev.tool_call_id,
+        tool_name: ev.tool_name || "?",
+        status: "running",
+        args_preview: ev.arguments ? JSON.stringify(ev.arguments).slice(0, 120) : "",
+        started_at: toIso(ev.timestamp),
+        agent_name: ev.agent_name,
+        iteration: ev.iteration,
+      };
+    } else if (ev.type === "tool_call_completed" && ev.tool_call_id) {
+      const existing = map[ev.tool_call_id];
+      if (existing) {
+        existing.status = ev.success ? "completed" : "failed";
+        existing.result_preview = ev.result_preview;
+        existing.error = ev.error;
+        existing.completed_at = toIso(ev.timestamp);
+      } else {
+        // tool_call_completed without matching started (e.g. replay) — synthesize
+        map[ev.tool_call_id] = {
+          tool_call_id: ev.tool_call_id,
+          tool_name: ev.tool_name || "?",
+          status: ev.success ? "completed" : "failed",
+          args_preview: "",
+          result_preview: ev.result_preview,
+          error: ev.error,
+          started_at: toIso(ev.timestamp),
+          completed_at: toIso(ev.timestamp),
+          agent_name: ev.agent_name,
+          iteration: ev.iteration,
+        };
+      }
+    }
+  }
+  return map;
 }
 
 export function ScansView() {
@@ -40,7 +155,9 @@ export function ScansView() {
   const [activeScanId, setActiveScanId] = useState<string | null>(null);
   const [events, setEvents] = useState<ScanEvent[]>([]);
   const [progress, setProgress] = useState(0);
+  const [currentPhase, setCurrentPhase] = useState<string>("");
   const [status, setStatus] = useState<string>("idle");
+  const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
   const eventSourceRef = useRef<EventSource | null>(null);
 
   // Cleanup EventSource on unmount
@@ -64,9 +181,23 @@ export function ScansView() {
     setStarting(true);
     setEvents([]);
     setProgress(0);
+    setCurrentPhase("");
     setStatus("starting");
     try {
       const result = await startScan(target, userPrompt);
+
+      // Phase D preflight check — backend may refuse to start scan
+      // if critical tools are missing. Surface the message to the user.
+      if (result.status === "preflight_failed" || !result.scan_id) {
+        setStatus("error");
+        toast({
+          title: "Cannot start scan — tools missing",
+          description: result.message || "Critical tools not installed.",
+          variant: "destructive",
+        });
+        return;
+      }
+
       setActiveScanId(result.scan_id);
       setStatus("running");
       toast({
@@ -87,26 +218,24 @@ export function ScansView() {
       es.onmessage = (e) => {
         try {
           const raw: ScanEvent = JSON.parse(e.data);
-          // Backend sends the event name as "event" (e.g. {"event": "scan_progress"}),
-          // while the UI (colors, EventLine, completion checks) keys off "type".
-          // Normalize once here so every downstream consumer sees `type`.
           const evtName = (raw as any).event || (raw as any).type || "unknown";
-          // Filter out heartbeat events (defensive — backend now sends heartbeats
-          // as SSE comment frames ": ping\n\n" which don't trigger onmessage,
-          // but in case they leak through, don't pollute the events list)
           if (evtName === "heartbeat") return;
-          const data: ScanEvent = { ...raw, type: evtName };
+          const data: ScanEvent = { ...raw, type: evtName as EventType };
 
           setEvents((prev) => [...prev, data]);
-          if (data.progress !== undefined) {
+
+          if (data.progress !== undefined && data.progress !== null) {
             setProgress(data.progress);
           }
-          if (evtName === "scan_complete") {
+          if (data.type === "phase_change" && data.phase) {
+            setCurrentPhase(data.phase);
+          }
+          if (data.type === "scan_complete") {
             console.log("[VAPT-SSE] Scan complete:", data);
             setStatus("completed");
             setProgress(100);
             es.close();
-          } else if (evtName === "scan_error") {
+          } else if (data.type === "scan_error") {
             console.error("[VAPT-SSE] Scan error:", data);
             setStatus("error");
             es.close();
@@ -117,13 +246,9 @@ export function ScansView() {
       };
 
       es.onerror = (e: any) => {
-        // EventSource auto-reconnects on transient errors.
-        // Log details for debugging — readyState tells us what's happening:
-        //   0=CONNECTING, 1=OPEN, 2=CLOSED
         const state = es.readyState;
         const stateName = state === 0 ? "CONNECTING" : state === 1 ? "OPEN" : "CLOSED";
         console.warn(`[VAPT-SSE] Error (readyState=${stateName}). Will auto-reconnect if not CLOSED.`);
-        // If CLOSED, it means the connection gave up — surface the error to UI
         if (state === 2) {
           setStatus("error");
           toast({
@@ -164,6 +289,10 @@ export function ScansView() {
         variant: "destructive",
       });
     }
+  };
+
+  const toggleTool = (id: string) => {
+    setExpandedTools((prev) => ({ ...prev, [id]: !prev[id] }));
   };
 
   const isRunning = status === "running" || status === "starting";
@@ -252,6 +381,7 @@ export function ScansView() {
                 </CardTitle>
                 <CardDescription className="text-zinc-400 mt-1 font-mono text-xs">
                   scan_id: {activeScanId}
+                  {currentPhase && <span className="ml-2 text-zinc-500">· phase: {currentPhase}</span>}
                 </CardDescription>
               </div>
               <Badge
@@ -277,13 +407,19 @@ export function ScansView() {
               <Progress value={progress} className="h-2 bg-zinc-800" />
             </div>
 
-            {/* Events stream */}
-            <div className="space-y-2 max-h-[500px] overflow-y-auto bg-zinc-950 rounded border border-zinc-800 p-3 font-mono text-xs">
+            {/* Timeline */}
+            <div className="space-y-1 max-h-[600px] overflow-y-auto bg-zinc-950 rounded border border-zinc-800 p-3 font-mono text-xs">
               {events.length === 0 ? (
                 <div className="text-zinc-600 italic">Waiting for events...</div>
               ) : (
                 events.map((ev, idx) => (
-                  <EventLine key={idx} event={ev} />
+                  <EventLine
+                    key={idx}
+                    event={ev}
+                    toolCallStates={computeToolCallStates(events.slice(0, idx + 1))}
+                    expanded={expandedTools}
+                    onToggle={toggleTool}
+                  />
                 ))
               )}
             </div>
@@ -294,42 +430,273 @@ export function ScansView() {
   );
 }
 
-function EventLine({ event }: { event: ScanEvent }) {
-  const typeColors: Record<string, string> = {
-    scan_started: "text-blue-400",
-    scan_progress: "text-zinc-400",
-    scan_complete: "text-emerald-400",
-    scan_error: "text-red-400",
-    finding_detected: "text-amber-400",
-    hitl_approval_required: "text-purple-400",
-    hitl_decision_made: "text-purple-400",
-    heartbeat: "text-zinc-700",
-  };
-  const typeColor = typeColors[event.type] || "text-zinc-400";
-  const time = event.timestamp ? new Date(event.timestamp).toLocaleTimeString() : "";
+// ── EventLine ──────────────────────────────────────────────────────────────
+// Renders a single event in the timeline. Different event types get
+// different visual treatments so the user can immediately see what's
+// happening (e.g. a tool card with status dot, a phase divider, a
+// chat bubble for assistant messages, etc.).
 
-  let content: string;
-  if (event.type === "scan_progress") {
-    content = `[${event.agent_name || "?"}] turn=${event.turn || "?"} | ${event.thought || ""}`;
-    if (event.tool_name) content += ` | tool=${event.tool_name}`;
-    if (event.observation) content += ` | obs=${event.observation.slice(0, 100)}`;
-  } else if (event.type === "finding_detected") {
-    content = `FINDING [${event.severity}] ${event.vuln_type} @ ${event.location}`;
-  } else if (event.type === "scan_complete") {
-    content = `Scan complete — ${event.observation || ""}`;
-  } else if (event.type === "scan_error") {
-    content = `Error: ${event.error || "unknown"}`;
-  } else if (event.type === "hitl_approval_required") {
-    content = `HITL approval required — waiting for review`;
-  } else {
-    content = event.observation || event.thought || JSON.stringify(event).slice(0, 200);
+function EventLine({
+  event,
+  toolCallStates,
+  expanded,
+  onToggle,
+}: {
+  event: ScanEvent;
+  toolCallStates: Record<string, ToolCallState>;
+  expanded: Record<string, boolean>;
+  onToggle: (id: string) => void;
+}) {
+  const time = event.timestamp ? new Date(event.timestamp * 1000).toLocaleTimeString() : "";
+
+  // ── Tool call events: render as a tool card with status dot ────────
+  if (event.type === "tool_call_started" && event.tool_call_id) {
+    const state = toolCallStates[event.tool_call_id];
+    if (!state) return null; // shouldn't happen
+    return (
+      <ToolCard
+        state={state}
+        time={time}
+        expanded={!!expanded[event.tool_call_id]}
+        onToggle={() => onToggle(event.tool_call_id!)}
+      />
+    );
+  }
+  // tool_call_completed events don't render their own line — they update
+  // the matching tool card's status. The card is rendered when its
+  // tool_call_started event was emitted earlier in the timeline.
+  if (event.type === "tool_call_completed") {
+    return null;
   }
 
+  // ── Phase change: render as a divider ──────────────────────────────
+  if (event.type === "phase_change") {
+    return (
+      <div className="flex items-center gap-2 py-1 mt-2 border-t border-zinc-800">
+        <span className="text-zinc-600">{time}</span>
+        <span className="text-purple-400 shrink-0">━━━ phase:</span>
+        <span className="text-purple-300 font-semibold">{event.phase}</span>
+        {event.message && <span className="text-zinc-500">— {event.message}</span>}
+        {event.progress !== undefined && (
+          <span className="text-zinc-600 ml-auto">[{event.progress}%]</span>
+        )}
+      </div>
+    );
+  }
+
+  // ── Iteration: render as a sub-divider ──────────────────────────────
+  if (event.type === "iteration") {
+    const scope = event.scope === "main" ? "Main agent" : `Sub-agent ${event.agent_name || "?"}`;
+    return (
+      <div className="flex items-center gap-2 py-1 mt-1 text-zinc-500">
+        <span className="text-zinc-700">{time}</span>
+        <span className="text-zinc-500">──</span>
+        <span>{scope} · round {event.iteration}</span>
+      </div>
+    );
+  }
+
+  // ── Thinking: brief status line ─────────────────────────────────────
+  if (event.type === "thinking") {
+    return (
+      <div className="flex gap-2 leading-relaxed text-zinc-500 italic">
+        <span className="text-zinc-700 shrink-0">{time || "—"}</span>
+        <span className="shrink-0">🤔</span>
+        <span className="break-all">{event.text}</span>
+      </div>
+    );
+  }
+
+  // ── Assistant message: render as a chat bubble ─────────────────────
+  if (event.type === "assistant_message") {
+    return (
+      <div className="flex gap-2 leading-relaxed my-1">
+        <span className="text-zinc-700 shrink-0">{time || "—"}</span>
+        <span className="shrink-0 text-blue-400">💬 {event.agent_name || "assistant"}</span>
+        <span className="text-zinc-200 break-all whitespace-pre-wrap">{event.content}</span>
+      </div>
+    );
+  }
+
+  // ── Finding detected: amber highlight ──────────────────────────────
+  if (event.type === "finding_detected") {
+    return (
+      <div className="flex gap-2 leading-relaxed my-1 p-2 bg-amber-950/30 border border-amber-900 rounded">
+        <span className="text-zinc-700 shrink-0">{time || "—"}</span>
+        <span className="shrink-0 text-amber-400">⚠ FINDING [{event.severity}]</span>
+        <span className="text-amber-200 break-all">
+          {event.vuln_type} @ {event.location}
+        </span>
+      </div>
+    );
+  }
+
+  // ── Scan terminal events ────────────────────────────────────────────
+  if (event.type === "scan_complete") {
+    return (
+      <div className="flex gap-2 leading-relaxed my-1 p-2 bg-emerald-950/30 border border-emerald-900 rounded">
+        <span className="text-zinc-700 shrink-0">{time || "—"}</span>
+        <span className="shrink-0 text-emerald-400">✓ SCAN COMPLETE</span>
+        <span className="text-emerald-200 break-all">
+          {event.findings_count} findings · {event.duration_seconds?.toFixed(1)}s
+        </span>
+      </div>
+    );
+  }
+  if (event.type === "scan_error") {
+    return (
+      <div className="flex gap-2 leading-relaxed my-1 p-2 bg-red-950/30 border border-red-900 rounded">
+        <span className="text-zinc-700 shrink-0">{time || "—"}</span>
+        <span className="shrink-0 text-red-400">✗ SCAN ERROR</span>
+        <span className="text-red-200 break-all">{event.error}</span>
+      </div>
+    );
+  }
+
+  // ── scan_started ────────────────────────────────────────────────────
+  if (event.type === "scan_started") {
+    return (
+      <div className="flex gap-2 leading-relaxed py-1 border-b border-zinc-800 mb-2">
+        <span className="text-zinc-700 shrink-0">{time || "—"}</span>
+        <span className="shrink-0 text-blue-400">▶ SCAN STARTED</span>
+        <span className="text-zinc-300 break-all">target: {event.target || ""}</span>
+      </div>
+    );
+  }
+
+  // ── Generic scan_progress fallback ─────────────────────────────────
+  // Renders with agent_name prefix + thought text. Used by the older
+  // emit_scan_progress call sites that haven't been migrated to granular
+  // events yet.
+  if (event.type === "scan_progress") {
+    const prefix = event.agent_name ? `[${event.agent_name}]` : "[orchestrator]";
+    let content = event.thought || "";
+    if (event.tool_name) content += ` | tool=${event.tool_name}`;
+    if (event.observation) content += ` | obs=${event.observation.slice(0, 100)}`;
+    return (
+      <div className="flex gap-2 leading-relaxed">
+        <span className="text-zinc-700 shrink-0">{time || "—"}</span>
+        <span className="shrink-0 text-zinc-500">{prefix}</span>
+        <span className="text-zinc-300 break-all">{content}</span>
+      </div>
+    );
+  }
+
+  // ── HITL ────────────────────────────────────────────────────────────
+  if (event.type === "hitl_approval_required") {
+    return (
+      <div className="flex gap-2 leading-relaxed my-1 p-2 bg-purple-950/30 border border-purple-900 rounded">
+        <span className="text-zinc-700 shrink-0">{time || "—"}</span>
+        <span className="shrink-0 text-purple-400">🛡 HITL required</span>
+        <span className="text-purple-200 break-all">
+          {event.tool_name} @ {event.target} ({event.predicted_impact})
+        </span>
+      </div>
+    );
+  }
+  if (event.type === "hitl_decision_made") {
+    const isApprove = event.decision === "approve";
+    return (
+      <div className="flex gap-2 leading-relaxed my-1">
+        <span className="text-zinc-700 shrink-0">{time || "—"}</span>
+        <span className={`shrink-0 ${isApprove ? "text-emerald-400" : "text-red-400"}`}>
+          {isApprove ? "✓" : "✗"} HITL {event.decision}
+        </span>
+        <span className="text-zinc-300 break-all">
+          by {event.decided_by} — {event.tool_name} @ {event.target}
+        </span>
+      </div>
+    );
+  }
+
+  // Unknown event — render raw
   return (
-    <div className="flex gap-2 leading-relaxed">
+    <div className="flex gap-2 leading-relaxed text-zinc-600">
       <span className="text-zinc-700 shrink-0">{time || "—"}</span>
-      <span className={`shrink-0 ${typeColor}`}>{event.type}</span>
-      <span className="text-zinc-300 break-all">{content}</span>
+      <span className="shrink-0">{event.type}</span>
+      <span className="break-all">{JSON.stringify(event).slice(0, 200)}</span>
+    </div>
+  );
+}
+
+// ── ToolCard ────────────────────────────────────────────────────────────────
+// Renders a tool_call_started event with status dot. Updates its status
+// when the matching tool_call_completed event arrives (the EventLine
+// parent passes fresh toolCallStates on each render).
+
+function ToolCard({
+  state,
+  time,
+  expanded,
+  onToggle,
+}: {
+  state: ToolCallState;
+  time: string;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const statusColor =
+    state.status === "running" ? "text-amber-400 animate-pulse" :
+    state.status === "completed" ? "text-emerald-400" :
+    "text-red-400";
+  const statusIcon =
+    state.status === "running" ? "⏳" :
+    state.status === "completed" ? "✓" :
+    "✗";
+  const bgClass =
+    state.status === "running" ? "bg-amber-950/20 border-amber-900/50" :
+    state.status === "completed" ? "bg-emerald-950/20 border-emerald-900/50" :
+    "bg-red-950/20 border-red-900/50";
+
+  return (
+    <div className={`my-1 p-2 border rounded ${bgClass}`}>
+      <div
+        className="flex items-center gap-2 cursor-pointer"
+        onClick={onToggle}
+      >
+        <span className="text-zinc-700 shrink-0">{time}</span>
+        <span className={`shrink-0 ${statusColor}`}>🔧 {statusIcon}</span>
+        <span className="text-zinc-200 font-semibold shrink-0">{state.tool_name}</span>
+        {state.agent_name && (
+          <span className="text-zinc-500 text-[10px] shrink-0">[{state.agent_name}]</span>
+        )}
+        {state.iteration && (
+          <span className="text-zinc-600 text-[10px] shrink-0">iter {state.iteration}</span>
+        )}
+        {state.args_preview && (
+          <span className="text-zinc-500 truncate flex-1">({state.args_preview})</span>
+        )}
+        {expanded ? <ChevronDown className="w-3 h-3 ml-auto shrink-0" /> : <ChevronRight className="w-3 h-3 ml-auto shrink-0" />}
+      </div>
+      {expanded && (
+        <div className="mt-2 pl-6 text-[11px] space-y-1">
+          {state.args_preview && (
+            <div>
+              <span className="text-zinc-600">args:</span>
+              <pre className="text-zinc-400 whitespace-pre-wrap break-all mt-1">{state.args_preview}</pre>
+            </div>
+          )}
+          {state.result_preview && (
+            <div>
+              <span className="text-zinc-600">result:</span>
+              <pre className={`whitespace-pre-wrap break-all mt-1 ${state.status === "completed" ? "text-zinc-300" : "text-red-300"}`}>
+                {state.result_preview}
+              </pre>
+            </div>
+          )}
+          {state.error && (
+            <div>
+              <span className="text-zinc-600">error:</span>
+              <pre className="text-red-300 whitespace-pre-wrap break-all mt-1">{state.error}</pre>
+            </div>
+          )}
+          {state.completed_at && (
+            <div className="text-zinc-600">
+              completed at {new Date(state.completed_at).toLocaleTimeString()}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

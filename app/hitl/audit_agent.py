@@ -211,7 +211,7 @@ class AuditAgent:
         self.timeout_seconds = timeout_seconds
         self.mode = _normalize_mode(mode)
         self.fallback_decision = _normalize_fallback(fallback_decision)
-        self._llm_caller = llm_caller  # if None, use litellm at call time
+        self._llm_caller = llm_caller  # if None, use app.core.llm_client at call time
 
     # ---------- Public API ----------
 
@@ -279,8 +279,13 @@ class AuditAgent:
     async def _call_llm(self, system_prompt: str, user_content: str) -> str:
         """Call the configured LLM. Returns the raw text content.
 
-        If self._llm_caller is set (test mock), use it.
-        Otherwise use litellm.acompletion().
+        Phase C: routes through app.core.llm_client.chat_completion (native
+        httpx, no litellm). The Channel object is built lazily from the
+        audit-agent model string + env-var API key.
+
+        For test injection, callers pass `llm_caller` to __init__ — that
+        callable is used directly and this method's env-var lookup is
+        bypassed entirely.
         """
         if self._llm_caller is not None:
             # Test injection: caller is responsible for the full call signature.
@@ -297,79 +302,142 @@ class AuditAgent:
                 result = await result
             return result
 
-        # Production path: litellm.acompletion
-        try:
-            import asyncio
-            import litellm
-        except ImportError as exc:
-            raise RuntimeError(
-                "litellm is required for AuditAgent but is not installed. "
-                "Run: pip install litellm"
-            ) from exc
+        # Production path: native httpx client
+        from app.core.channels import Channel
+        from app.core.llm_client import chat_completion, LLMError
+
+        channel = self._build_audit_channel()
+        if channel is None:
+            # _is_llm_configured() should have caught this earlier, but
+            # be defensive: log + return empty so the audit falls back.
+            logger.warning(
+                "Audit agent: cannot build LLM channel for model=%s — "
+                "no API key in env. Returning empty response.",
+                self.model,
+            )
+            return ""
 
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ]
-        # litellm.acompletion is async; we run it directly since this method is async.
-        response = await litellm.acompletion(
-            model=self.model,
-            messages=messages,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            timeout=self.timeout_seconds,
-        )
-        # Extract content from standard OpenAI-shaped response
         try:
-            choices = response.choices if hasattr(response, "choices") else response["choices"]
-            if not choices:
-                return ""
-            msg = choices[0].message if hasattr(choices[0], "message") else choices[0]["message"]
-            content = msg.content if hasattr(msg, "content") else msg.get("content", "")
-            # Some providers put content in reasoning_content when thinking is enabled
-            if not content:
-                reasoning = getattr(msg, "reasoning_content", None) if hasattr(msg, "reasoning_content") else msg.get("reasoning_content", "")
-                content = reasoning or ""
-            return content or ""
-        except (AttributeError, KeyError, IndexError) as exc:
-            logger.warning("Audit agent: unexpected LLM response shape: %s", exc)
-            return ""
+            import asyncio
+            response = await asyncio.wait_for(
+                chat_completion(
+                    channel=channel,
+                    messages=messages,
+                    tools=None,
+                    temperature=self.temperature,
+                ),
+                timeout=self.timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Audit agent: LLM call timed out after %ss (model=%s)",
+                self.timeout_seconds, self.model,
+            )
+            raise RuntimeError(f"LLM call timed out after {self.timeout_seconds}s")
+        except LLMError as exc:
+            # Surface the underlying error to the review() try/except,
+            # which falls back to safe-reject.
+            raise
+
+        # The native client already extracts content + reasoning_content.
+        content = (response.get("content") or "").strip()
+        if not content:
+            # Reasoning models (DeepSeek-reasoner, o-series, Claude w/ thinking)
+            # may put the actual answer in reasoning_content when the token
+            # budget is small — fall back to that.
+            content = (response.get("reasoning_content") or "").strip()
+        return content
+
+    def _build_audit_channel(self):
+        """Build a Channel for the audit LLM from env vars.
+
+        Returns None if no API key is set for the configured model's
+        provider, in which case the audit agent should fall back.
+        """
+        from app.core.channels import Channel
+
+        if not self.model:
+            return None
+
+        # Map common model prefixes → (provider, base_url, env_var)
+        # The native client only needs base_url + api_key; it figures out
+        # the endpoint path itself.
+        prefix_map = [
+            ("openai/",    ("openai_compatible", "https://api.openai.com/v1", "OPENAI_API_KEY")),
+            ("gpt-",       ("openai_compatible", "https://api.openai.com/v1", "OPENAI_API_KEY")),
+            ("o1-",        ("openai_compatible", "https://api.openai.com/v1", "OPENAI_API_KEY")),
+            ("o3-",        ("openai_compatible", "https://api.openai.com/v1", "OPENAI_API_KEY")),
+            ("o4-",        ("openai_compatible", "https://api.openai.com/v1", "OPENAI_API_KEY")),
+            ("claude-",    ("claude", "https://api.anthropic.com", "ANTHROPIC_API_KEY")),
+            ("anthropic/", ("claude", "https://api.anthropic.com", "ANTHROPIC_API_KEY")),
+            ("glm-",       ("openai_compatible", "https://open.bigmodel.cn/api/paas/v4", "GLM_API_KEY")),
+            ("glm/",       ("openai_compatible", "https://open.bigmodel.cn/api/paas/v4", "GLM_API_KEY")),
+            ("deepseek-",  ("openai_compatible", "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY")),
+            ("deepseek/",  ("openai_compatible", "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY")),
+            ("groq/",      ("openai_compatible", "https://api.groq.com/openai/v1", "GROQ_API_KEY")),
+            ("gemini/",    ("openai_compatible", "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY")),
+            ("minimax/",   ("openai_compatible", "https://api.minimax.chat/v1", "MINIMAX_API_KEY")),
+        ]
+        model_lower = self.model.lower()
+        for prefix, (provider, default_base_url, env_var) in prefix_map:
+            if model_lower.startswith(prefix):
+                # Strip the provider prefix (e.g. "openai/gpt-4o-mini" → "gpt-4o-mini")
+                # so the model name passed to the provider API is clean.
+                clean_model = self.model
+                if "/" in clean_model:
+                    clean_model = clean_model.split("/", 1)[1]
+
+                api_key = os.environ.get(env_var, "")
+                if not api_key and prefix != "ollama/":
+                    return None
+                return Channel(
+                    id="audit_agent",
+                    name="AuditAgent",
+                    provider=provider,
+                    base_url=default_base_url,
+                    api_key=api_key,
+                    model=clean_model,
+                    max_total_tokens=8192,
+                    max_completion_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    reasoning={},
+                    failover_channels=[],
+                )
+        # Unknown prefix — assume openai_compatible with OPENAI_API_KEY
+        # (the native client will surface a friendly error if the env var is missing).
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+        if not api_key:
+            return None
+        clean_model = self.model.split("/", 1)[1] if "/" in self.model else self.model
+        return Channel(
+            id="audit_agent",
+            name="AuditAgent",
+            provider="openai_compatible",
+            base_url="https://api.openai.com/v1",
+            api_key=api_key,
+            model=clean_model,
+            max_total_tokens=8192,
+            max_completion_tokens=self.max_tokens,
+            temperature=self.temperature,
+            reasoning={},
+            failover_channels=[],
+        )
 
     def _is_llm_configured(self) -> bool:
         """Check if we have an API key for the configured model provider.
 
-        litellm resolves keys from env vars based on the model prefix
-        (e.g. openai/gpt-4o-mini -> OPENAI_API_KEY, glm/glm-4 -> GLM_API_KEY).
-        We do a lightweight check here; the actual call may still fail later
-        if the key is invalid.
+        Resolves keys from env vars based on the model prefix
+        (e.g. openai/gpt-4o-mini → OPENAI_API_KEY, glm/glm-4 → GLM_API_KEY).
+        Lightweight check — the actual call may still fail later if the
+        key is invalid.
         """
         if self._llm_caller is not None:
             return True  # tests always treat as configured
-        if not self.model:
-            return False
-        # Map common model prefixes to their env var
-        prefix_map = {
-            "openai/": "OPENAI_API_KEY",
-            "gpt-": "OPENAI_API_KEY",
-            "o1-": "OPENAI_API_KEY",
-            "o3-": "OPENAI_API_KEY",
-            "anthropic/": "ANTHROPIC_API_KEY",
-            "claude-": "ANTHROPIC_API_KEY",
-            "glm/": "GLM_API_KEY",
-            "glm-": "GLM_API_KEY",
-            "minimax/": "MINIMAX_API_KEY",
-            "groq/": "GROQ_API_KEY",
-            "deepseek/": "DEEPSEEK_API_KEY",
-            "gemini/": "GEMINI_API_KEY",
-            "ollama/": "OLLAMA_API_KEY",  # local — usually no key needed
-        }
-        for prefix, env_var in prefix_map.items():
-            if self.model.lower().startswith(prefix):
-                if env_var == "OLLAMA_API_KEY":
-                    return True  # local ollama, no key needed
-                return bool(os.environ.get(env_var))
-        # Unknown provider — assume configured (litellm will raise if not)
-        return True
+        return self._build_audit_channel() is not None
 
     # ---------- Internal: prompt + parsing ----------
 
