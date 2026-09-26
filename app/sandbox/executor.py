@@ -553,6 +553,20 @@ class SubprocessExecutor:
             return ToolResult.error_result(
                 f"Binary not found: {cmd_list[0]}", cmd_str, target,
             )
+        except PermissionError as exc:
+            # execvp reports EACCES for a non-executable file (or an unreadable
+            # PATH entry). Surface the searched PATH so the operator can fix it
+            # instead of seeing a bare "[Errno 13] Permission denied".
+            return ToolResult.error_result(
+                f"Binary not executable: {cmd_list[0]} ({exc}). "
+                f"Install it, or chmod +x it. PATH searched: {env.get('PATH', '')}",
+                cmd_str, target,
+            )
+        except OSError as exc:
+            return ToolResult.error_result(
+                f"Cannot execute {cmd_list[0]}: {type(exc).__name__}: {exc}",
+                cmd_str, target,
+            )
 
         # Wait for completion with timeout
         try:
@@ -817,7 +831,15 @@ class SubprocessExecutor:
         extra_paths = [
             f"{home}/go/bin",
             f"{go_path}/bin",
+            # cargo-installed Rust tools (rustscan)
+            f"{home}/.cargo/bin",
+            # pipx / pip --user console scripts
+            f"{home}/.local/bin",
+            # project venv (provides wrappers when the service runs uvicorn by
+            # absolute path, so venv/bin is NOT on the inherited PATH)
+            "/home/nhat/VAPT-AI/venv/bin",
             "/root/go/bin",
+            "/root/.cargo/bin",
             "/usr/local/go/bin",
             "/usr/local/sbin",
             "/usr/local/bin",

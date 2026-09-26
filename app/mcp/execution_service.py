@@ -75,6 +75,11 @@ from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
+# How often to publish a `tool_call_progress` heartbeat while a tool runs.
+# Keeps the scan timeline alive for long tools (nmap full/NSE scans,
+# feroxbuster, nuclei) so the UI does not look frozen.
+TOOL_PROGRESS_INTERVAL_SECONDS = 15
+
 
 # ---------- Status enum ----------
 
@@ -264,6 +269,10 @@ class ExecutionService:
                 execution.status = ExecutionStatus.RUNNING
                 execution.started_at = execution.started_at or datetime.now(UTC)
 
+            # Publish elapsed-time heartbeats while the tool runs so the SSE
+            # timeline shows progress instead of freezing on tool_call_started.
+            progress_task = asyncio.create_task(self._progress_ticker(execution))
+
             try:
                 # Run with hard timeout
                 result = await asyncio.wait_for(
@@ -315,6 +324,42 @@ class ExecutionService:
                     "ToolExecution %s FAILED | tool=%s | error=%s",
                     execution.id[:8], execution.tool_name, exc,
                 )
+
+            finally:
+                progress_task.cancel()
+                try:
+                    await progress_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+    async def _progress_ticker(self, execution: "ToolExecution") -> None:
+        """Publish a `tool_call_progress` event every N seconds while running.
+
+        Runs as a sibling task so it keeps firing while `_run_worker` is
+        blocked awaiting the tool subprocess. Skipped when there is no scan to
+        attribute the event to (e.g. a bare MCP tools/call).
+        """
+        if not execution.scan_id:
+            return
+        import time
+
+        started = time.monotonic()
+        try:
+            while True:
+                await asyncio.sleep(TOOL_PROGRESS_INTERVAL_SECONDS)
+                elapsed = int(time.monotonic() - started)
+                try:
+                    from app.pentest.events import emit_tool_call_progress
+                    await emit_tool_call_progress(
+                        scan_id=execution.scan_id,
+                        tool_name=execution.tool_name,
+                        execution_id=execution.id,
+                        elapsed_seconds=elapsed,
+                    )
+                except Exception:
+                    logger.debug("tool_call_progress emit failed", exc_info=True)
+        except asyncio.CancelledError:
+            raise
 
     async def get(self, execution_id: str) -> ToolExecution | None:
         """Get execution status by ID. Non-blocking."""

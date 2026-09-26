@@ -112,6 +112,29 @@ parameters:
     default: "4"  # T4 — aggressive timing
     options: ["0", "1", "2", "3", "4", "5"]
 
+  # ---- hang guards -------------------------------------------------------
+  # Without these, a slow/filtered host or a heavy NSE script (http-enum,
+  # ssl-cert, vuln) can keep nmap running until the wrapper's hard timeout,
+  # which stalls the whole scan with no UI feedback. These let nmap give up
+  # on its own and return PARTIAL results instead of being SIGKILLed.
+  - name: host_timeout
+    type: string
+    description: |
+      Give up on the target after this long (e.g. 120s, 4m). Bounds a slow or
+      filtered host. Default 4m. nmap returns whatever it found so far.
+    required: false
+    flag: "--host-timeout"
+    default: "4m"
+
+  - name: script_timeout
+    type: string
+    description: |
+      Per-NSE-script timeout (e.g. 60s). http-enum / ssl-cert / vuln scripts can
+      otherwise run for many minutes each. Default 60s.
+    required: false
+    flag: "--script-timeout"
+    default: "60s"
+
   - name: additional_args
     type: string
     description: Additional nmap arguments (e.g. "--top-ports 100 -v")
@@ -128,8 +151,11 @@ output:
     host_status: '^Host is up|Host: \\S+\\s+\\(.*\\)\\s+Status: Up'
     os_guess: '^OS details: (.*)'
 
-# Timeout (seconds) — nmap can be slow on full port scans
-timeout: 600
+# Timeout (seconds) — hard external bound.
+# nmap self-terminates earlier via --host-timeout (default 4m); this is the
+# backstop if nmap ignores it or hangs. Kept well below the old 600s so the
+# scan cannot appear "frozen" for 10 minutes.
+timeout: 300
 
 # Allowed exit codes (0 = success, 1 = no hosts up — still useful info)
 allowed_exit_codes: [0, 1]

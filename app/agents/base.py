@@ -757,8 +757,12 @@ class BaseAgent:
                     )
                 else:
                     # No scan_state (e.g. running outside scan_pipeline) —
-                    # just await the LLM call as before
-                    done = {await llm_task}
+                    # just await the LLM call as before.
+                    # NOTE: `done` holds Tasks (hashable), never their dict
+                    # results — `{await llm_task}` raised
+                    # "TypeError: unhashable type: 'dict'".
+                    await llm_task
+                    done = {llm_task}
                     pending = set()
                     abort_task = None
 

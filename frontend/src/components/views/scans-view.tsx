@@ -21,6 +21,7 @@ type EventType =
   | "phase_change"
   | "iteration"
   | "tool_call_started"
+  | "tool_call_progress"
   | "tool_call_completed"
   | "assistant_message"
   | "thinking"
@@ -56,6 +57,7 @@ interface ScanEvent {
   success?: boolean;
   result_preview?: string;
   execution_id?: string;
+  elapsed_seconds?: number;
   error?: string;
   status?: string;
   // assistant_message
@@ -100,6 +102,8 @@ interface ToolCallState {
   completed_at?: string;
   agent_name?: string;
   iteration?: number;
+  // Latest elapsed time reported by a tool_call_progress heartbeat (seconds).
+  elapsed_seconds?: number;
 }
 
 /** Convert an event's unix-epoch (seconds) timestamp to an ISO string. */
@@ -120,6 +124,18 @@ function computeToolCallStates(events: ScanEvent[]): Record<string, ToolCallStat
         agent_name: ev.agent_name,
         iteration: ev.iteration,
       };
+    } else if (ev.type === "tool_call_progress") {
+      // Heartbeat while a tool runs. Progress events carry tool_name (not
+      // tool_call_id), so attach to the most recent still-running card for
+      // that tool. Keeps the tool card's elapsed timer ticking instead of
+      // leaving the timeline frozen on `tool_call_started`.
+      const running = Object.values(map).filter(
+        (s) => s.status === "running" && s.tool_name === ev.tool_name,
+      );
+      const target = running[running.length - 1];
+      if (target) {
+        target.elapsed_seconds = ev.elapsed_seconds;
+      }
     } else if (ev.type === "tool_call_completed" && ev.tool_call_id) {
       const existing = map[ev.tool_call_id];
       if (existing) {
@@ -468,6 +484,11 @@ function EventLine({
   if (event.type === "tool_call_completed") {
     return null;
   }
+  // tool_call_progress heartbeats update the running tool card's elapsed
+  // timer (see computeToolCallStates) — no separate timeline line.
+  if (event.type === "tool_call_progress") {
+    return null;
+  }
 
   // ── Phase change: render as a divider ──────────────────────────────
   if (event.type === "phase_change") {
@@ -662,6 +683,11 @@ function ToolCard({
         )}
         {state.iteration && (
           <span className="text-zinc-600 text-[10px] shrink-0">iter {state.iteration}</span>
+        )}
+        {state.status === "running" && state.elapsed_seconds !== undefined && (
+          <span className="text-amber-400/80 text-[10px] shrink-0">
+            running {state.elapsed_seconds}s
+          </span>
         )}
         {state.args_preview && (
           <span className="text-zinc-500 truncate flex-1">({state.args_preview})</span>
