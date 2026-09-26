@@ -26,6 +26,18 @@ WorkingDirectory=/home/nhat/VAPT-AI
 Environment=PYTHONPATH=/home/nhat/VAPT-AI
 EnvironmentFile=/home/nhat/VAPT-AI/.env
 
+# CRITICAL — expand PATH so the service sees Go-installed security tools.
+# systemd's default PATH is `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/
+# sbin:/bin` — it does NOT include `/home/nhat/go/bin` where `httpx`, `nuclei`,
+# `subfinder`, `katana`, `dalfox`, `gau`, `waybackurls`, ... are installed via
+# `go install github.com/projectdiscovery/...@latest`. Without this line, the
+# agent reported "Binary not found: httpx" even though `which httpx` from a
+# login shell found it fine.
+#
+# Also include /snap/bin (some tools via snap), /usr/local/go/bin (go binary
+# itself), and the existing PATH as fallback.
+Environment=PATH=/home/nhat/go/bin:/root/go/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:/opt/go/bin
+
 # Run uvicorn from venv (NOT system uvicorn)
 #
 # IMPORTANT: keep --workers 1.

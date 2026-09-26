@@ -787,8 +787,66 @@ class SubprocessExecutor:
     # ---------- Helpers ----------
 
     def _build_env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
-        """Build environment for subprocess — inherits current + adds pager overrides."""
+        """Build environment for subprocess — inherits current + adds pager overrides.
+
+        CRITICAL — Phase D PATH fix:
+        When VAPT-AI runs as a systemd service (User=nhat), the systemd
+        default PATH is minimal (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/
+        usr/bin:/sbin:/bin`). Go-installed security tools (httpx, nuclei,
+        subfinder, katana, dalfox, gau, waybackurls, ...) live in
+        `$HOME/go/bin` (or `/root/go/bin` when sudo-installed), which is
+        NOT in the systemd PATH. As a result the agent saw "Binary not
+        found: httpx" even though the user HAD installed httpx.
+
+        We explicitly expand PATH to include every common install
+        location for the security tools the user installed:
+          - $HOME/go/bin             — go install (per-user)
+          - /root/go/bin             — go install via sudo
+          - /usr/local/go/bin        — go binary itself (for `go run`)
+          - /usr/local/bin           — manually placed tools (e.g. mimikatz)
+          - /snap/bin                — snap-installed tools
+          - /opt/go/bin              — alternate go install location
+          - $GOPATH/bin              — env-var go install location
+          - the current PATH         — fallback so we never LOSE access
+        """
         env = dict(os.environ)
+
+        # Build the expanded PATH. Order matters — leftmost wins.
+        home = env.get("HOME", "/root")
+        go_path = env.get("GOPATH", f"{home}/go")
+        extra_paths = [
+            f"{home}/go/bin",
+            f"{go_path}/bin",
+            "/root/go/bin",
+            "/usr/local/go/bin",
+            "/usr/local/sbin",
+            "/usr/local/bin",
+            "/usr/sbin",
+            "/usr/bin",
+            "/sbin",
+            "/bin",
+            "/snap/bin",
+            "/opt/go/bin",
+            "/opt/nmap/bin",
+            # Common manual install locations
+            "/opt/feroxbuster",
+            "/opt/sqlmap",
+        ]
+        # Append the existing PATH last so we never lose access to anything
+        # that's already on the default systemd PATH.
+        existing_path = env.get("PATH", "")
+        seen: set[str] = set()
+        unique_paths: list[str] = []
+        for p in extra_paths:
+            if p and p not in seen:
+                seen.add(p)
+                unique_paths.append(p)
+        if existing_path:
+            for p in existing_path.split(":"):
+                if p and p not in seen:
+                    seen.add(p)
+                    unique_paths.append(p)
+        env["PATH"] = ":".join(unique_paths)
 
         # Pager overrides (prevent tools from blocking on less/more)
         env["GIT_PAGER"] = "cat"
@@ -797,7 +855,7 @@ class SubprocessExecutor:
         env["DEBIAN_FRONTEND"] = "noninteractive"
         env["TERM"] = "xterm-256color"
 
-        # Merge extra env
+        # Merge extra env (caller overrides win)
         if extra:
             env.update(extra)
 

@@ -600,6 +600,8 @@ class BaseAgent:
             emit_tool_call_started, emit_tool_call_completed,
             emit_assistant_message, emit_thinking, emit_iteration,
         )
+        from app.pentest.scan_registry import scan_registry
+        from app.pentest.events import emit_scan_progress, emit_scan_error
 
         # ---------- Build initial messages ----------
         user_msg = (
@@ -645,6 +647,31 @@ class BaseAgent:
         # ---------- ReAct loop ----------
         for iteration in range(self.max_iterations):
             turn = len(self.decisions)
+
+            # ── Phase D: abort check ──────────────────────────────────
+            # If the user clicked the panic button (POST /api/scans/{id}/abort),
+            # scan_registry.abort_scan() set state.abort_event. We need to
+            # check this EACH iteration BEFORE the next LLM call — otherwise
+            # the abort button has no effect until max_iterations is reached,
+            # burning more LLM tokens ($$).
+            if await scan_registry.is_aborted(self.scan_id):
+                logger.warning(
+                    "Agent %s aborting — scan_registry.abort_event is set | scan=%s | iter=%d",
+                    self.AGENT_NAME, self.scan_id, iteration + 1,
+                )
+                abort_msg = (
+                    f"⛔ Agent {self.AGENT_NAME} stopped (panic button). "
+                    f"Not wasting extra tokens."
+                )
+                await emit_assistant_message(
+                    scan_id=self.scan_id, content=abort_msg,
+                    agent_name=self.AGENT_NAME, iteration=iteration + 1,
+                )
+                await emit_scan_progress(
+                    scan_id=self.scan_id, thought=abort_msg,
+                    agent_name=self.AGENT_NAME, progress=99,
+                )
+                return self._finalize("aborted", error="user_panic_button")
 
             # Emit iteration boundary — frontend renders as a timeline divider
             await emit_iteration(

@@ -324,6 +324,19 @@ class SupervisorOrchestrator(BaseOrchestrator):
 
         Falls back to W10 stub when self.llm_config is None (for tests).
         """
+        # ── Phase D: abort check ──────────────────────────────────
+        # Honor the panic button BEFORE the next LLM call — otherwise
+        # the supervisor keeps transferring to experts and burning
+        # tokens after the user clicked Stop.
+        from app.pentest.scan_registry import scan_registry
+        if await scan_registry.is_aborted(self.scan_id):
+            logger.warning(
+                "Supervisor aborting — scan_registry.abort_event is set | scan=%s",
+                self.scan_id,
+            )
+            return {**state, "next_agent": None, "status": "aborted",
+                    "error": "user_panic_button"}
+
         violation = self._check_guardrails()
         if violation:
             return {**state, "next_agent": None, "status": "failed", "error": violation}

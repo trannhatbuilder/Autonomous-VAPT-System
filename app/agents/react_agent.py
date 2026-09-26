@@ -311,6 +311,24 @@ async def run_react_scan(
     for iteration in range(max_iterations):
         iterations = iteration + 1
 
+        # ── Phase D: abort check ──────────────────────────────────
+        # Honor the panic button BEFORE the next LLM call — without this,
+        # aborting a scan only takes effect after max_iterations.
+        from app.pentest.scan_registry import scan_registry
+        if await scan_registry.is_aborted(scan_id):
+            logger.warning(
+                "ReAct scan aborting — scan_registry.abort_event is set | scan=%s | iter=%d",
+                scan_id, iterations,
+            )
+            return {
+                "status": "aborted",
+                "findings_count": findings_count,
+                "iterations": iterations,
+                "total_tokens": total_tokens,
+                "final_summary": f"Scan aborted at iteration {iterations} (panic button).",
+                "error": "user_panic_button",
+            }
+
         try:
             # Call LLM
             await emit_scan_progress(scan_id, thought=f"Đang suy nghĩ... (vòng {iterations}/{max_iterations})",
