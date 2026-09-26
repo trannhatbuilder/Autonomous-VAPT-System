@@ -87,6 +87,7 @@ Skill integration (W11-S5):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -654,14 +655,25 @@ class BaseAgent:
             # check this EACH iteration BEFORE the next LLM call — otherwise
             # the abort button has no effect until max_iterations is reached,
             # burning more LLM tokens ($$).
-            if await scan_registry.is_aborted(self.scan_id):
+            #
+            # PHASE D-6: added verbose logging so we can verify in journalctl
+            # that the check is actually firing (vs is_aborted() returning
+            # False for some weird reason like scan_id mismatch).
+            abort_state = scan_registry.get_state(self.scan_id)
+            abort_is_set = abort_state.abort_event.is_set() if abort_state else None
+            logger.info(
+                "ABORT CHECK | agent=%s | scan=%s | iter=%d | scan_state_exists=%s | abort_event_is_set=%s",
+                self.AGENT_NAME, self.scan_id, iteration + 1,
+                abort_state is not None, abort_is_set,
+            )
+            if abort_is_set:
                 logger.warning(
                     "Agent %s aborting — scan_registry.abort_event is set | scan=%s | iter=%d",
                     self.AGENT_NAME, self.scan_id, iteration + 1,
                 )
                 abort_msg = (
-                    f"⛔ Agent {self.AGENT_NAME} stopped (panic button). "
-                    f"Not wasting extra tokens."
+                    f"⛔ Agent {self.AGENT_NAME} đã bị dừng (panic button). "
+                    f"Không tốn thêm tokens."
                 )
                 await emit_assistant_message(
                     scan_id=self.scan_id, content=abort_msg,
@@ -714,12 +726,76 @@ class BaseAgent:
                 messages = capped
 
             try:
-                # Call LLM
-                response = await chat_completion(
-                    llm_config=llm_config,
-                    messages=messages,
-                    tools=tool_schemas,
+                # ── Phase D: race LLM call against abort_event ────────
+                # Even though we already checked is_aborted() at the start
+                # of this iteration, the user might press the panic button
+                # DURING the (often 3-30s) LLM call. Without this race,
+                # the LLM call would complete + the agent would execute
+                # the returned tool_calls + record a decision + THEN check
+                # abort at the next iteration — burning $0.001-0.003 per
+                # extra LLM call.
+                #
+                # Solution: spin up an asyncio task waiting on the
+                # abort_event alongside the LLM call. If the abort_event
+                # fires first, we cancel the LLM task and exit immediately.
+                scan_state = scan_registry.get_state(self.scan_id)
+                abort_event = scan_state.abort_event if scan_state else None
+
+                llm_task = asyncio.create_task(
+                    chat_completion(
+                        llm_config=llm_config,
+                        messages=messages,
+                        tools=tool_schemas,
+                    )
                 )
+
+                if abort_event is not None:
+                    abort_task = asyncio.create_task(abort_event.wait())
+                    done, pending = await asyncio.wait(
+                        {llm_task, abort_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                else:
+                    # No scan_state (e.g. running outside scan_pipeline) —
+                    # just await the LLM call as before
+                    done = {await llm_task}
+                    pending = set()
+                    abort_task = None
+
+                # If abort fired during LLM call → cancel LLM + exit
+                if abort_task is not None and abort_task in done:
+                    logger.warning(
+                        "Agent %s aborting DURING LLM call (panic button) | scan=%s | iter=%d",
+                        self.AGENT_NAME, self.scan_id, iteration + 1,
+                    )
+                    llm_task.cancel()
+                    if abort_task is not None:
+                        abort_task.cancel()
+                    # Try to recover the LLM result if it finished before cancel
+                    try:
+                        response = await llm_task
+                    except (asyncio.CancelledError, Exception):
+                        response = None
+                    abort_msg = (
+                        f"⛔ Agent {self.AGENT_NAME} đã bị dừng (panic button). "
+                        f"Không tốn thêm tokens."
+                    )
+                    await emit_assistant_message(
+                        scan_id=self.scan_id, content=abort_msg,
+                        agent_name=self.AGENT_NAME, iteration=iteration + 1,
+                    )
+                    return self._finalize("aborted", error="user_panic_button")
+
+                # LLM call finished first → cancel the abort watcher
+                if abort_task is not None:
+                    abort_task.cancel()
+                    try:
+                        await abort_task
+                    except asyncio.CancelledError:
+                        pass
+
+                # Get the LLM response
+                response = llm_task.result()
 
                 self.total_tokens += response["usage"].get("total_tokens", 0)
 

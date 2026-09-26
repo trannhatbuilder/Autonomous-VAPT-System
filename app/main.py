@@ -581,6 +581,12 @@ def create_app() -> FastAPI:
         # Return scan_id IMMEDIATELY — don't block
         # The frontend will connect SSE right away and receive real-time events
 
+        # Pre-register the scan in scan_registry BEFORE creating the
+        # asyncio.Task. This way, when we store the task reference via
+        # set_pipeline_task(), the ScanState already exists.
+        from app.pentest.scan_registry import scan_registry
+        await scan_registry.register_scan(scan_id)
+
         # Launch pipeline in background (non-blocking)
         async def _run_pipeline_background():
             from app.pentest.scan_pipeline import run_scan_pipeline
@@ -592,12 +598,34 @@ def create_app() -> FastAPI:
                     scan_id=scan_id,
                     user_id=uuid_mod.UUID(user.id),
                 )
+            except asyncio.CancelledError:
+                # Phase D-7: user pressed the panic button — abort_scan()
+                # called task.cancel() on us. Emit a final SSE event so
+                # the UI shows "stopped" status, then re-raise to let
+                # the asyncio runtime mark us as cancelled.
+                logger.warning(
+                    "Pipeline task for scan %s cancelled by panic button",
+                    scan_id,
+                )
+                from app.pentest.events import emit_scan_progress, emit_scan_complete
+                await emit_scan_progress(
+                    scan_id=scan_id, thought="⛔ Scan đã bị dừng bởi panic button",
+                    agent_name="orchestrator", progress=100,
+                )
+                await emit_scan_complete(
+                    scan_id=scan_id, status="aborted",
+                    findings_count=0, duration_seconds=0.0,
+                )
+                raise
             except Exception as e:
                 from app.pentest.events import emit_scan_error
                 logger.error("Background pipeline failed: scan=%s error=%s", scan_id, e)
                 await emit_scan_error(scan_id, str(e))
 
-        asyncio.create_task(_run_pipeline_background())
+        pipeline_task = asyncio.create_task(_run_pipeline_background())
+        # Phase D-7: store task reference so abort_scan() can call
+        # task.cancel() to forcefully interrupt any in-flight operation.
+        await scan_registry.set_pipeline_task(scan_id, pipeline_task)
 
         return {
             "scan_id": scan_id,

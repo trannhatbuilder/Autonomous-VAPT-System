@@ -79,6 +79,7 @@ from app.pentest.events import (
     emit_phase_change,
     emit_scan_started,
 )
+from app.pentest.scan_registry import scan_registry
 
 logger = logging.getLogger(__name__)
 
@@ -328,7 +329,6 @@ class SupervisorOrchestrator(BaseOrchestrator):
         # Honor the panic button BEFORE the next LLM call — otherwise
         # the supervisor keeps transferring to experts and burning
         # tokens after the user clicked Stop.
-        from app.pentest.scan_registry import scan_registry
         if await scan_registry.is_aborted(self.scan_id):
             logger.warning(
                 "Supervisor aborting — scan_registry.abort_event is set | scan=%s",
@@ -370,17 +370,52 @@ class SupervisorOrchestrator(BaseOrchestrator):
             self._supervisor_messages.append({"role": "user", "content": user_msg})
         # else: prior expert results already appended in expert_node
 
-        # Call LLM with synthetic transfer + exit tools
+        # Call LLM with synthetic transfer + exit tools.
+        # ── Phase D: race the LLM call against the abort_event so a
+        # mid-LLM-call panic button stops the supervisor immediately
+        # (instead of completing the LLM call, transferring to an
+        # expert, and burning more tokens).
         try:
-            response = await chat_completion(
-                llm_config=self.llm_config,
-                messages=[
-                    {"role": "system", "content": self.system_prompt},
-                    *self._supervisor_messages,
-                ],
-                tools=self.supervisor_tools,
-                temperature=0.2,  # low temp for deterministic routing
+            import asyncio as _asyncio
+            scan_state = scan_registry.get_state(self.scan_id)
+            abort_event = scan_state.abort_event if scan_state else None
+
+            llm_task = _asyncio.create_task(
+                chat_completion(
+                    llm_config=self.llm_config,
+                    messages=[
+                        {"role": "system", "content": self.system_prompt},
+                        *self._supervisor_messages,
+                    ],
+                    tools=self.supervisor_tools,
+                    temperature=0.2,
+                )
             )
+
+            if abort_event is not None:
+                abort_task = _asyncio.create_task(abort_event.wait())
+                done, _pending = await _asyncio.wait(
+                    {llm_task, abort_task},
+                    return_when=_asyncio.FIRST_COMPLETED,
+                )
+                if abort_task in done:
+                    # User pressed abort DURING the supervisor LLM call
+                    logger.warning(
+                        "Supervisor aborting DURING LLM call (panic button) | scan=%s",
+                        self.scan_id,
+                    )
+                    llm_task.cancel()
+                    abort_task.cancel()
+                    return {**state, "next_agent": None, "status": "aborted",
+                            "error": "user_panic_button"}
+                # LLM finished first → cancel the abort watcher
+                abort_task.cancel()
+                try:
+                    await abort_task
+                except _asyncio.CancelledError:
+                    pass
+
+            response = await llm_task
         except Exception as exc:
             logger.exception("Supervisor LLM call failed: scan=%s", self.scan_id)
             return {**state, "next_agent": None, "status": "failed",

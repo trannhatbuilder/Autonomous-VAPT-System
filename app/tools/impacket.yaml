@@ -5,6 +5,11 @@ description: |
   Impacket — Python collection of network protocol classes for exploitation.
   Includes smbexec, psexec, wmiexec, secretsdump, GetUserSPNs, etc.
 
+  NOTE: This YAML defaults to the `impacket-smbexec` subtool. If you need
+  a different subtool (e.g. secretsdump), use the `additional_args` field
+  to pass the full command — the LLM should know to NOT pass `subtool`
+  since the command is hardcoded to impacket-smbexec.
+
   Examples:
     - smbexec: impacket-smbexec user:pass@10.0.0.5
     - secretsdump: impacket-secretsdump user:pass@10.0.0.5
@@ -24,15 +29,13 @@ parameters:
     description: Target (user:pass@host or domain/user:pass@host)
     required: true
     position: 1
-  - name: subtool
-    type: string
-    description: Impacket subtool (smbexec, psexec, wmiexec, secretsdump, GetUserSPNs)
-    required: false
-    default: "smbexec"
-    options: ["smbexec", "psexec", "wmiexec", "secretsdump", "GetUserSPNs"]
   - name: additional_args
     type: string
-    description: Additional impacket arguments
+    description: |
+      Additional impacket arguments (e.g. "-no-pass -k" for Kerberos auth).
+      Note: to switch subtool from smbexec to e.g. secretsdump, you must
+      invoke a different command — use the `impacket-secretsdump` tool
+      definition (if registered) OR fall back to a generic exec tool.
     required: false
     default: ""
 output:

@@ -56,15 +56,25 @@ parameters:
 
   - name: scan_type
     type: string
-    description: Scan technique
+    description: |
+      Scan technique flag (e.g. -sT, -sS, -sU, -sA).
+      DEFAULT is -sT (TCP connect scan — does NOT require root).
+      Use -sS only when running as root (requires CAP_NET_RAW).
+      This value is appended DIRECTLY to the nmap command — it is both
+      the flag and the value.
     required: false
-    flag: "-sS"  # SYN scan (default — requires root, falls back to -sT)
-    default: "-sS"
+    # NOTE: NO `flag:` field — scan_type IS itself a flag (e.g. "-sT").
+    # If we set flag="-sS" + value="-sT", the loader would emit
+    # "nmap -sS -sT ..." which causes "You requested a scan type which
+    # requires root privileges" because nmap sees the -sS flag.
+    # Using position makes the loader append JUST the value as-is.
+    position: 2  # appended after target (position 1)
+    default: "-sT"  # TCP connect scan — no root needed
     options:
-      - "-sS"  # SYN scan (stealth)
-      - "-sT"  # TCP connect scan (no root)
-      - "-sU"  # UDP scan
-      - "-sA"  # ACK scan (firewall detection)
+      - "-sT"  # TCP connect scan (no root) ← DEFAULT, safe under systemd
+      - "-sS"  # SYN scan (stealth) — requires root/CAP_NET_RAW
+      - "-sU"  # UDP scan — requires root
+      - "-sA"  # ACK scan (firewall detection) — requires root
 
   - name: version_detection
     type: bool

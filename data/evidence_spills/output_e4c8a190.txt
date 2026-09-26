@@ -1,0 +1,1365 @@
+Starting Nmap 7.98 ( https://nmap.org ) at 2026-09-26 09:25 +0700
+NSE: TCP 192.168.1.8:60852 > 178.79.134.182:4280 | CONNECT
+NSE: TCP 192.168.1.8:60858 > 178.79.134.182:4280 | CONNECT
+NSE: TCP 192.168.1.8:60844 > 178.79.134.182:4280 | CONNECT
+NSE: TCP 192.168.1.8:60834 > 178.79.134.182:4280 | CONNECT
+NSE: TCP 192.168.1.8:60834 > 178.79.134.182:4280 | 00000000: 47 45 54 20 2f 6e 6d 61 70 6c 6f 77 65 72 63 68 GET /nmaplowerch
+00000010: 65 63 6b 31 37 39 30 33 38 39 35 34 37 20 48 54 eck1790389547 HT
+00000020: 54 50 2f 31 2e 31 0d 0a 48 6f 73 74 3a 20 70 65 TP/1.1  Host: pe
+00000030: 6e 74 65 73 74 2d 67 72 6f 75 6e 64 2e 63 6f 6d ntest-ground.com
+00000040: 3a 34 32 38 30 0d 0a 43 6f 6e 6e 65 63 74 69 6f :4280  Connectio
+00000050: 6e 3a 20 63 6c 6f 73 65 0d 0a 55 73 65 72 2d 41 n: close  User-A
+00000060: 67 65 6e 74 3a 20 4d 6f 7a 69 6c 6c 61 2f 35 2e gent: Mozilla/5.
+00000070: 30 20 28 63 6f 6d 70 61 74 69 62 6c 65 3b 20 4e 0 (compatible; N
+00000080: 6d 61 70 20 53 63 72 69 70 74 69 6e 67 20 45 6e map Scripting En
+00000090: 67 69 6e 65 3b 20 68 74 74 70 73 3a 2f 2f 6e 6d gine; https://nm
+000000a0: 61 70 2e 6f 72 67 2f 62 6f 6f 6b 2f 6e 73 65 2e ap.org/book/nse.
+000000b0: 68 74 6d 6c 29 0d 0a 0d 0a                      html)    
+
+NSE: TCP 192.168.1.8:60844 > 178.79.134.182:4280 | POST /sdk HTTP/1.1
+Host: pentest-ground.com:4280
+Content-Length: 441
+Connection: close
+User-Agent: Mozilla/5.0 (compatible; Nmap Scripting Engine; https://nmap.org/book/nse.html)
+
+<soap:Envelope xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Header><operationID>00000001-00000001</operationID></soap:Header><soap:Body><RetrieveServiceContent xmlns="urn:internalvim25"><_this xsi:type="ManagedObjectReference" type="ServiceInstance">ServiceInstance</_this></RetrieveServiceContent></soap:Body></soap:Envelope>
+NSE: TCP 192.168.1.8:60852 > 178.79.134.182:4280 | 00000000: 47 45 54 20 2f 20 48 54 54 50 2f 31 2e 31 0d 0a GET / HTTP/1.1  
+00000010: 48 6f 73 74 3a 20 70 65 6e 74 65 73 74 2d 67 72 Host: pentest-gr
+00000020: 6f 75 6e 64 2e 63 6f 6d 3a 34 32 38 30 0d 0a 43 ound.com:4280  C
+00000030: 6f 6e 6e 65 63 74 69 6f 6e 3a 20 63 6c 6f 73 65 onnection: close
+00000040: 0d 0a 55 73 65 72 2d 41 67 65 6e 74 3a 20 4d 6f   User-Agent: Mo
+00000050: 7a 69 6c 6c 61 2f 35 2e 30 20 28 63 6f 6d 70 61 zilla/5.0 (compa
+00000060: 74 69 62 6c 65 3b 20 4e 6d 61 70 20 53 63 72 69 tible; Nmap Scri
+00000070: 70 74 69 6e 67 20 45 6e 67 69 6e 65 3b 20 68 74 pting Engine; ht
+00000080: 74 70 73 3a 2f 2f 6e 6d 61 70 2e 6f 72 67 2f 62 tps://nmap.org/b
+00000090: 6f 6f 6b 2f 6e 73 65 2e 68 74 6d 6c 29 0d 0a 0d ook/nse.html)   
+000000a0: 0a                                               
+
+NSE: TCP 192.168.1.8:60858 > 178.79.134.182:4280 | 00000000: 4f 50 54 49 4f 4e 53 20 2f 20 48 54 54 50 2f 31 OPTIONS / HTTP/1
+00000010: 2e 31 0d 0a 48 6f 73 74 3a 20 70 65 6e 74 65 73 .1  Host: pentes
+00000020: 74 2d 67 72 6f 75 6e 64 2e 63 6f 6d 3a 34 32 38 t-ground.com:428
+00000030: 30 0d 0a 43 6f 6e 6e 65 63 74 69 6f 6e 3a 20 63 0  Connection: c
+00000040: 6c 6f 73 65 0d 0a 55 73 65 72 2d 41 67 65 6e 74 lose  User-Agent
+00000050: 3a 20 4d 6f 7a 69 6c 6c 61 2f 35 2e 30 20 28 63 : Mozilla/5.0 (c
+00000060: 6f 6d 70 61 74 69 62 6c 65 3b 20 4e 6d 61 70 20 ompatible; Nmap 
+00000070: 53 63 72 69 70 74 69 6e 67 20 45 6e 67 69 6e 65 Scripting Engine
+00000080: 3b 20 68 74 74 70 73 3a 2f 2f 6e 6d 61 70 2e 6f ; https://nmap.o
+00000090: 72 67 2f 62 6f 6f 6b 2f 6e 73 65 2e 68 74 6d 6c rg/book/nse.html
+000000a0: 29 0d 0a 0d 0a                                  )    
+
+NSE: TCP 192.168.1.8:60834 > 178.79.134.182:4280 | SEND
+NSE: TCP 192.168.1.8:60844 > 178.79.134.182:4280 | SEND
+NSE: TCP 192.168.1.8:60852 > 178.79.134.182:4280 | SEND
+NSE: TCP 192.168.1.8:60858 > 178.79.134.182:4280 | SEND
+NSE: TCP 192.168.1.8:60852 < 178.79.134.182:4280 | HTTP/1.1 200 OK
+Server: nginx/1.31.6
+Date: Sat, 26 Sep 2026 02:25:47 GMT
+Content-Type: text/html;charset=utf-8
+Content-Length: 5930
+Connection: close
+X-Powered-By: PHP/8.5.11
+Set-Cookie: security=low; path=/
+Set-Cookie: PHPSESSID=d2de21921f00f53d839368b4042b149d; expires=Sun, 27 Sep 2026 02:25:47 GMT; Max-Age=86400; path=/
+Expires: Tue, 23 Jun 2009 12:00:00 GMT
+Cache-Control: no-cache, must-revalidate
+Pragma: no-cache
+Vary: Accept-Encoding
+
+<!DOCTYPE html>
+
+<html lang="en-GB">
+
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+
+		<title>Welcome :: Damn Vulnerable Web Application (DVWA)</title>
+
+		<link rel="stylesheet" type="text/css" href="dvwa/css/main.css" />
+
+		<link rel="icon" type="\image/ico" href="favicon.ico" />
+
+		<script type="text/javascript" src="dvwa/js/dvwaPage.js"></script>
+
+	</head>
+
+	<body class="home">
+		<div id="container">
+
+			<div id="header">
+
+				<img src="dvwa/images/logo.png" alt="Damn Vulnerable Web Application" />
+
+			</div>
+
+			<div id="main_menu">
+
+				<div id="main_menu_padded">
+				<ul class="menuBlocks"><li class="selected"><a href=".">Home</a></li>
+<li class=""><a href="instructions.php">Instructions</a></li>
+<li class=""><a href="setup.php">Setup / Reset DB</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="vulnerabilities/brute/">Brute Force</a></li>
+<li class=""><a href="vulnerabilities/exec/">Command Injection</a></li>
+<li class=""><a href="vulnerabilities/csrf/">CSRF</a></li>
+<li class=""><a href="vulnerabilities/fi/.?page=include.php">File Inclusion</a></li>
+<li class=""><a href="vulnerabilities/upload/">File Upload</a></li>
+<li class=""><a href="vulnerabilities/captcha/">Insecure CAPTCHA</a></li>
+<li class=""><a href="vulnerabilities/sqli/">SQL Injection</a></li>
+<li class=""><a href="vulnerabilities/sqli_blind/">SQL Injection (Blind)</a></li>
+<li class=""><a href="vulnerabilities/weak_id/">Weak Session IDs</a></li>
+<li class=""><a href="vulnerabilities/xss_d/">XSS (DOM)</a></li>
+<li class=""><a href="vulnerabilities/xss_r/">XSS (Reflected)</a></li>
+<li class=""><a href="vulnerabilities/xss_s/">XSS (Stored)</a></li>
+<li class=""><a href="vulnerabilities/csp/">CSP Bypass</a></li>
+<li class=""><a href="vulnerabilities/javascript/">JavaScript</a></li>
+<li class=""><a href="vulnerabilities/open_redirect/">Open HTTP Redirect</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="security.php">DVWA Security</a></li>
+<li class=""><a href="phpinfo.php">PHP Info</a></li>
+<li class=""><a href="about.php">About</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="logout.php">Logout</a></li>
+</ul>
+				</div>
+
+			</div>
+
+			<div id="main_body">
+
+				
+<div class="body_padded">
+	<h1>Welcome to Damn Vulnerable Web Application!</h1>
+	<p>Damn Vulnerable Web Application (DVWA) is a PHP/MySQL web application that is damn vulnerable. Its main goal is to be an aid for security professionals to test their skills and tools in a legal environment, help web developers better understand the processes of securing web applications and to aid both students & teachers to learn about web application security in a controlled class room environment.</p>
+	<p>The aim of DVWA is to <em>practice some of the most common web vulnerabilities</em>, with <em>various levels of difficultly</em>, with a simple straightforward interface.</p>
+	<hr />
+	<br />
+
+	<h2>General Instructions</h2>
+	<p>It is up to the user how they approach DVWA. Either by working through every module at a fixed level, or selecting any module and working up to reach the highest level they can before moving onto the next one. There is not a fixed object to complete a module; however users should feel that they have successfully exploited the system as best as they possible could by using that particular vulnerability.</p>
+	<p>Please note, there are <em>both documented and undocumented vulnerability</em> with this software. This is intentional. You are encouraged to try and discover as many issues as possible.</p>
+	<p>There is a help button at the bottom of each page, which allows you to view hints & tips for that vulnerability. There are also additional links for further background reading, which relates to that security issue.</p>
+	<hr />
+	<br />
+
+	<h2>WARNING!</h2>
+	<p>Damn Vulnerable Web Application is damn vulnerable! <em>Do not upload it to your hosting provider's public html folder or any Internet facing servers</em>, as they will be compromised. It is recommend using a virtual machine (such as <a href="https://www.virtualbox.org/" target="_blank">VirtualBox</a> or <a href="https://www.vmware.com/" target="_blank">VMware</a>), which is set to NAT networking mode. Inside a guest machine, you can download and install <a href="https://www.apachefriends.org/" target="_blank">XAMPP</a> for the web server and database.</p>
+	<br />
+	<h3>Disclaimer</h3>
+	<p>We do not take responsibility for the way in which any one uses this application (DVWA). We have made the purposes of the application clear and it should not be used maliciously. We have given warnings and taken measures to prevent users from installing DVWA on to live web servers. If your web server is compromised via an installation of DVWA it is not our responsibility it is the responsibility of the person/s who uploaded and installed it.</p>
+	<hr />
+	<br />
+
+	<h2>More Training Resources</h2>
+	<p>DVWA aims to cover the most commonly seen vulnerabilities found in today's web applications. However there are plenty of other issues with web applications. Should you wish to explore any additional attack vectors, or want more difficult challenges, you may wish to look into the following other projects:</p>
+	<ul>
+		<li><a href="https://github.com/webpwnized/mutillidae" target="_blank">Mutillidae</a></li>
+		<li><a href="https://owasp.org/www-project-vulnerable-web-applications-directory" target="_blank">OWASP Vulnerable Web Applications Directory</a></li>
+	</ul>
+	<hr />
+	<br />
+</div>
+				<br /><br />
+				
+
+			</div>
+
+			<div class="clear">
+			</div>
+
+			<div id="system_info">
+				<div align="left"><em>Username:</em> Unknown<br /><em>Security Level:</em> low<br /><em>Locale:</em> en<br /><em>SQLi DB:</em> mysql</div>
+			</div>
+
+			<div id="footer">
+
+				<p>Damn Vulnerable Web Application (DVWA)</p>
+				<script src='dvwa/js/add_event_listeners.js'></script>
+
+			</div>
+
+		</div>
+
+	</body>
+
+</html>
+NSE: TCP 192.168.1.8:60858 < 178.79.134.182:4280 | HTTP/1.1 200 OK
+Server: nginx/1.31.6
+Date: Sat, 26 Sep 2026 02:25:47 GMT
+Content-Type: text/html;charset=utf-8
+Content-Length: 5930
+Connection: close
+X-Powered-By: PHP/8.5.11
+Set-Cookie: security=low; path=/
+Set-Cookie: PHPSESSID=5e187653b24340a51f3662aa6760a695; expires=Sun, 27 Sep 2026 02:25:47 GMT; Max-Age=86400; path=/
+Expires: Tue, 23 Jun 2009 12:00:00 GMT
+Cache-Control: no-cache, must-revalidate
+Pragma: no-cache
+Vary: Accept-Encoding
+
+<!DOCTYPE html>
+
+<html lang="en-GB">
+
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+
+		<title>Welcome :: Damn Vulnerable Web Application (DVWA)</title>
+
+		<link rel="stylesheet" type="text/css" href="dvwa/css/main.css" />
+
+		<link rel="icon" type="\image/ico" href="favicon.ico" />
+
+		<script type="text/javascript" src="dvwa/js/dvwaPage.js"></script>
+
+	</head>
+
+	<body class="home">
+		<div id="container">
+
+			<div id="header">
+
+				<img src="dvwa/images/logo.png" alt="Damn Vulnerable Web Application" />
+
+			</div>
+
+			<div id="main_menu">
+
+				<div id="main_menu_padded">
+				<ul class="menuBlocks"><li class="selected"><a href=".">Home</a></li>
+<li class=""><a href="instructions.php">Instructions</a></li>
+<li class=""><a href="setup.php">Setup / Reset DB</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="vulnerabilities/brute/">Brute Force</a></li>
+<li class=""><a href="vulnerabilities/exec/">Command Injection</a></li>
+<li class=""><a href="vulnerabilities/csrf/">CSRF</a></li>
+<li class=""><a href="vulnerabilities/fi/.?page=include.php">File Inclusion</a></li>
+<li class=""><a href="vulnerabilities/upload/">File Upload</a></li>
+<li class=""><a href="vulnerabilities/captcha/">Insecure CAPTCHA</a></li>
+<li class=""><a href="vulnerabilities/sqli/">SQL Injection</a></li>
+<li class=""><a href="vulnerabilities/sqli_blind/">SQL Injection (Blind)</a></li>
+<li class=""><a href="vulnerabilities/weak_id/">Weak Session IDs</a></li>
+<li class=""><a href="vulnerabilities/xss_d/">XSS (DOM)</a></li>
+<li class=""><a href="vulnerabilities/xss_r/">XSS (Reflected)</a></li>
+<li class=""><a href="vulnerabilities/xss_s/">XSS (Stored)</a></li>
+<li class=""><a href="vulnerabilities/csp/">CSP Bypass</a></li>
+<li class=""><a href="vulnerabilities/javascript/">JavaScript</a></li>
+<li class=""><a href="vulnerabilities/open_redirect/">Open HTTP Redirect</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="security.php">DVWA Security</a></li>
+<li class=""><a href="phpinfo.php">PHP Info</a></li>
+<li class=""><a href="about.php">About</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="logout.php">Logout</a></li>
+</ul>
+				</div>
+
+			</div>
+
+			<div id="main_body">
+
+				
+<div class="body_padded">
+	<h1>Welcome to Damn Vulnerable Web Application!</h1>
+	<p>Damn Vulnerable Web Application (DVWA) is a PHP/MySQL web application that is damn vulnerable. Its main goal is to be an aid for security professionals to test their skills and tools in a legal environment, help web developers better understand the processes of securing web applications and to aid both students & teachers to learn about web application security in a controlled class room environment.</p>
+	<p>The aim of DVWA is to <em>practice some of the most common web vulnerabilities</em>, with <em>various levels of difficultly</em>, with a simple straightforward interface.</p>
+	<hr />
+	<br />
+
+	<h2>General Instructions</h2>
+	<p>It is up to the user how they approach DVWA. Either by working through every module at a fixed level, or selecting any module and working up to reach the highest level they can before moving onto the next one. There is not a fixed object to complete a module; however users should feel that they have successfully exploited the system as best as they possible could by using that particular vulnerability.</p>
+	<p>Please note, there are <em>both documented and undocumented vulnerability</em> with this software. This is intentional. You are encouraged to try and discover as many issues as possible.</p>
+	<p>There is a help button at the bottom of each page, which allows you to view hints & tips for that vulnerability. There are also additional links for further background reading, which relates to that security issue.</p>
+	<hr />
+	<br />
+
+	<h2>WARNING!</h2>
+	<p>Damn Vulnerable Web Application is damn vulnerable! <em>Do not upload it to your hosting provider's public html folder or any Internet facing servers</em>, as they will be compromised. It is recommend using a virtual machine (such as <a href="https://www.virtualbox.org/" target="_blank">VirtualBox</a> or <a href="https://www.vmware.com/" target="_blank">VMware</a>), which is set to NAT networking mode. Inside a guest machine, you can download and install <a href="https://www.apachefriends.org/" target="_blank">XAMPP</a> for the web server and database.</p>
+	<br />
+	<h3>Disclaimer</h3>
+	<p>We do not take responsibility for the way in which any one uses this application (DVWA). We have made the purposes of the application clear and it should not be used maliciously. We have given warnings and taken measures to prevent users from installing DVWA on to live web servers. If your web server is compromised via an installation of DVWA it is not our responsibility it is the responsibility of the person/s who uploaded and installed it.</p>
+	<hr />
+	<br />
+
+	<h2>More Training Resources</h2>
+	<p>DVWA aims to cover the most commonly seen vulnerabilities found in today's web applications. However there are plenty of other issues with web applications. Should you wish to explore any additional attack vectors, or want more difficult challenges, you may wish to look into the following other projects:</p>
+	<ul>
+		<li><a href="https://github.com/webpwnized/mutillidae" target="_blank">Mutillidae</a></li>
+		<li><a href="https://owasp.org/www-project-vulnerable-web-applications-directory" target="_blank">OWASP Vulnerable Web Applications Directory</a></li>
+	</ul>
+	<hr />
+	<br />
+</div>
+				<br /><br />
+				
+
+			</div>
+
+			<div class="clear">
+			</div>
+
+			<div id="system_info">
+				<div align="left"><em>Username:</em> Unknown<br /><em>Security Level:</em> low<br /><em>Locale:</em> en<br /><em>SQLi DB:</em> mysql</div>
+			</div>
+
+			<div id="footer">
+
+				<p>Damn Vulnerable Web Application (DVWA)</p>
+				<script src='dvwa/js/add_event_listeners.js'></script>
+
+			</div>
+
+		</div>
+
+	</body>
+
+</html>
+NSE: TCP 192.168.1.8:60844 < 178.79.134.182:4280 | HTTP/1.1 404 Not Found
+Server: nginx/1.31.6
+Date: Sat, 26 Sep 2026 02:25:47 GMT
+Content-Type: text/html; charset=iso-8859-1
+Content-Length: 320
+Connection: close
+
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+<title>404 Not Found</title>
+</head><body>
+<h1>Not Found</h1>
+<p>The requested URL was not found on this server.</p>
+<hr>
+<address>Apache/2.4.68 (Debian) Server at pentest-ground.com Port 80</address>
+</body></html>
+
+NSE: TCP 192.168.1.8:60834 < 178.79.134.182:4280 | HTTP/1.1 404 Not Found
+Server: nginx/1.31.6
+Date: Sat, 26 Sep 2026 02:25:47 GMT
+Content-Type: text/html; charset=iso-8859-1
+Content-Length: 320
+Connection: close
+
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+<title>404 Not Found</title>
+</head><body>
+<h1>Not Found</h1>
+<p>The requested URL was not found on this server.</p>
+<hr>
+<address>Apache/2.4.68 (Debian) Server at pentest-ground.com Port 80</address>
+</body></html>
+
+NSE: TCP 192.168.1.8:60834 > 178.79.134.182:4280 | CLOSE
+NSE: TCP 192.168.1.8:60844 > 178.79.134.182:4280 | CLOSE
+NSE: TCP 192.168.1.8:60852 > 178.79.134.182:4280 | CLOSE
+NSE: TCP 192.168.1.8:60858 > 178.79.134.182:4280 | CLOSE
+NSE: TCP 192.168.1.8:43210 > 178.79.134.182:4280 | CONNECT
+NSE: TCP 192.168.1.8:43214 > 178.79.134.182:4280 | CONNECT
+NSE: TCP 192.168.1.8:43210 > 178.79.134.182:4280 | 00000000: 47 45 54 20 2f 48 4e 41 50 31 20 48 54 54 50 2f GET /HNAP1 HTTP/
+00000010: 31 2e 31 0d 0a 48 6f 73 74 3a 20 70 65 6e 74 65 1.1  Host: pente
+00000020: 73 74 2d 67 72 6f 75 6e 64 2e 63 6f 6d 3a 34 32 st-ground.com:42
+00000030: 38 30 0d 0a 43 6f 6e 6e 65 63 74 69 6f 6e 3a 20 80  Connection: 
+00000040: 63 6c 6f 73 65 0d 0a 55 73 65 72 2d 41 67 65 6e close  User-Agen
+00000050: 74 3a 20 4d 6f 7a 69 6c 6c 61 2f 35 2e 30 20 28 t: Mozilla/5.0 (
+00000060: 63 6f 6d 70 61 74 69 62 6c 65 3b 20 4e 6d 61 70 compatible; Nmap
+00000070: 20 53 63 72 69 70 74 69 6e 67 20 45 6e 67 69 6e  Scripting Engin
+00000080: 65 3b 20 68 74 74 70 73 3a 2f 2f 6e 6d 61 70 2e e; https://nmap.
+00000090: 6f 72 67 2f 62 6f 6f 6b 2f 6e 73 65 2e 68 74 6d org/book/nse.htm
+000000a0: 6c 29 0d 0a 0d 0a                               l)    
+
+NSE: TCP 192.168.1.8:43214 > 178.79.134.182:4280 | 00000000: 57 43 58 41 20 2f 20 48 54 54 50 2f 31 2e 31 0d WCXA / HTTP/1.1 
+00000010: 0a 48 6f 73 74 3a 20 70 65 6e 74 65 73 74 2d 67  Host: pentest-g
+00000020: 72 6f 75 6e 64 2e 63 6f 6d 3a 34 32 38 30 0d 0a round.com:4280  
+00000030: 43 6f 6e 6e 65 63 74 69 6f 6e 3a 20 63 6c 6f 73 Connection: clos
+00000040: 65 0d 0a 55 73 65 72 2d 41 67 65 6e 74 3a 20 4d e  User-Agent: M
+00000050: 6f 7a 69 6c 6c 61 2f 35 2e 30 20 28 63 6f 6d 70 ozilla/5.0 (comp
+00000060: 61 74 69 62 6c 65 3b 20 4e 6d 61 70 20 53 63 72 atible; Nmap Scr
+00000070: 69 70 74 69 6e 67 20 45 6e 67 69 6e 65 3b 20 68 ipting Engine; h
+00000080: 74 74 70 73 3a 2f 2f 6e 6d 61 70 2e 6f 72 67 2f ttps://nmap.org/
+00000090: 62 6f 6f 6b 2f 6e 73 65 2e 68 74 6d 6c 29 0d 0a book/nse.html)  
+000000a0: 0d 0a                                             
+
+NSE: TCP 192.168.1.8:43210 > 178.79.134.182:4280 | SEND
+NSE: TCP 192.168.1.8:43214 > 178.79.134.182:4280 | SEND
+NSE: TCP 192.168.1.8:43216 > 178.79.134.182:4280 | CONNECT
+NSE: TCP 192.168.1.8:43230 > 178.79.134.182:4280 | CONNECT
+NSE: TCP 192.168.1.8:43216 > 178.79.134.182:4280 | 00000000: 47 45 54 20 2f 65 76 6f 78 2f 61 62 6f 75 74 20 GET /evox/about 
+00000010: 48 54 54 50 2f 31 2e 31 0d 0a 48 6f 73 74 3a 20 HTTP/1.1  Host: 
+00000020: 70 65 6e 74 65 73 74 2d 67 72 6f 75 6e 64 2e 63 pentest-ground.c
+00000030: 6f 6d 3a 34 32 38 30 0d 0a 43 6f 6e 6e 65 63 74 om:4280  Connect
+00000040: 69 6f 6e 3a 20 63 6c 6f 73 65 0d 0a 55 73 65 72 ion: close  User
+00000050: 2d 41 67 65 6e 74 3a 20 4d 6f 7a 69 6c 6c 61 2f -Agent: Mozilla/
+00000060: 35 2e 30 20 28 63 6f 6d 70 61 74 69 62 6c 65 3b 5.0 (compatible;
+00000070: 20 4e 6d 61 70 20 53 63 72 69 70 74 69 6e 67 20  Nmap Scripting 
+00000080: 45 6e 67 69 6e 65 3b 20 68 74 74 70 73 3a 2f 2f Engine; https://
+00000090: 6e 6d 61 70 2e 6f 72 67 2f 62 6f 6f 6b 2f 6e 73 nmap.org/book/ns
+000000a0: 65 2e 68 74 6d 6c 29 0d 0a 0d 0a                e.html)    
+
+NSE: TCP 192.168.1.8:43230 > 178.79.134.182:4280 | 00000000: 48 45 41 44 20 2f 20 48 54 54 50 2f 31 2e 31 0d HEAD / HTTP/1.1 
+00000010: 0a 48 6f 73 74 3a 20 70 65 6e 74 65 73 74 2d 67  Host: pentest-g
+00000020: 72 6f 75 6e 64 2e 63 6f 6d 3a 34 32 38 30 0d 0a round.com:4280  
+00000030: 43 6f 6e 6e 65 63 74 69 6f 6e 3a 20 63 6c 6f 73 Connection: clos
+00000040: 65 0d 0a 55 73 65 72 2d 41 67 65 6e 74 3a 20 4d e  User-Agent: M
+00000050: 6f 7a 69 6c 6c 61 2f 35 2e 30 20 28 63 6f 6d 70 ozilla/5.0 (comp
+00000060: 61 74 69 62 6c 65 3b 20 4e 6d 61 70 20 53 63 72 atible; Nmap Scr
+00000070: 69 70 74 69 6e 67 20 45 6e 67 69 6e 65 3b 20 68 ipting Engine; h
+00000080: 74 74 70 73 3a 2f 2f 6e 6d 61 70 2e 6f 72 67 2f ttps://nmap.org/
+00000090: 62 6f 6f 6b 2f 6e 73 65 2e 68 74 6d 6c 29 0d 0a book/nse.html)  
+000000a0: 0d 0a                                             
+
+NSE: TCP 192.168.1.8:43216 > 178.79.134.182:4280 | SEND
+NSE: TCP 192.168.1.8:43230 > 178.79.134.182:4280 | SEND
+NSE: TCP 192.168.1.8:43210 < 178.79.134.182:4280 | HTTP/1.1 404 Not Found
+Server: nginx/1.31.6
+Date: Sat, 26 Sep 2026 02:25:48 GMT
+Content-Type: text/html; charset=iso-8859-1
+Content-Length: 320
+Connection: close
+
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+<title>404 Not Found</title>
+</head><body>
+<h1>Not Found</h1>
+<p>The requested URL was not found on this server.</p>
+<hr>
+<address>Apache/2.4.68 (Debian) Server at pentest-ground.com Port 80</address>
+</body></html>
+
+NSE: TCP 192.168.1.8:43210 > 178.79.134.182:4280 | CLOSE
+NSE: TCP 192.168.1.8:43214 < 178.79.134.182:4280 | HTTP/1.1 200 OK
+Server: nginx/1.31.6
+Date: Sat, 26 Sep 2026 02:25:48 GMT
+Content-Type: text/html;charset=utf-8
+Content-Length: 5930
+Connection: close
+X-Powered-By: PHP/8.5.11
+Set-Cookie: security=low; path=/
+Set-Cookie: PHPSESSID=7d17016e70f2fd37aaee675b7d743bae; expires=Sun, 27 Sep 2026 02:25:48 GMT; Max-Age=86400; path=/
+Expires: Tue, 23 Jun 2009 12:00:00 GMT
+Cache-Control: no-cache, must-revalidate
+Pragma: no-cache
+Vary: Accept-Encoding
+
+<!DOCTYPE html>
+
+<html lang="en-GB">
+
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+
+		<title>Welcome :: Damn Vulnerable Web Application (DVWA)</title>
+
+		<link rel="stylesheet" type="text/css" href="dvwa/css/main.css" />
+
+		<link rel="icon" type="\image/ico" href="favicon.ico" />
+
+		<script type="text/javascript" src="dvwa/js/dvwaPage.js"></script>
+
+	</head>
+
+	<body class="home">
+		<div id="container">
+
+			<div id="header">
+
+				<img src="dvwa/images/logo.png" alt="Damn Vulnerable Web Application" />
+
+			</div>
+
+			<div id="main_menu">
+
+				<div id="main_menu_padded">
+				<ul class="menuBlocks"><li class="selected"><a href=".">Home</a></li>
+<li class=""><a href="instructions.php">Instructions</a></li>
+<li class=""><a href="setup.php">Setup / Reset DB</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="vulnerabilities/brute/">Brute Force</a></li>
+<li class=""><a href="vulnerabilities/exec/">Command Injection</a></li>
+<li class=""><a href="vulnerabilities/csrf/">CSRF</a></li>
+<li class=""><a href="vulnerabilities/fi/.?page=include.php">File Inclusion</a></li>
+<li class=""><a href="vulnerabilities/upload/">File Upload</a></li>
+<li class=""><a href="vulnerabilities/captcha/">Insecure CAPTCHA</a></li>
+<li class=""><a href="vulnerabilities/sqli/">SQL Injection</a></li>
+<li class=""><a href="vulnerabilities/sqli_blind/">SQL Injection (Blind)</a></li>
+<li class=""><a href="vulnerabilities/weak_id/">Weak Session IDs</a></li>
+<li class=""><a href="vulnerabilities/xss_d/">XSS (DOM)</a></li>
+<li class=""><a href="vulnerabilities/xss_r/">XSS (Reflected)</a></li>
+<li class=""><a href="vulnerabilities/xss_s/">XSS (Stored)</a></li>
+<li class=""><a href="vulnerabilities/csp/">CSP Bypass</a></li>
+<li class=""><a href="vulnerabilities/javascript/">JavaScript</a></li>
+<li class=""><a href="vulnerabilities/open_redirect/">Open HTTP Redirect</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="security.php">DVWA Security</a></li>
+<li class=""><a href="phpinfo.php">PHP Info</a></li>
+<li class=""><a href="about.php">About</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="logout.php">Logout</a></li>
+</ul>
+				</div>
+
+			</div>
+
+			<div id="main_body">
+
+				
+<div class="body_padded">
+	<h1>Welcome to Damn Vulnerable Web Application!</h1>
+	<p>Damn Vulnerable Web Application (DVWA) is a PHP/MySQL web application that is damn vulnerable. Its main goal is to be an aid for security professionals to test their skills and tools in a legal environment, help web developers better understand the processes of securing web applications and to aid both students & teachers to learn about web application security in a controlled class room environment.</p>
+	<p>The aim of DVWA is to <em>practice some of the most common web vulnerabilities</em>, with <em>various levels of difficultly</em>, with a simple straightforward interface.</p>
+	<hr />
+	<br />
+
+	<h2>General Instructions</h2>
+	<p>It is up to the user how they approach DVWA. Either by working through every module at a fixed level, or selecting any module and working up to reach the highest level they can before moving onto the next one. There is not a fixed object to complete a module; however users should feel that they have successfully exploited the system as best as they possible could by using that particular vulnerability.</p>
+	<p>Please note, there are <em>both documented and undocumented vulnerability</em> with this software. This is intentional. You are encouraged to try and discover as many issues as possible.</p>
+	<p>There is a help button at the bottom of each page, which allows you to view hints & tips for that vulnerability. There are also additional links for further background reading, which relates to that security issue.</p>
+	<hr />
+	<br />
+
+	<h2>WARNING!</h2>
+	<p>Damn Vulnerable Web Application is damn vulnerable! <em>Do not upload it to your hosting provider's public html folder or any Internet facing servers</em>, as they will be compromised. It is recommend using a virtual machine (such as <a href="https://www.virtualbox.org/" target="_blank">VirtualBox</a> or <a href="https://www.vmware.com/" target="_blank">VMware</a>), which is set to NAT networking mode. Inside a guest machine, you can download and install <a href="https://www.apachefriends.org/" target="_blank">XAMPP</a> for the web server and database.</p>
+	<br />
+	<h3>Disclaimer</h3>
+	<p>We do not take responsibility for the way in which any one uses this application (DVWA). We have made the purposes of the application clear and it should not be used maliciously. We have given warnings and taken measures to prevent users from installing DVWA on to live web servers. If your web server is compromised via an installation of DVWA it is not our responsibility it is the responsibility of the person/s who uploaded and installed it.</p>
+	<hr />
+	<br />
+
+	<h2>More Training Resources</h2>
+	<p>DVWA aims to cover the most commonly seen vulnerabilities found in today's web applications. However there are plenty of other issues with web applications. Should you wish to explore any additional attack vectors, or want more difficult challenges, you may wish to look into the following other projects:</p>
+	<ul>
+		<li><a href="https://github.com/webpwnized/mutillidae" target="_blank">Mutillidae</a></li>
+		<li><a href="https://owasp.org/www-project-vulnerable-web-applications-directory" target="_blank">OWASP Vulnerable Web Applications Directory</a></li>
+	</ul>
+	<hr />
+	<br />
+</div>
+				<br /><br />
+				
+
+			</div>
+
+			<div class="clear">
+			</div>
+
+			<div id="system_info">
+				<div align="left"><em>Username:</em> Unknown<br /><em>Security Level:</em> low<br /><em>Locale:</em> en<br /><em>SQLi DB:</em> mysql</div>
+			</div>
+
+			<div id="footer">
+
+				<p>Damn Vulnerable Web Application (DVWA)</p>
+				<script src='dvwa/js/add_event_listeners.js'></script>
+
+			</div>
+
+		</div>
+
+	</body>
+
+</html>
+NSE: TCP 192.168.1.8:43216 < 178.79.134.182:4280 | HTTP/1.1 404 Not Found
+Server: nginx/1.31.6
+Date: Sat, 26 Sep 2026 02:25:48 GMT
+Content-Type: text/html; charset=iso-8859-1
+Content-Length: 320
+Connection: close
+
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+<title>404 Not Found</title>
+</head><body>
+<h1>Not Found</h1>
+<p>The requested URL was not found on this server.</p>
+<hr>
+<address>Apache/2.4.68 (Debian) Server at pentest-ground.com Port 80</address>
+</body></html>
+
+NSE: TCP 192.168.1.8:43230 < 178.79.134.182:4280 | 00000000: 48 54 54 50 2f 31 2e 31 20 32 30 30 20 4f 4b 0d HTTP/1.1 200 OK 
+00000010: 0a 53 65 72 76 65 72 3a 20 6e 67 69 6e 78 2f 31  Server: nginx/1
+00000020: 2e 33 31 2e 36 0d 0a 44 61 74 65 3a 20 53 61 74 .31.6  Date: Sat
+00000030: 2c 20 32 36 20 53 65 70 20 32 30 32 36 20 30 32 , 26 Sep 2026 02
+00000040: 3a 32 35 3a 34 38 20 47 4d 54 0d 0a 43 6f 6e 74 :25:48 GMT  Cont
+00000050: 65 6e 74 2d 54 79 70 65 3a 20 74 65 78 74 2f 68 ent-Type: text/h
+00000060: 74 6d 6c 3b 63 68 61 72 73 65 74 3d 75 74 66 2d tml;charset=utf-
+00000070: 38 0d 0a 43 6f 6e 6e 65 63 74 69 6f 6e 3a 20 63 8  Connection: c
+00000080: 6c 6f 73 65 0d 0a 58 2d 50 6f 77 65 72 65 64 2d lose  X-Powered-
+00000090: 42 79 3a 20 50 48 50 2f 38 2e 35 2e 31 31 0d 0a By: PHP/8.5.11  
+000000a0: 53 65 74 2d 43 6f 6f 6b 69 65 3a 20 73 65 63 75 Set-Cookie: secu
+000000b0: 72 69 74 79 3d 6c 6f 77 3b 20 70 61 74 68 3d 2f rity=low; path=/
+000000c0: 0d 0a 53 65 74 2d 43 6f 6f 6b 69 65 3a 20 50 48   Set-Cookie: PH
+000000d0: 50 53 45 53 53 49 44 3d 65 39 30 65 32 34 38 32 PSESSID=e90e2482
+000000e0: 61 63 61 30 62 39 65 38 31 39 31 64 38 33 36 39 aca0b9e8191d8369
+000000f0: 63 34 64 34 31 66 66 66 3b 20 65 78 70 69 72 65 c4d41fff; expire
+00000100: 73 3d 53 75 6e 2c 20 32 37 20 53 65 70 20 32 30 s=Sun, 27 Sep 20
+00000110: 32 36 20 30 32 3a 32 35 3a 34 38 20 47 4d 54 3b 26 02:25:48 GMT;
+00000120: 20 4d 61 78 2d 41 67 65 3d 38 36 34 30 30 3b 20  Max-Age=86400; 
+00000130: 70 61 74 68 3d 2f 0d 0a 45 78 70 69 72 65 73 3a path=/  Expires:
+00000140: 20 54 75 65 2c 20 32 33 20 4a 75 6e 20 32 30 30  Tue, 23 Jun 200
+00000150: 39 20 31 32 3a 30 30 3a 30 30 20 47 4d 54 0d 0a 9 12:00:00 GMT  
+00000160: 43 61 63 68 65 2d 43 6f 6e 74 72 6f 6c 3a 20 6e Cache-Control: n
+00000170: 6f 2d 63 61 63 68 65 2c 20 6d 75 73 74 2d 72 65 o-cache, must-re
+00000180: 76 61 6c 69 64 61 74 65 0d 0a 50 72 61 67 6d 61 validate  Pragma
+00000190: 3a 20 6e 6f 2d 63 61 63 68 65 0d 0a 0d 0a       : no-cache    
+
+NSE: TCP 192.168.1.8:43216 > 178.79.134.182:4280 | CLOSE
+NSE: TCP 192.168.1.8:43214 > 178.79.134.182:4280 | CLOSE
+NSE: TCP 192.168.1.8:43230 EOF 178.79.134.182:4280 | RECEIVE
+NSE: TCP 192.168.1.8:43230 > 178.79.134.182:4280 | CLOSE
+NSE: TCP 192.168.1.8:43236 > 178.79.134.182:4280 | CONNECT
+NSE: TCP 192.168.1.8:43236 > 178.79.134.182:4280 | 00000000: 47 45 54 20 2f 20 48 54 54 50 2f 31 2e 31 0d 0a GET / HTTP/1.1  
+00000010: 48 6f 73 74 3a 20 70 65 6e 74 65 73 74 2d 67 72 Host: pentest-gr
+00000020: 6f 75 6e 64 2e 63 6f 6d 3a 34 32 38 30 0d 0a 43 ound.com:4280  C
+00000030: 6f 6e 6e 65 63 74 69 6f 6e 3a 20 63 6c 6f 73 65 onnection: close
+00000040: 0d 0a 55 73 65 72 2d 41 67 65 6e 74 3a 20 4d 6f   User-Agent: Mo
+00000050: 7a 69 6c 6c 61 2f 35 2e 30 20 28 63 6f 6d 70 61 zilla/5.0 (compa
+00000060: 74 69 62 6c 65 3b 20 4e 6d 61 70 20 53 63 72 69 tible; Nmap Scri
+00000070: 70 74 69 6e 67 20 45 6e 67 69 6e 65 3b 20 68 74 pting Engine; ht
+00000080: 74 70 73 3a 2f 2f 6e 6d 61 70 2e 6f 72 67 2f 62 tps://nmap.org/b
+00000090: 6f 6f 6b 2f 6e 73 65 2e 68 74 6d 6c 29 0d 0a 0d ook/nse.html)   
+000000a0: 0a                                               
+
+NSE: TCP 192.168.1.8:43236 > 178.79.134.182:4280 | SEND
+NSE: TCP 192.168.1.8:43236 < 178.79.134.182:4280 | HTTP/1.1 200 OK
+Server: nginx/1.31.6
+Date: Sat, 26 Sep 2026 02:25:49 GMT
+Content-Type: text/html;charset=utf-8
+Content-Length: 5930
+Connection: close
+X-Powered-By: PHP/8.5.11
+Set-Cookie: security=low; path=/
+Set-Cookie: PHPSESSID=f4e76f262cb8ebe843e31c1a5d6f1ee5; expires=Sun, 27 Sep 2026 02:25:49 GMT; Max-Age=86400; path=/
+Expires: Tue, 23 Jun 2009 12:00:00 GMT
+Cache-Control: no-cache, must-revalidate
+Pragma: no-cache
+Vary: Accept-Encoding
+
+<!DOCTYPE html>
+
+<html lang="en-GB">
+
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+
+		<title>Welcome :: Damn Vulnerable Web Application (DVWA)</title>
+
+		<link rel="stylesheet" type="text/css" href="dvwa/css/main.css" />
+
+		<link rel="icon" type="\image/ico" href="favicon.ico" />
+
+		<script type="text/javascript" src="dvwa/js/dvwaPage.js"></script>
+
+	</head>
+
+	<body class="home">
+		<div id="container">
+
+			<div id="header">
+
+				<img src="dvwa/images/logo.png" alt="Damn Vulnerable Web Application" />
+
+			</div>
+
+			<div id="main_menu">
+
+				<div id="main_menu_padded">
+				<ul class="menuBlocks"><li class="selected"><a href=".">Home</a></li>
+<li class=""><a href="instructions.php">Instructions</a></li>
+<li class=""><a href="setup.php">Setup / Reset DB</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="vulnerabilities/brute/">Brute Force</a></li>
+<li class=""><a href="vulnerabilities/exec/">Command Injection</a></li>
+<li class=""><a href="vulnerabilities/csrf/">CSRF</a></li>
+<li class=""><a href="vulnerabilities/fi/.?page=include.php">File Inclusion</a></li>
+<li class=""><a href="vulnerabilities/upload/">File Upload</a></li>
+<li class=""><a href="vulnerabilities/captcha/">Insecure CAPTCHA</a></li>
+<li class=""><a href="vulnerabilities/sqli/">SQL Injection</a></li>
+<li class=""><a href="vulnerabilities/sqli_blind/">SQL Injection (Blind)</a></li>
+<li class=""><a href="vulnerabilities/weak_id/">Weak Session IDs</a></li>
+<li class=""><a href="vulnerabilities/xss_d/">XSS (DOM)</a></li>
+<li class=""><a href="vulnerabilities/xss_r/">XSS (Reflected)</a></li>
+<li class=""><a href="vulnerabilities/xss_s/">XSS (Stored)</a></li>
+<li class=""><a href="vulnerabilities/csp/">CSP Bypass</a></li>
+<li class=""><a href="vulnerabilities/javascript/">JavaScript</a></li>
+<li class=""><a href="vulnerabilities/open_redirect/">Open HTTP Redirect</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="security.php">DVWA Security</a></li>
+<li class=""><a href="phpinfo.php">PHP Info</a></li>
+<li class=""><a href="about.php">About</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="logout.php">Logout</a></li>
+</ul>
+				</div>
+
+			</div>
+
+			<div id="main_body">
+
+				
+<div class="body_padded">
+	<h1>Welcome to Damn Vulnerable Web Application!</h1>
+	<p>Damn Vulnerable Web Application (DVWA) is a PHP/MySQL web application that is damn vulnerable. Its main goal is to be an aid for security professionals to test their skills and tools in a legal environment, help web developers better understand the processes of securing web applications and to aid both students & teachers to learn about web application security in a controlled class room environment.</p>
+	<p>The aim of DVWA is to <em>practice some of the most common web vulnerabilities</em>, with <em>various levels of difficultly</em>, with a simple straightforward interface.</p>
+	<hr />
+	<br />
+
+	<h2>General Instructions</h2>
+	<p>It is up to the user how they approach DVWA. Either by working through every module at a fixed level, or selecting any module and working up to reach the highest level they can before moving onto the next one. There is not a fixed object to complete a module; however users should feel that they have successfully exploited the system as best as they possible could by using that particular vulnerability.</p>
+	<p>Please note, there are <em>both documented and undocumented vulnerability</em> with this software. This is intentional. You are encouraged to try and discover as many issues as possible.</p>
+	<p>There is a help button at the bottom of each page, which allows you to view hints & tips for that vulnerability. There are also additional links for further background reading, which relates to that security issue.</p>
+	<hr />
+	<br />
+
+	<h2>WARNING!</h2>
+	<p>Damn Vulnerable Web Application is damn vulnerable! <em>Do not upload it to your hosting provider's public html folder or any Internet facing servers</em>, as they will be compromised. It is recommend using a virtual machine (such as <a href="https://www.virtualbox.org/" target="_blank">VirtualBox</a> or <a href="https://www.vmware.com/" target="_blank">VMware</a>), which is set to NAT networking mode. Inside a guest machine, you can download and install <a href="https://www.apachefriends.org/" target="_blank">XAMPP</a> for the web server and database.</p>
+	<br />
+	<h3>Disclaimer</h3>
+	<p>We do not take responsibility for the way in which any one uses this application (DVWA). We have made the purposes of the application clear and it should not be used maliciously. We have given warnings and taken measures to prevent users from installing DVWA on to live web servers. If your web server is compromised via an installation of DVWA it is not our responsibility it is the responsibility of the person/s who uploaded and installed it.</p>
+	<hr />
+	<br />
+
+	<h2>More Training Resources</h2>
+	<p>DVWA aims to cover the most commonly seen vulnerabilities found in today's web applications. However there are plenty of other issues with web applications. Should you wish to explore any additional attack vectors, or want more difficult challenges, you may wish to look into the following other projects:</p>
+	<ul>
+		<li><a href="https://github.com/webpwnized/mutillidae" target="_blank">Mutillidae</a></li>
+		<li><a href="https://owasp.org/www-project-vulnerable-web-applications-directory" target="_blank">OWASP Vulnerable Web Applications Directory</a></li>
+	</ul>
+	<hr />
+	<br />
+</div>
+				<br /><br />
+				
+
+			</div>
+
+			<div class="clear">
+			</div>
+
+			<div id="system_info">
+				<div align="left"><em>Username:</em> Unknown<br /><em>Security Level:</em> low<br /><em>Locale:</em> en<br /><em>SQLi DB:</em> mysql</div>
+			</div>
+
+			<div id="footer">
+
+				<p>Damn Vulnerable Web Application (DVWA)</p>
+				<script src='dvwa/js/add_event_listeners.js'></script>
+
+			</div>
+
+		</div>
+
+	</body>
+
+</html>
+NSE: TCP 192.168.1.8:43236 > 178.79.134.182:4280 | CLOSE
+NSE: TCP 192.168.1.8:43238 > 178.79.134.182:4280 | CONNECT
+NSE: TCP 192.168.1.8:43238 > 178.79.134.182:4280 | 00000000: 48 45 41 44 20 2f 20 48 54 54 50 2f 31 2e 31 0d HEAD / HTTP/1.1 
+00000010: 0a 48 6f 73 74 3a 20 70 65 6e 74 65 73 74 2d 67  Host: pentest-g
+00000020: 72 6f 75 6e 64 2e 63 6f 6d 3a 34 32 38 30 0d 0a round.com:4280  
+00000030: 43 6f 6e 6e 65 63 74 69 6f 6e 3a 20 63 6c 6f 73 Connection: clos
+00000040: 65 0d 0a 55 73 65 72 2d 41 67 65 6e 74 3a 20 4d e  User-Agent: M
+00000050: 6f 7a 69 6c 6c 61 2f 35 2e 30 20 28 63 6f 6d 70 ozilla/5.0 (comp
+00000060: 61 74 69 62 6c 65 3b 20 4e 6d 61 70 20 53 63 72 atible; Nmap Scr
+00000070: 69 70 74 69 6e 67 20 45 6e 67 69 6e 65 3b 20 68 ipting Engine; h
+00000080: 74 74 70 73 3a 2f 2f 6e 6d 61 70 2e 6f 72 67 2f ttps://nmap.org/
+00000090: 62 6f 6f 6b 2f 6e 73 65 2e 68 74 6d 6c 29 0d 0a book/nse.html)  
+000000a0: 0d 0a                                             
+
+NSE: TCP 192.168.1.8:43238 > 178.79.134.182:4280 | SEND
+NSE: TCP 192.168.1.8:43238 < 178.79.134.182:4280 | 00000000: 48 54 54 50 2f 31 2e 31 20 32 30 30 20 4f 4b 0d HTTP/1.1 200 OK 
+00000010: 0a 53 65 72 76 65 72 3a 20 6e 67 69 6e 78 2f 31  Server: nginx/1
+00000020: 2e 33 31 2e 36 0d 0a 44 61 74 65 3a 20 53 61 74 .31.6  Date: Sat
+00000030: 2c 20 32 36 20 53 65 70 20 32 30 32 36 20 30 32 , 26 Sep 2026 02
+00000040: 3a 32 35 3a 35 30 20 47 4d 54 0d 0a 43 6f 6e 74 :25:50 GMT  Cont
+00000050: 65 6e 74 2d 54 79 70 65 3a 20 74 65 78 74 2f 68 ent-Type: text/h
+00000060: 74 6d 6c 3b 63 68 61 72 73 65 74 3d 75 74 66 2d tml;charset=utf-
+00000070: 38 0d 0a 43 6f 6e 6e 65 63 74 69 6f 6e 3a 20 63 8  Connection: c
+00000080: 6c 6f 73 65 0d 0a 58 2d 50 6f 77 65 72 65 64 2d lose  X-Powered-
+00000090: 42 79 3a 20 50 48 50 2f 38 2e 35 2e 31 31 0d 0a By: PHP/8.5.11  
+000000a0: 53 65 74 2d 43 6f 6f 6b 69 65 3a 20 73 65 63 75 Set-Cookie: secu
+000000b0: 72 69 74 79 3d 6c 6f 77 3b 20 70 61 74 68 3d 2f rity=low; path=/
+000000c0: 0d 0a 53 65 74 2d 43 6f 6f 6b 69 65 3a 20 50 48   Set-Cookie: PH
+000000d0: 50 53 45 53 53 49 44 3d 37 63 30 63 66 30 37 65 PSESSID=7c0cf07e
+000000e0: 32 64 30 61 61 64 34 65 66 38 31 38 63 35 64 62 2d0aad4ef818c5db
+000000f0: 61 38 64 63 30 30 35 37 3b 20 65 78 70 69 72 65 a8dc0057; expire
+00000100: 73 3d 53 75 6e 2c 20 32 37 20 53 65 70 20 32 30 s=Sun, 27 Sep 20
+00000110: 32 36 20 30 32 3a 32 35 3a 35 30 20 47 4d 54 3b 26 02:25:50 GMT;
+00000120: 20 4d 61 78 2d 41 67 65 3d 38 36 34 30 30 3b 20  Max-Age=86400; 
+00000130: 70 61 74 68 3d 2f 0d 0a 45 78 70 69 72 65 73 3a path=/  Expires:
+00000140: 20 54 75 65 2c 20 32 33 20 4a 75 6e 20 32 30 30  Tue, 23 Jun 200
+00000150: 39 20 31 32 3a 30 30 3a 30 30 20 47 4d 54 0d 0a 9 12:00:00 GMT  
+00000160: 43 61 63 68 65 2d 43 6f 6e 74 72 6f 6c 3a 20 6e Cache-Control: n
+00000170: 6f 2d 63 61 63 68 65 2c 20 6d 75 73 74 2d 72 65 o-cache, must-re
+00000180: 76 61 6c 69 64 61 74 65 0d 0a 50 72 61 67 6d 61 validate  Pragma
+00000190: 3a 20 6e 6f 2d 63 61 63 68 65 0d 0a 0d 0a       : no-cache    
+
+NSE: TCP 192.168.1.8:43238 EOF 178.79.134.182:4280 | RECEIVE
+NSE: TCP 192.168.1.8:43238 > 178.79.134.182:4280 | CLOSE
+NSE: TCP 192.168.1.8:43250 > 178.79.134.182:4280 | CONNECT
+NSE: TCP 192.168.1.8:43250 > 178.79.134.182:4280 | 00000000: 50 4f 53 54 20 2f 20 48 54 54 50 2f 31 2e 31 0d POST / HTTP/1.1 
+00000010: 0a 48 6f 73 74 3a 20 70 65 6e 74 65 73 74 2d 67  Host: pentest-g
+00000020: 72 6f 75 6e 64 2e 63 6f 6d 3a 34 32 38 30 0d 0a round.com:4280  
+00000030: 43 6f 6e 74 65 6e 74 2d 4c 65 6e 67 74 68 3a 20 Content-Length: 
+00000040: 30 0d 0a 43 6f 6e 6e 65 63 74 69 6f 6e 3a 20 63 0  Connection: c
+00000050: 6c 6f 73 65 0d 0a 55 73 65 72 2d 41 67 65 6e 74 lose  User-Agent
+00000060: 3a 20 4d 6f 7a 69 6c 6c 61 2f 35 2e 30 20 28 63 : Mozilla/5.0 (c
+00000070: 6f 6d 70 61 74 69 62 6c 65 3b 20 4e 6d 61 70 20 ompatible; Nmap 
+00000080: 53 63 72 69 70 74 69 6e 67 20 45 6e 67 69 6e 65 Scripting Engine
+00000090: 3b 20 68 74 74 70 73 3a 2f 2f 6e 6d 61 70 2e 6f ; https://nmap.o
+000000a0: 72 67 2f 62 6f 6f 6b 2f 6e 73 65 2e 68 74 6d 6c rg/book/nse.html
+000000b0: 29 0d 0a 0d 0a                                  )    
+
+NSE: TCP 192.168.1.8:43250 > 178.79.134.182:4280 | SEND
+NSE: TCP 192.168.1.8:43250 < 178.79.134.182:4280 | HTTP/1.1 200 OK
+Server: nginx/1.31.6
+Date: Sat, 26 Sep 2026 02:25:51 GMT
+Content-Type: text/html;charset=utf-8
+Content-Length: 5930
+Connection: close
+X-Powered-By: PHP/8.5.11
+Set-Cookie: security=low; path=/
+Set-Cookie: PHPSESSID=591bc87b3c12bc4abe39a4f536b918f3; expires=Sun, 27 Sep 2026 02:25:51 GMT; Max-Age=86400; path=/
+Expires: Tue, 23 Jun 2009 12:00:00 GMT
+Cache-Control: no-cache, must-revalidate
+Pragma: no-cache
+Vary: Accept-Encoding
+
+<!DOCTYPE html>
+
+<html lang="en-GB">
+
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+
+		<title>Welcome :: Damn Vulnerable Web Application (DVWA)</title>
+
+		<link rel="stylesheet" type="text/css" href="dvwa/css/main.css" />
+
+		<link rel="icon" type="\image/ico" href="favicon.ico" />
+
+		<script type="text/javascript" src="dvwa/js/dvwaPage.js"></script>
+
+	</head>
+
+	<body class="home">
+		<div id="container">
+
+			<div id="header">
+
+				<img src="dvwa/images/logo.png" alt="Damn Vulnerable Web Application" />
+
+			</div>
+
+			<div id="main_menu">
+
+				<div id="main_menu_padded">
+				<ul class="menuBlocks"><li class="selected"><a href=".">Home</a></li>
+<li class=""><a href="instructions.php">Instructions</a></li>
+<li class=""><a href="setup.php">Setup / Reset DB</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="vulnerabilities/brute/">Brute Force</a></li>
+<li class=""><a href="vulnerabilities/exec/">Command Injection</a></li>
+<li class=""><a href="vulnerabilities/csrf/">CSRF</a></li>
+<li class=""><a href="vulnerabilities/fi/.?page=include.php">File Inclusion</a></li>
+<li class=""><a href="vulnerabilities/upload/">File Upload</a></li>
+<li class=""><a href="vulnerabilities/captcha/">Insecure CAPTCHA</a></li>
+<li class=""><a href="vulnerabilities/sqli/">SQL Injection</a></li>
+<li class=""><a href="vulnerabilities/sqli_blind/">SQL Injection (Blind)</a></li>
+<li class=""><a href="vulnerabilities/weak_id/">Weak Session IDs</a></li>
+<li class=""><a href="vulnerabilities/xss_d/">XSS (DOM)</a></li>
+<li class=""><a href="vulnerabilities/xss_r/">XSS (Reflected)</a></li>
+<li class=""><a href="vulnerabilities/xss_s/">XSS (Stored)</a></li>
+<li class=""><a href="vulnerabilities/csp/">CSP Bypass</a></li>
+<li class=""><a href="vulnerabilities/javascript/">JavaScript</a></li>
+<li class=""><a href="vulnerabilities/open_redirect/">Open HTTP Redirect</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="security.php">DVWA Security</a></li>
+<li class=""><a href="phpinfo.php">PHP Info</a></li>
+<li class=""><a href="about.php">About</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="logout.php">Logout</a></li>
+</ul>
+				</div>
+
+			</div>
+
+			<div id="main_body">
+
+				
+<div class="body_padded">
+	<h1>Welcome to Damn Vulnerable Web Application!</h1>
+	<p>Damn Vulnerable Web Application (DVWA) is a PHP/MySQL web application that is damn vulnerable. Its main goal is to be an aid for security professionals to test their skills and tools in a legal environment, help web developers better understand the processes of securing web applications and to aid both students & teachers to learn about web application security in a controlled class room environment.</p>
+	<p>The aim of DVWA is to <em>practice some of the most common web vulnerabilities</em>, with <em>various levels of difficultly</em>, with a simple straightforward interface.</p>
+	<hr />
+	<br />
+
+	<h2>General Instructions</h2>
+	<p>It is up to the user how they approach DVWA. Either by working through every module at a fixed level, or selecting any module and working up to reach the highest level they can before moving onto the next one. There is not a fixed object to complete a module; however users should feel that they have successfully exploited the system as best as they possible could by using that particular vulnerability.</p>
+	<p>Please note, there are <em>both documented and undocumented vulnerability</em> with this software. This is intentional. You are encouraged to try and discover as many issues as possible.</p>
+	<p>There is a help button at the bottom of each page, which allows you to view hints & tips for that vulnerability. There are also additional links for further background reading, which relates to that security issue.</p>
+	<hr />
+	<br />
+
+	<h2>WARNING!</h2>
+	<p>Damn Vulnerable Web Application is damn vulnerable! <em>Do not upload it to your hosting provider's public html folder or any Internet facing servers</em>, as they will be compromised. It is recommend using a virtual machine (such as <a href="https://www.virtualbox.org/" target="_blank">VirtualBox</a> or <a href="https://www.vmware.com/" target="_blank">VMware</a>), which is set to NAT networking mode. Inside a guest machine, you can download and install <a href="https://www.apachefriends.org/" target="_blank">XAMPP</a> for the web server and database.</p>
+	<br />
+	<h3>Disclaimer</h3>
+	<p>We do not take responsibility for the way in which any one uses this application (DVWA). We have made the purposes of the application clear and it should not be used maliciously. We have given warnings and taken measures to prevent users from installing DVWA on to live web servers. If your web server is compromised via an installation of DVWA it is not our responsibility it is the responsibility of the person/s who uploaded and installed it.</p>
+	<hr />
+	<br />
+
+	<h2>More Training Resources</h2>
+	<p>DVWA aims to cover the most commonly seen vulnerabilities found in today's web applications. However there are plenty of other issues with web applications. Should you wish to explore any additional attack vectors, or want more difficult challenges, you may wish to look into the following other projects:</p>
+	<ul>
+		<li><a href="https://github.com/webpwnized/mutillidae" target="_blank">Mutillidae</a></li>
+		<li><a href="https://owasp.org/www-project-vulnerable-web-applications-directory" target="_blank">OWASP Vulnerable Web Applications Directory</a></li>
+	</ul>
+	<hr />
+	<br />
+</div>
+				<br /><br />
+				
+
+			</div>
+
+			<div class="clear">
+			</div>
+
+			<div id="system_info">
+				<div align="left"><em>Username:</em> Unknown<br /><em>Security Level:</em> low<br /><em>Locale:</em> en<br /><em>SQLi DB:</em> mysql</div>
+			</div>
+
+			<div id="footer">
+
+				<p>Damn Vulnerable Web Application (DVWA)</p>
+				<script src='dvwa/js/add_event_listeners.js'></script>
+
+			</div>
+
+		</div>
+
+	</body>
+
+</html>
+NSE: TCP 192.168.1.8:43250 > 178.79.134.182:4280 | CLOSE
+NSE: TCP 192.168.1.8:43262 > 178.79.134.182:4280 | CONNECT
+NSE: TCP 192.168.1.8:43262 > 178.79.134.182:4280 | 00000000: 4f 50 54 49 4f 4e 53 20 2f 20 48 54 54 50 2f 31 OPTIONS / HTTP/1
+00000010: 2e 31 0d 0a 48 6f 73 74 3a 20 70 65 6e 74 65 73 .1  Host: pentes
+00000020: 74 2d 67 72 6f 75 6e 64 2e 63 6f 6d 3a 34 32 38 t-ground.com:428
+00000030: 30 0d 0a 43 6f 6e 6e 65 63 74 69 6f 6e 3a 20 63 0  Connection: c
+00000040: 6c 6f 73 65 0d 0a 55 73 65 72 2d 41 67 65 6e 74 lose  User-Agent
+00000050: 3a 20 4d 6f 7a 69 6c 6c 61 2f 35 2e 30 20 28 63 : Mozilla/5.0 (c
+00000060: 6f 6d 70 61 74 69 62 6c 65 3b 20 4e 6d 61 70 20 ompatible; Nmap 
+00000070: 53 63 72 69 70 74 69 6e 67 20 45 6e 67 69 6e 65 Scripting Engine
+00000080: 3b 20 68 74 74 70 73 3a 2f 2f 6e 6d 61 70 2e 6f ; https://nmap.o
+00000090: 72 67 2f 62 6f 6f 6b 2f 6e 73 65 2e 68 74 6d 6c rg/book/nse.html
+000000a0: 29 0d 0a 0d 0a                                  )    
+
+NSE: TCP 192.168.1.8:43262 > 178.79.134.182:4280 | SEND
+NSE: TCP 192.168.1.8:43262 < 178.79.134.182:4280 | HTTP/1.1 200 OK
+Server: nginx/1.31.6
+Date: Sat, 26 Sep 2026 02:25:52 GMT
+Content-Type: text/html;charset=utf-8
+Content-Length: 5930
+Connection: close
+X-Powered-By: PHP/8.5.11
+Set-Cookie: security=low; path=/
+Set-Cookie: PHPSESSID=3b2f2dd7565d9bf5c7926478d958ca81; expires=Sun, 27 Sep 2026 02:25:52 GMT; Max-Age=86400; path=/
+Expires: Tue, 23 Jun 2009 12:00:00 GMT
+Cache-Control: no-cache, must-revalidate
+Pragma: no-cache
+Vary: Accept-Encoding
+
+<!DOCTYPE html>
+
+<html lang="en-GB">
+
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+
+		<title>Welcome :: Damn Vulnerable Web Application (DVWA)</title>
+
+		<link rel="stylesheet" type="text/css" href="dvwa/css/main.css" />
+
+		<link rel="icon" type="\image/ico" href="favicon.ico" />
+
+		<script type="text/javascript" src="dvwa/js/dvwaPage.js"></script>
+
+	</head>
+
+	<body class="home">
+		<div id="container">
+
+			<div id="header">
+
+				<img src="dvwa/images/logo.png" alt="Damn Vulnerable Web Application" />
+
+			</div>
+
+			<div id="main_menu">
+
+				<div id="main_menu_padded">
+				<ul class="menuBlocks"><li class="selected"><a href=".">Home</a></li>
+<li class=""><a href="instructions.php">Instructions</a></li>
+<li class=""><a href="setup.php">Setup / Reset DB</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="vulnerabilities/brute/">Brute Force</a></li>
+<li class=""><a href="vulnerabilities/exec/">Command Injection</a></li>
+<li class=""><a href="vulnerabilities/csrf/">CSRF</a></li>
+<li class=""><a href="vulnerabilities/fi/.?page=include.php">File Inclusion</a></li>
+<li class=""><a href="vulnerabilities/upload/">File Upload</a></li>
+<li class=""><a href="vulnerabilities/captcha/">Insecure CAPTCHA</a></li>
+<li class=""><a href="vulnerabilities/sqli/">SQL Injection</a></li>
+<li class=""><a href="vulnerabilities/sqli_blind/">SQL Injection (Blind)</a></li>
+<li class=""><a href="vulnerabilities/weak_id/">Weak Session IDs</a></li>
+<li class=""><a href="vulnerabilities/xss_d/">XSS (DOM)</a></li>
+<li class=""><a href="vulnerabilities/xss_r/">XSS (Reflected)</a></li>
+<li class=""><a href="vulnerabilities/xss_s/">XSS (Stored)</a></li>
+<li class=""><a href="vulnerabilities/csp/">CSP Bypass</a></li>
+<li class=""><a href="vulnerabilities/javascript/">JavaScript</a></li>
+<li class=""><a href="vulnerabilities/open_redirect/">Open HTTP Redirect</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="security.php">DVWA Security</a></li>
+<li class=""><a href="phpinfo.php">PHP Info</a></li>
+<li class=""><a href="about.php">About</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="logout.php">Logout</a></li>
+</ul>
+				</div>
+
+			</div>
+
+			<div id="main_body">
+
+				
+<div class="body_padded">
+	<h1>Welcome to Damn Vulnerable Web Application!</h1>
+	<p>Damn Vulnerable Web Application (DVWA) is a PHP/MySQL web application that is damn vulnerable. Its main goal is to be an aid for security professionals to test their skills and tools in a legal environment, help web developers better understand the processes of securing web applications and to aid both students & teachers to learn about web application security in a controlled class room environment.</p>
+	<p>The aim of DVWA is to <em>practice some of the most common web vulnerabilities</em>, with <em>various levels of difficultly</em>, with a simple straightforward interface.</p>
+	<hr />
+	<br />
+
+	<h2>General Instructions</h2>
+	<p>It is up to the user how they approach DVWA. Either by working through every module at a fixed level, or selecting any module and working up to reach the highest level they can before moving onto the next one. There is not a fixed object to complete a module; however users should feel that they have successfully exploited the system as best as they possible could by using that particular vulnerability.</p>
+	<p>Please note, there are <em>both documented and undocumented vulnerability</em> with this software. This is intentional. You are encouraged to try and discover as many issues as possible.</p>
+	<p>There is a help button at the bottom of each page, which allows you to view hints & tips for that vulnerability. There are also additional links for further background reading, which relates to that security issue.</p>
+	<hr />
+	<br />
+
+	<h2>WARNING!</h2>
+	<p>Damn Vulnerable Web Application is damn vulnerable! <em>Do not upload it to your hosting provider's public html folder or any Internet facing servers</em>, as they will be compromised. It is recommend using a virtual machine (such as <a href="https://www.virtualbox.org/" target="_blank">VirtualBox</a> or <a href="https://www.vmware.com/" target="_blank">VMware</a>), which is set to NAT networking mode. Inside a guest machine, you can download and install <a href="https://www.apachefriends.org/" target="_blank">XAMPP</a> for the web server and database.</p>
+	<br />
+	<h3>Disclaimer</h3>
+	<p>We do not take responsibility for the way in which any one uses this application (DVWA). We have made the purposes of the application clear and it should not be used maliciously. We have given warnings and taken measures to prevent users from installing DVWA on to live web servers. If your web server is compromised via an installation of DVWA it is not our responsibility it is the responsibility of the person/s who uploaded and installed it.</p>
+	<hr />
+	<br />
+
+	<h2>More Training Resources</h2>
+	<p>DVWA aims to cover the most commonly seen vulnerabilities found in today's web applications. However there are plenty of other issues with web applications. Should you wish to explore any additional attack vectors, or want more difficult challenges, you may wish to look into the following other projects:</p>
+	<ul>
+		<li><a href="https://github.com/webpwnized/mutillidae" target="_blank">Mutillidae</a></li>
+		<li><a href="https://owasp.org/www-project-vulnerable-web-applications-directory" target="_blank">OWASP Vulnerable Web Applications Directory</a></li>
+	</ul>
+	<hr />
+	<br />
+</div>
+				<br /><br />
+				
+
+			</div>
+
+			<div class="clear">
+			</div>
+
+			<div id="system_info">
+				<div align="left"><em>Username:</em> Unknown<br /><em>Security Level:</em> low<br /><em>Locale:</em> en<br /><em>SQLi DB:</em> mysql</div>
+			</div>
+
+			<div id="footer">
+
+				<p>Damn Vulnerable Web Application (DVWA)</p>
+				<script src='dvwa/js/add_event_listeners.js'></script>
+
+			</div>
+
+		</div>
+
+	</body>
+
+</html>
+NSE: TCP 192.168.1.8:43262 > 178.79.134.182:4280 | CLOSE
+NSE: TCP 192.168.1.8:43276 > 178.79.134.182:4280 | CONNECT
+NSE: TCP 192.168.1.8:43276 > 178.79.134.182:4280 | 00000000: 47 45 54 20 2f 20 48 54 54 50 2f 31 2e 30 0d 0a GET / HTTP/1.0  
+00000010: 0d 0a                                             
+
+NSE: TCP 192.168.1.8:43276 > 178.79.134.182:4280 | SEND
+NSE: TCP 192.168.1.8:43276 < 178.79.134.182:4280 | HTTP/1.1 200 OK
+Server: nginx/1.31.6
+Date: Sat, 26 Sep 2026 02:25:53 GMT
+Content-Type: text/html;charset=utf-8
+Content-Length: 5930
+Connection: close
+X-Powered-By: PHP/8.5.11
+Set-Cookie: security=low; path=/
+Set-Cookie: PHPSESSID=606a2a2b7a9853d9fcc260fb5f2c89d5; expires=Sun, 27 Sep 2026 02:25:53 GMT; Max-Age=86400; path=/
+Expires: Tue, 23 Jun 2009 12:00:00 GMT
+Cache-Control: no-cache, must-revalidate
+Pragma: no-cache
+Vary: Accept-Encoding
+
+<!DOCTYPE html>
+
+<html lang="en-GB">
+
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+
+		<title>Welcome :: Damn Vulnerable Web Application (DVWA)</title>
+
+		<link rel="stylesheet" type="text/css" href="dvwa/css/main.css" />
+
+		<link rel="icon" type="\image/ico" href="favicon.ico" />
+
+		<script type="text/javascript" src="dvwa/js/dvwaPage.js"></script>
+
+	</head>
+
+	<body class="home">
+		<div id="container">
+
+			<div id="header">
+
+				<img src="dvwa/images/logo.png" alt="Damn Vulnerable Web Application" />
+
+			</div>
+
+			<div id="main_menu">
+
+				<div id="main_menu_padded">
+				<ul class="menuBlocks"><li class="selected"><a href=".">Home</a></li>
+<li class=""><a href="instructions.php">Instructions</a></li>
+<li class=""><a href="setup.php">Setup / Reset DB</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="vulnerabilities/brute/">Brute Force</a></li>
+<li class=""><a href="vulnerabilities/exec/">Command Injection</a></li>
+<li class=""><a href="vulnerabilities/csrf/">CSRF</a></li>
+<li class=""><a href="vulnerabilities/fi/.?page=include.php">File Inclusion</a></li>
+<li class=""><a href="vulnerabilities/upload/">File Upload</a></li>
+<li class=""><a href="vulnerabilities/captcha/">Insecure CAPTCHA</a></li>
+<li class=""><a href="vulnerabilities/sqli/">SQL Injection</a></li>
+<li class=""><a href="vulnerabilities/sqli_blind/">SQL Injection (Blind)</a></li>
+<li class=""><a href="vulnerabilities/weak_id/">Weak Session IDs</a></li>
+<li class=""><a href="vulnerabilities/xss_d/">XSS (DOM)</a></li>
+<li class=""><a href="vulnerabilities/xss_r/">XSS (Reflected)</a></li>
+<li class=""><a href="vulnerabilities/xss_s/">XSS (Stored)</a></li>
+<li class=""><a href="vulnerabilities/csp/">CSP Bypass</a></li>
+<li class=""><a href="vulnerabilities/javascript/">JavaScript</a></li>
+<li class=""><a href="vulnerabilities/open_redirect/">Open HTTP Redirect</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="security.php">DVWA Security</a></li>
+<li class=""><a href="phpinfo.php">PHP Info</a></li>
+<li class=""><a href="about.php">About</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="logout.php">Logout</a></li>
+</ul>
+				</div>
+
+			</div>
+
+			<div id="main_body">
+
+				
+<div class="body_padded">
+	<h1>Welcome to Damn Vulnerable Web Application!</h1>
+	<p>Damn Vulnerable Web Application (DVWA) is a PHP/MySQL web application that is damn vulnerable. Its main goal is to be an aid for security professionals to test their skills and tools in a legal environment, help web developers better understand the processes of securing web applications and to aid both students & teachers to learn about web application security in a controlled class room environment.</p>
+	<p>The aim of DVWA is to <em>practice some of the most common web vulnerabilities</em>, with <em>various levels of difficultly</em>, with a simple straightforward interface.</p>
+	<hr />
+	<br />
+
+	<h2>General Instructions</h2>
+	<p>It is up to the user how they approach DVWA. Either by working through every module at a fixed level, or selecting any module and working up to reach the highest level they can before moving onto the next one. There is not a fixed object to complete a module; however users should feel that they have successfully exploited the system as best as they possible could by using that particular vulnerability.</p>
+	<p>Please note, there are <em>both documented and undocumented vulnerability</em> with this software. This is intentional. You are encouraged to try and discover as many issues as possible.</p>
+	<p>There is a help button at the bottom of each page, which allows you to view hints & tips for that vulnerability. There are also additional links for further background reading, which relates to that security issue.</p>
+	<hr />
+	<br />
+
+	<h2>WARNING!</h2>
+	<p>Damn Vulnerable Web Application is damn vulnerable! <em>Do not upload it to your hosting provider's public html folder or any Internet facing servers</em>, as they will be compromised. It is recommend using a virtual machine (such as <a href="https://www.virtualbox.org/" target="_blank">VirtualBox</a> or <a href="https://www.vmware.com/" target="_blank">VMware</a>), which is set to NAT networking mode. Inside a guest machine, you can download and install <a href="https://www.apachefriends.org/" target="_blank">XAMPP</a> for the web server and database.</p>
+	<br />
+	<h3>Disclaimer</h3>
+	<p>We do not take responsibility for the way in which any one uses this application (DVWA). We have made the purposes of the application clear and it should not be used maliciously. We have given warnings and taken measures to prevent users from installing DVWA on to live web servers. If your web server is compromised via an installation of DVWA it is not our responsibility it is the responsibility of the person/s who uploaded and installed it.</p>
+	<hr />
+	<br />
+
+	<h2>More Training Resources</h2>
+	<p>DVWA aims to cover the most commonly seen vulnerabilities found in today's web applications. However there are plenty of other issues with web applications. Should you wish to explore any additional attack vectors, or want more difficult challenges, you may wish to look into the following other projects:</p>
+	<ul>
+		<li><a href="https://github.com/webpwnized/mutillidae" target="_blank">Mutillidae</a></li>
+		<li><a href="https://owasp.org/www-project-vulnerable-web-applications-directory" target="_blank">OWASP Vulnerable Web Applications Directory</a></li>
+	</ul>
+	<hr />
+	<br />
+</div>
+				<br /><br />
+				
+
+			</div>
+
+			<div class="clear">
+			</div>
+
+			<div id="system_info">
+				<div align="left"><em>Username:</em> Unknown<br /><em>Security Level:</em> low<br /><em>Locale:</em> en<br /><em>SQLi DB:</em> mysql</div>
+			</div>
+
+			<div id="footer">
+
+				<p>Damn Vulnerable Web Application (DVWA)</p>
+				<script src='dvwa/js/add_event_listeners.js'></script>
+
+			</div>
+
+		</div>
+
+	</body>
+
+</html>
+NSE: TCP 192.168.1.8:43276 > 178.79.134.182:4280 | CLOSE
+NSE: TCP 192.168.1.8:43280 > 178.79.134.182:4280 | CONNECT
+NSE: TCP 192.168.1.8:43280 > 178.79.134.182:4280 | 00000000: 47 45 54 20 2f 20 48 54 54 50 2f 31 2e 31 0d 0a GET / HTTP/1.1  
+00000010: 48 6f 73 74 3a 20 70 65 6e 74 65 73 74 2d 67 72 Host: pentest-gr
+00000020: 6f 75 6e 64 2e 63 6f 6d 0d 0a 0d 0a             ound.com    
+
+NSE: TCP 192.168.1.8:43280 > 178.79.134.182:4280 | SEND
+NSE: TCP 192.168.1.8:43280 < 178.79.134.182:4280 | HTTP/1.1 200 OK
+Server: nginx/1.31.6
+Date: Sat, 26 Sep 2026 02:25:54 GMT
+Content-Type: text/html;charset=utf-8
+Content-Length: 5930
+Connection: keep-alive
+X-Powered-By: PHP/8.5.11
+Set-Cookie: security=low; path=/
+Set-Cookie: PHPSESSID=d0d5f847e486d1230158320e595c6569; expires=Sun, 27 Sep 2026 02:25:54 GMT; Max-Age=86400; path=/
+Expires: Tue, 23 Jun 2009 12:00:00 GMT
+Cache-Control: no-cache, must-revalidate
+Pragma: no-cache
+Vary: Accept-Encoding
+
+<!DOCTYPE html>
+
+<html lang="en-GB">
+
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+
+		<title>Welcome :: Damn Vulnerable Web Application (DVWA)</title>
+
+		<link rel="stylesheet" type="text/css" href="dvwa/css/main.css" />
+
+		<link rel="icon" type="\image/ico" href="favicon.ico" />
+
+		<script type="text/javascript" src="dvwa/js/dvwaPage.js"></script>
+
+	</head>
+
+	<body class="home">
+		<div id="container">
+
+			<div id="header">
+
+				<img src="dvwa/images/logo.png" alt="Damn Vulnerable Web Application" />
+
+			</div>
+
+			<div id="main_menu">
+
+				<div id="main_menu_padded">
+				<ul class="menuBlocks"><li class="selected"><a href=".">Home</a></li>
+<li class=""><a href="instructions.php">Instructions</a></li>
+<li class=""><a href="setup.php">Setup / Reset DB</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="vulnerabilities/brute/">Brute Force</a></li>
+<li class=""><a href="vulnerabilities/exec/">Command Injection</a></li>
+<li class=""><a href="vulnerabilities/csrf/">CSRF</a></li>
+<li class=""><a href="vulnerabilities/fi/.?page=include.php">File Inclusion</a></li>
+<li class=""><a href="vulnerabilities/upload/">File Upload</a></li>
+<li class=""><a href="vulnerabilities/captcha/">Insecure CAPTCHA</a></li>
+<li class=""><a href="vulnerabilities/sqli/">SQL Injection</a></li>
+<li class=""><a href="vulnerabilities/sqli_blind/">SQL Injection (Blind)</a></li>
+<li class=""><a href="vulnerabilities/weak_id/">Weak Session IDs</a></li>
+<li class=""><a href="vulnerabilities/xss_d/">XSS (DOM)</a></li>
+<li class=""><a href="vulnerabilities/xss_r/">XSS (Reflected)</a></li>
+<li class=""><a href="vulnerabilities/xss_s/">XSS (Stored)</a></li>
+<li class=""><a href="vulnerabilities/csp/">CSP Bypass</a></li>
+<li class=""><a href="vulnerabilities/javascript/">JavaScript</a></li>
+<li class=""><a href="vulnerabilities/open_redirect/">Open HTTP Redirect</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="security.php">DVWA Security</a></li>
+<li class=""><a href="phpinfo.php">PHP Info</a></li>
+<li class=""><a href="about.php">About</a></li>
+</ul><ul class="menuBlocks"><li class=""><a href="logout.php">Logout</a></li>
+</ul>
+				</div>
+
+			</div>
+
+			<div id="main_body">
+
+				
+<div class="body_padded">
+	<h1>Welcome to Damn Vulnerable Web Application!</h1>
+	<p>Damn Vulnerable Web Application (DVWA) is a PHP/MySQL web application that is damn vulnerable. Its main goal is to be an aid for security professionals to test their skills and tools in a legal environment, help web developers better understand the processes of securing web applications and to aid both students & teachers to learn about web application security in a controlled class room environment.</p>
+	<p>The aim of DVWA is to <em>practice some of the most common web vulnerabilities</em>, with <em>various levels of difficultly</em>, with a simple straightforward interface.</p>
+	<hr />
+	<br />
+
+	<h2>General Instructions</h2>
+	<p>It is up to the user how they approach DVWA. Either by working through every module at a fixed level, or selecting any module and working up to reach the highest level they can before moving onto the next one. There is not a fixed object to complete a module; however users should feel that they have successfully exploited the system as best as they possible could by using that particular vulnerability.</p>
+	<p>Please note, there are <em>both documented and undocumented vulnerability</em> with this software. This is intentional. You are encouraged to try and discover as many issues as possible.</p>
+	<p>There is a help button at the bottom of each page, which allows you to view hints & tips for that vulnerability. There are also additional links for further background reading, which relates to that security issue.</p>
+	<hr />
+	<br />
+
+	<h2>WARNING!</h2>
+	<p>Damn Vulnerable Web Application is damn vulnerable! <em>Do not upload it to your hosting provider's public html folder or any Internet facing servers</em>, as they will be compromised. It is recommend using a virtual machine (such as <a href="https://www.virtualbox.org/" target="_blank">VirtualBox</a> or <a href="https://www.vmware.com/" target="_blank">VMware</a>), which is set to NAT networking mode. Inside a guest machine, you can download and install <a href="https://www.apachefriends.org/" target="_blank">XAMPP</a> for the web server and database.</p>
+	<br />
+	<h3>Disclaimer</h3>
+	<p>We do not take responsibility for the way in which any one uses this application (DVWA). We have made the purposes of the application clear and it should not be used maliciously. We have given warnings and taken measures to prevent users from installing DVWA on to live web servers. If your web server is compromised via an installation of DVWA it is not our responsibility it is the responsibility of the person/s who uploaded and installed it.</p>
+	<hr />
+	<br />
+
+	<h2>More Training Resources</h2>
+	<p>DVWA aims to cover the most commonly seen vulnerabilities found in today's web applications. However there are plenty of other issues with web applications. Should you wish to explore any additional attack vectors, or want more difficult challenges, you may wish to look into the following other projects:</p>
+	<ul>
+		<li><a href="https://github.com/webpwnized/mutillidae" target="_blank">Mutillidae</a></li>
+		<li><a href="https://owasp.org/www-project-vulnerable-web-applications-directory" target="_blank">OWASP Vulnerable Web Applications Directory</a></li>
+	</ul>
+	<hr />
+	<br />
+</div>
+				<br /><br />
+				
+
+			</div>
+
+			<div class="clear">
+			</div>
+
+			<div id="system_info">
+				<div align="left"><em>Username:</em> Unknown<br /><em>Security Level:</em> low<br /><em>Locale:</em> en<br /><em>SQLi DB:</em> mysql</div>
+			</div>
+
+			<div id="footer">
+
+				<p>Damn Vulnerable Web Application (DVWA)</p>
+				<script src='dvwa/js/add_event_listeners.js'></script>
+
+			</div>
+
+		</div>
+
+	</body>
+
+</html>
+NSE: TCP 192.168.1.8:43280 > 178.79.134.182:4280 | CLOSE
+Nmap scan report for pentest-ground.com (178.79.134.182)
+Host is up (0.21s latency).
+rDNS record for 178.79.134.182: 178-79-134-182.ip.linodeusercontent.com
+
+PORT     STATE SERVICE  VERSION
+4280/tcp open  ssl/http nginx 1.31.6
+| http-methods: 
+|_  Supported Methods: GET HEAD POST OPTIONS
+|_http-server-header: nginx/1.31.6
+| http-headers: 
+|   Server: nginx/1.31.6
+|   Date: Sat, 26 Sep 2026 02:25:48 GMT
+|   Content-Type: text/html;charset=utf-8
+|   Connection: close
+|   X-Powered-By: PHP/8.5.11
+|   Set-Cookie: security=low; path=/
+|   Set-Cookie: PHPSESSID=e90e2482aca0b9e8191d8369c4d41fff; expires=Sun, 27 Sep 2026 02:25:48 GMT; Max-Age=86400; path=/
+|   Expires: Tue, 23 Jun 2009 12:00:00 GMT
+|   Cache-Control: no-cache, must-revalidate
+|   Pragma: no-cache
+|   
+|_  (Request type: HEAD)
+|_http-title: Welcome :: Damn Vulnerable Web Application (DVWA)
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 19.88 seconds

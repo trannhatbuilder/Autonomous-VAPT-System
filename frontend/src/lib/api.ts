@@ -1,12 +1,19 @@
 /**
  * VAPT-AI API client — Phase A (frontend/backend split).
  *
- * Single mode: RELATIVE paths.
- *  - Local dev:  Next.js rewrites() in next.config.ts proxies /api/* → http://localhost:8000
- *  - Sandbox:    Caddy `?XTransformPort=8000` query routes to FastAPI on port 8000.
- *
- * No env vars required. Set NEXT_PUBLIC_API_BASE_URL only if you want to bypass
- * the rewrite layer and call an absolute URL (e.g. a remote backend).
+ * Mode-aware URL strategy:
+ *  - Local dev (localhost / 127.0.0.1): use ABSOLUTE URL pointing directly
+ *    at FastAPI (default http://localhost:8000). This BYPASSES the Next.js
+ *    dev proxy which has known issues with:
+ *      * SSE streams (it buffers them — fixed separately for /events)
+ *      * POST requests with JSON body (ECONNRESET / socket hang up)
+ *        — this was causing the Abort button to silently fail.
+ *    Override via NEXT_PUBLIC_API_BASE_URL or NEXT_PUBLIC_SSE_BASE_URL
+ *    env var if your backend runs on a different port/host.
+ *  - Sandbox preview (preview.space-z.ai): use RELATIVE paths — Caddy's
+ *    `?XTransformPort=8000` query handles routing correctly without
+ *    proxy buffering issues.
+ *  - Production (same origin): use RELATIVE paths.
  *
  * Auth: JWT access + refresh tokens stored in localStorage.
  *  - On 401 response, automatically refreshes once + retries the call.
@@ -15,23 +22,36 @@
 
 /**
  * Build the API base URL.
- * - Default: empty string → relative paths (proxied by Next.js / Caddy).
- * - Override: set NEXT_PUBLIC_API_BASE_URL to use absolute URLs.
+ * Priority:
+ *   1. NEXT_PUBLIC_API_BASE_URL (explicit override)
+ *   2. Local dev → "http://localhost:8000" (bypass Next.js proxy)
+ *   3. Sandbox preview → "" (relative, Caddy handles routing)
+ *   4. Production → "" (relative, same-origin)
  */
 function getApiConfig(): { baseUrl: string } {
   const envBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
   if (envBaseUrl) {
     return { baseUrl: envBaseUrl.replace(/\/$/, "") };
   }
+  // Local dev bypass — connect directly to FastAPI
+  // (avoids Next.js dev proxy ECONNRESET issues with POST + SSE)
+  if (
+    typeof window !== "undefined" &&
+    (window.location.hostname === "localhost" ||
+      window.location.hostname === "127.0.0.1" ||
+      window.location.hostname === "0.0.0.0")
+  ) {
+    return { baseUrl: process.env.NEXT_PUBLIC_SSE_BASE_URL || "http://localhost:8000" };
+  }
   return { baseUrl: "" };
 }
 
 const SANDBOX_BACKEND_PORT = "8000";
 
-/** Helper: build URL — relative by default, absolute if NEXT_PUBLIC_API_BASE_URL set. */
+/** Helper: build URL — absolute in local dev + override, relative in sandbox/prod. */
 function apiUrl(path: string, params?: Record<string, string | number | boolean | undefined>): string {
   const { baseUrl } = getApiConfig();
-  // If env override is set → use absolute URL
+  // If absolute URL → use it directly (bypasses Next.js dev proxy)
   if (baseUrl) {
     const url = new URL(path, baseUrl);
     if (params) {
@@ -44,7 +64,7 @@ function apiUrl(path: string, params?: Record<string, string | number | boolean 
     return url.toString();
   }
   // Sandbox preview: detect preview.space-z.ai → use XTransformPort query param.
-  // Local dev: just use relative path, Next.js rewrites will proxy it.
+  // Production same-origin: just relative paths.
   const isSandboxPreview =
     typeof window !== "undefined" &&
     window.location.hostname.endsWith(".space-z.ai");

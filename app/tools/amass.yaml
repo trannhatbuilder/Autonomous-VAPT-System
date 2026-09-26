@@ -4,6 +4,11 @@ enabled: true
 description: |
   Amass — OWASP subdomain enumeration. Uses 30+ data sources (passive) +
   DNS brute-force (active). Most thorough subdomain tool.
+
+  Examples:
+    - Passive (OSINT only): amass enum -passive -d example.com
+    - Active (DNS brute): amass enum -d example.com
+    - Intel (subdomains): amass intel -d example.com
 short_description: Amass — OWASP subdomain enumeration (30+ sources)
 category: recon
 wstg_ids:
@@ -19,14 +24,35 @@ parameters:
     flag: "-d"
   - name: enum_mode
     type: string
-    description: 'Enumeration mode: passive (OSINT only) or active (DNS brute-force)'
+    description: |
+      Enumeration mode — controls how aggressive amass is:
+        - passive: OSINT only (no DNS queries to target's NS) — safe for
+                   stealthy external recon
+        - active:  DNS brute-force against target's nameservers — more
+                   thorough but visible in target's DNS logs
+        - intel:   subdomain discovery via passive sources only
+      DEFAULT: passive (safe)
     required: false
-    flag: ""
-    default: "passive"
-    options: ["passive", "active"]
+    # NOTE: enum_mode is a SUBCOMMAND for amass v4 (`amass enum ...` or
+    # `amass intel ...`) — appended positionally BEFORE the -d flag.
+    # If we set flag="-passive" the loader would emit "amass -passive ..."
+    # which is wrong — amass v4 expects "amass enum -passive -d X".
+    # Using position makes the loader append JUST the value.
+    position: 1  # subcommand — appended before -d (target has flag=-d so it's not positional)
+    default: "enum"
+    options: ["enum", "intel"]
+  - name: passive
+    type: bool
+    description: |
+      Use passive data sources only (no DNS queries to target nameservers).
+      Default: true — safe for stealthy recon.
+      Set false for active DNS brute-force (visible in target DNS logs).
+    required: false
+    flag: "-passive"
+    default: true
   - name: additional_args
     type: string
-    description: Additional amass arguments
+    description: Additional amass arguments (e.g. "-timeout 5 -noalts")
     required: false
     default: ""
 output:
