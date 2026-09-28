@@ -14,7 +14,7 @@ import {
   ChevronDown, ChevronRight, Search, History, Trash2, Download,
 } from "lucide-react";
 import {
-  startScan, getScanEventsUrl, abortScan,
+  startScan, getScanEventsUrl, abortScan, abortScanPipeline,
   getScanHistory, getScanDetail, getProcessDetails, getProcessDetail,
   deleteScan, exportVulnerabilities, downloadTextFile,
   type ScanSummary, type ScanDetail, type ProcessDetailRow, type ProcessDetailFull,
@@ -161,15 +161,62 @@ export function ScansView() {
     }
   };
 
+  const [aborting, setAborting] = useState(false);
+
   const handleAbort = async () => {
-    if (!liveScanId) return;
+    if (!liveScanId || aborting) return;
+    setAborting(true);
+    const scanId = liveScanId;
     try {
-      await abortScan(liveScanId);
-      toast({ title: "Scan aborted", description: `Cancelled scan ${liveScanId.slice(0, 16)}...` });
-      setLiveStatus("aborted");
-      setLiveScanId(null);
+      // ── Call BOTH endpoints in parallel ────────────────────────────
+      // abortScanPipeline()  → POST /api/scans/{id}/abort → scan_registry.abort_scan()
+      //     • sets abort_event (agent loop's next ABORT CHECK fires → exit)
+      //     • task.cancel()   (CancelledError propagates into in-flight LLM call)
+      //     • SIGKILL all registered subprocess PIDs (process group)
+      // abortScan()          → POST /api/mcp/scans/{id}/abort → ExecutionService.cancel_scan()
+      //     • cancel each individual tool execution asyncio.Task
+      //     • (post-patch #2, this also calls scan_registry.abort_scan() — defensive)
+      //
+      // Using Promise.allSettled so a 500/404 from one endpoint does NOT abort the
+      // other (e.g., if scan already finished, /api/scans/{id}/abort returns "scan_not_found"
+      // but /api/mcp/.../abort still kills lingering tools). We surface the worst
+      // outcome to the user via toast.
+      const [pipelineRes, toolsRes] = await Promise.allSettled([
+        abortScanPipeline(scanId),
+        abortScan(scanId),
+      ]);
+
+      const pipelineOk = pipelineRes.status === "fulfilled";
+      const toolsOk = toolsRes.status === "fulfilled";
+      const pipelineErr = pipelineRes.status === "rejected" ? (pipelineRes.reason as Error)?.message : undefined;
+      const toolsErr = toolsRes.status === "rejected" ? (toolsRes.reason as Error)?.message : undefined;
+
+      if (pipelineOk || toolsOk) {
+        // At least one endpoint accepted the abort — backend now has
+        // abort_event set + pipeline_task.cancel()'d. Agent loop will exit
+        // on its next await point.
+        toast({
+          title: "Scan aborting",
+          description: `Đã gửi tín hiệu dừng scan ${scanId.slice(0, 16)}... Pipeline sẽ dừng trong vài giây.`,
+        });
+        // Optimistically flip UI to "aborted" so the user sees feedback immediately.
+        // The SSE stream (if still connected) will receive scan_complete(status=aborted)
+        // and close on its own.
+        setLiveStatus("aborted");
+        setLiveScanId(null);
+      } else {
+        // Both endpoints failed — surface both error messages so the user
+        // can decide to retry / check server logs.
+        toast({
+          title: "Abort failed",
+          description: `pipeline: ${pipelineErr ?? "unknown"} | tools: ${toolsErr ?? "unknown"}`,
+          variant: "destructive",
+        });
+      }
     } catch (err: any) {
       toast({ title: "Abort failed", description: err.message, variant: "destructive" });
+    } finally {
+      setAborting(false);
     }
   };
 
@@ -243,8 +290,10 @@ export function ScansView() {
                 Start scan
               </Button>
             ) : (
-              <Button onClick={handleAbort} variant="destructive" className="w-full bg-red-700 hover:bg-red-600 h-9" size="sm">
-                <Square className="w-4 h-4 mr-2" /> Abort scan
+              <Button onClick={handleAbort} disabled={aborting} variant="destructive" className="w-full bg-red-700 hover:bg-red-600 h-9" size="sm">
+                {aborting
+                  ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Stopping…</>
+                  : <><Square className="w-4 h-4 mr-2" /> Abort scan</>}
               </Button>
             )}
           </div>

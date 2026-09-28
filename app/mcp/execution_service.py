@@ -310,9 +310,50 @@ class ExecutionService:
                     "ToolExecution %s CANCELLED | tool=%s",
                     execution.id[:8], execution.tool_name,
                 )
-                # Don't re-raise — worker should swallow CancelledError so
-                # the caller (submit()) doesn't see an exception. The status
-                # field is the canonical signal.
+                # ── PATCH (panic-button fix): distinguish cancel sources ──
+                # Two distinct cancellation paths exist:
+                #
+                #   A. cancel_event.set() — explicit cancel by ExecutionService.cancel()
+                #      or cancel_scan(). The run closure is supposed to check
+                #      cancel_event periodically and exit gracefully. In this
+                #      case we DO want to swallow CancelledError + return
+                #      execution.status=CANCELLED to submit()'s caller.
+                #
+                #   B. asyncio.Task.cancel() from OUTSIDE ExecutionService —
+                #      specifically, scan_registry.abort_scan() calls
+                #      pipeline_task.cancel() which propagates CancelledError
+                #      into EVERY descendant await, including the run closure
+                #      inside submit(). In this case the WHOLE PIPELINE is
+                #      being cancelled, not just one tool execution.
+                #
+                # The old behavior (swallow in both cases) was a problem because:
+                #   - When endpoint /api/mcp/scans/{id}/abort was called alone
+                #     (without /api/scans/{id}/abort), it called cancel_scan()
+                #     → path A → swallow → submit() returned normally →
+                #     agent loop continued with next iteration (abort_event
+                #     not set) → burned more LLM calls.
+                #   - This is now fixed at the endpoint layer (patch #2 makes
+                #     /api/mcp/scans/{id}/abort also call scan_registry.abort_scan()).
+                #
+                # The defensive fix here: if the cancel_event was NOT set by
+                # us (path B = external pipeline cancel), re-raise the
+                # CancelledError so it propagates up through submit() into
+                # the agent loop. The agent loop's except asyncio.CancelledError
+                # handler (or the next await point) will then exit cleanly.
+                #
+                # If cancel_event WAS set by us (path A), swallow as before —
+                # this preserves the existing ExecutionService.cancel() contract.
+                if not cancel_event.is_set():
+                    # External cancel (pipeline_task.cancel() from abort_scan)
+                    # — re-raise so submit()'s `await task` raises CancelledError,
+                    # propagating up through the agent loop and exiting it.
+                    logger.info(
+                        "ToolExecution %s re-raising CancelledError (external pipeline cancel) | tool=%s",
+                        execution.id[:8], execution.tool_name,
+                    )
+                    raise
+                # Else: cancel_event was set by us — swallow as before.
+                # Caller (submit) sees execution.status=CANCELLED.
 
             except Exception as exc:
                 async with self._lock:

@@ -282,25 +282,111 @@ class HITLManager:
                 decision = await self._wait_for_human_decision(approval)
 
             else:  # audit_agent (default)
+                # ── PATCH (panic-button fix): race audit.review() with abort_event ──
+                # audit.review() makes an LLM call (2-3s typically, up to
+                # self.timeout_seconds). If the user presses the panic button
+                # while the audit LLM is in-flight, scan_registry.abort_scan()
+                # calls pipeline_task.cancel() which propagates CancelledError
+                # into the in-flight chat_completion await — so the audit call
+                # IS interrupted. But there's a race:
+                #
+                #   1. User clicks panic → POST /api/scans/{id}/abort arrives
+                #   2. abort_scan() sets abort_event + calls task.cancel()
+                #   3. CancelledError is scheduled but not yet raised at the
+                #      chat_completion await point
+                #   4. Between steps 2 and 3, the audit LLM call completes
+                #      normally (200 OK from provider) — burning $0.01-0.05.
+                #
+                # The race is rare (~10ms window), but more importantly: if
+                # the user pressed panic BEFORE this audit call started but
+                # abort_scan() hasn't yet been invoked (e.g. HTTP latency),
+                # we want to skip the audit call entirely.
+                #
+                # Solution: race audit.review() against abort_event.wait().
+                # If abort_event wins, return a user_aborted decision without
+                # waiting for the LLM call to finish.
                 audit = self._get_audit_agent()
-                audit_decision = await audit.review(
-                    tool_name=tool_name,
-                    target=target,
-                    args=args,
-                    predicted_impact=predicted_impact,
-                    agent_reasoning=agent_reasoning,
-                    scan_context=scan_context,
-                )
-                decision = HITLDecision(
-                    decision=audit_decision.decision,
-                    comment=audit_decision.comment,
-                    suggested_args=audit_decision.suggested_args,
-                    risk_assessment=audit_decision.risk_assessment,
-                    confidence=audit_decision.confidence,
-                    decided_by=audit_decision.decided_by,
-                    approval_id=approval.id,
-                    raw_llm_response=audit_decision.raw_llm_response,
-                )
+
+                # Look up abort_event for this scan (if scan is registered).
+                # If scan is not registered (e.g. test mode), skip the race
+                # and just call audit.review() directly.
+                from app.pentest.scan_registry import scan_registry
+                scan_state = scan_registry.get_state(scan_id)
+                abort_event = scan_state.abort_event if scan_state else None
+
+                if abort_event is not None:
+                    # Race: audit LLM call vs. abort_event.wait()
+                    # If abort fires first, cancel the audit task + return
+                    # user_aborted immediately (no extra LLM token burned).
+                    import asyncio as _asyncio
+                    audit_task = _asyncio.create_task(audit.review(
+                        tool_name=tool_name,
+                        target=target,
+                        args=args,
+                        predicted_impact=predicted_impact,
+                        agent_reasoning=agent_reasoning,
+                        scan_context=scan_context,
+                    ))
+                    abort_task = _asyncio.create_task(abort_event.wait())
+
+                    done, pending = await _asyncio.wait(
+                        {audit_task, abort_task},
+                        return_when=_asyncio.FIRST_COMPLETED,
+                    )
+
+                    if abort_task in done:
+                        # Abort fired first (or simultaneously) — cancel audit
+                        audit_task.cancel()
+                        try:
+                            await audit_task
+                        except (_asyncio.CancelledError, Exception):
+                            pass
+                        decision = HITLDecision(
+                            decision="user_aborted",
+                            comment="audit agent: scan aborted by user while reviewing — no LLM call completed",
+                            decided_by="user",
+                            approval_id=approval.id,
+                        )
+                    else:
+                        # Audit finished first — cancel the abort watcher
+                        # (it will be re-checked at the next agent iteration).
+                        abort_task.cancel()
+                        try:
+                            await abort_task
+                        except _asyncio.CancelledError:
+                            pass
+                        audit_decision = audit_task.result()
+                        decision = HITLDecision(
+                            decision=audit_decision.decision,
+                            comment=audit_decision.comment,
+                            suggested_args=audit_decision.suggested_args,
+                            risk_assessment=audit_decision.risk_assessment,
+                            confidence=audit_decision.confidence,
+                            decided_by=audit_decision.decided_by,
+                            approval_id=approval.id,
+                            raw_llm_response=audit_decision.raw_llm_response,
+                        )
+                else:
+                    # No scan_state — call audit.review() directly (test mode
+                    # or running outside scan_pipeline).
+                    audit_decision = await audit.review(
+                        tool_name=tool_name,
+                        target=target,
+                        args=args,
+                        predicted_impact=predicted_impact,
+                        agent_reasoning=agent_reasoning,
+                        scan_context=scan_context,
+                    )
+                    decision = HITLDecision(
+                        decision=audit_decision.decision,
+                        comment=audit_decision.comment,
+                        suggested_args=audit_decision.suggested_args,
+                        risk_assessment=audit_decision.risk_assessment,
+                        confidence=audit_decision.confidence,
+                        decided_by=audit_decision.decided_by,
+                        approval_id=approval.id,
+                        raw_llm_response=audit_decision.raw_llm_response,
+                    )
 
         except NotImplementedError as exc:
             # human_block mode not yet implemented — mark as timeout + return

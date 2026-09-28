@@ -775,10 +775,37 @@ class BaseAgent:
                     llm_task.cancel()
                     if abort_task is not None:
                         abort_task.cancel()
-                    # Try to recover the LLM result if it finished before cancel
+                    # ── PATCH (panic-button fix): properly await llm_task teardown ──
+                    # cancel() only SCHEDULES CancelledError into the task; the
+                    # in-flight httpx request can keep running until its next
+                    # await point. We MUST `await llm_task` to ensure the HTTP
+                    # connection is actually closed before we exit — otherwise
+                    # the orphaned task continues in the background and burns
+                    # an extra API call (visible in server logs as a successful
+                    # 200 response from the LLM provider AFTER the user pressed
+                    # Abort).
+                    #
+                    # Separate `except asyncio.CancelledError` (the cancel we just
+                    # issued) from `except Exception` (e.g. httpx.ConnectError
+                    # that fired before cancel propagated). On Python 3.8+
+                    # CancelledError inherits BaseException, so `except Exception`
+                    # would NOT catch it — but being explicit prevents future
+                    # regressions if someone refactors the catches.
                     try:
                         response = await llm_task
-                    except (asyncio.CancelledError, Exception):
+                    except asyncio.CancelledError:
+                        # Expected: we just called .cancel() on it. HTTP
+                        # connection has been torn down by httpx's CancelledError
+                        # handler. Safe to swallow — we are about to return.
+                        response = None
+                    except Exception as exc:
+                        # LLM call failed for an unrelated reason (network,
+                        # provider 5xx, etc.) right before/during cancel.
+                        # Log + treat as abort to be safe.
+                        logger.warning(
+                            "Agent %s LLM call raised %s during abort sequence | scan=%s",
+                            self.AGENT_NAME, type(exc).__name__, self.scan_id,
+                        )
                         response = None
                     abort_msg = (
                         f"⛔ Agent {self.AGENT_NAME} đã bị dừng (panic button). "

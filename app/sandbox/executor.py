@@ -275,6 +275,31 @@ class SubprocessExecutor:
                 duration_seconds=elapsed,
             )
 
+        except asyncio.CancelledError:
+            # ── PATCH (panic-button fix): explicit CancelledError propagation ──
+            # On Python 3.8+ asyncio.CancelledError inherits BaseException (not
+            # Exception), so the `except Exception as e` below would NOT catch
+            # it. We add this explicit handler for two reasons:
+            #
+            #   1. Documentation: makes the intent obvious to readers — we
+            #      want cancellation to propagate up to the agent loop /
+            #      pipeline_task so the abort signal wins.
+            #   2. Future-proofing: if a future Python version or library
+            #      patch changes CancelledError's inheritance, this guard
+            #      ensures correct behavior.
+            #
+            # When scan_registry.abort_scan() calls pipeline_task.cancel(),
+            # CancelledError raises at the next await point inside _run_subprocess
+            # (e.g. await proc.communicate()). Without explicit re-raise here,
+            # the `except Exception as e` below could swallow it in some edge
+            # cases (e.g. if the codebase is later patched to catch BaseException).
+            elapsed = time.time() - start_time
+            logger.info(
+                "Command cancelled (panic button / pipeline cancel) | scan=%s | cmd=%s | elapsed=%.2fs",
+                scan_id, cmd_str, elapsed,
+            )
+            raise
+
         except Exception as e:
             elapsed = time.time() - start_time
             logger.error("Command failed: %s | error=%s", cmd_str, e)

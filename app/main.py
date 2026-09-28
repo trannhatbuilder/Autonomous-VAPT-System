@@ -1190,13 +1190,73 @@ def create_app() -> FastAPI:
         Called by the frontend when user clicks "Abort scan" — cancels all
         in-flight tool subprocesses (SIGKILL the entire process group per
         tool) and lets the scan_pipeline mark the scan as cancelled.
+
+        PATCH (panic-button fix): previously this endpoint ONLY called
+        ExecutionService.cancel_scan(scan_id) — that cancels individual
+        tool asyncio.Tasks but does NOT:
+          - set scan_registry.abort_event → agent loop keeps calling LLM
+          - cancel pipeline_task → pipeline keeps running Phase 5-7 (audit,
+            persist, report) and burning more API calls
+
+        Symptom: user clicks "Abort scan", UI clears (SSE closes), but
+        server logs show LLM calls + tool invocations continuing for
+        minutes afterwards — burning API quota.
+
+        Fix: call BOTH cancel mechanisms:
+          1. scan_registry.abort_scan() — 3-layer cancel (abort_event.set()
+             + pipeline_task.cancel() + SIGKILL subprocess group). This is
+             the primary mechanism — propagates CancelledError into the
+             in-flight LLM call so the agent loop sees it on the next await.
+          2. ExecutionService.cancel_scan() — per-execution cancellation
+             for individual tool asyncio.Tasks. Belt-and-suspenders in case
+             the pipeline_task reference was lost (e.g., scan finished but
+             a long-running tool subprocess is still hanging).
+
+        Both calls are idempotent — calling on an already-aborted scan is
+        a no-op (returns "scan already aborted").
         """
+        # ── 1. Pipeline-level abort (abort_event + pipeline_task.cancel()) ──
+        # Imported here (not at module top) to avoid potential circular imports
+        # during FastAPI startup.
+        from app.pentest.scan_registry import scan_registry
+        from app.pentest.events import emit_scan_error
+        # Emit SSE so frontend shows "aborting..." status immediately.
+        try:
+            await emit_scan_error(scan_id, "Scan aborted: user_panic_button")
+        except Exception:
+            pass
+        pipeline_abort_result: dict[str, Any] = {}
+        try:
+            # run_cleanup=True (default) — scan_registry internally handles
+            # the "already aborted" case as a no-op (returns early WITHOUT
+            # re-running the cleanup script). Safe to call idempotently.
+            pipeline_abort_result = await scan_registry.abort_scan(
+                scan_id=scan_id,
+                reason="user_panic_button",
+                run_cleanup=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "scan_registry.abort_scan() failed for scan=%s (non-fatal — continuing to ExecutionService.cancel_scan): %s",
+                scan_id, exc,
+            )
+            pipeline_abort_result = {"aborted": False, "error": str(exc)}
+
+        # ── 2. Per-tool-execution cancel (kill individual subprocess tasks) ──
+        # Belt-and-suspenders: even if pipeline_task was already cancelled (or
+        # the scan was never registered), this kills any individual tool
+        # asyncio.Tasks still in ExecutionService's tracking dict.
         svc = get_execution_service()
         cancelled_count = await svc.cancel_scan(scan_id)
+
         return {
             "scan_id": scan_id,
             "cancelled_executions": cancelled_count,
-            "message": f"Cancelled {cancelled_count} running tool execution(s) for scan {scan_id}",
+            "pipeline_abort": pipeline_abort_result,
+            "message": (
+                f"Aborted scan {scan_id}: killed {cancelled_count} tool execution(s), "
+                f"pipeline_task_cancelled={pipeline_abort_result.get('pipeline_task_cancelled')}"
+            ),
         }
 
     # ---------- Conversation + Chat endpoints (W7-D) ----------
