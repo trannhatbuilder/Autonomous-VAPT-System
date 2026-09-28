@@ -64,6 +64,9 @@ from app.db.models.rl import RLCheckpoint, RLTransition
 # W7-D — Chat conversations (2 tables)
 from app.db.models.conversation import ChatMessage, Conversation
 
+# F1 — CyberStrikeAI pattern: process_details (1 table)
+from app.db.models.process_detail import ProcessDetail
+
 # W8-E — ATT&CK catalog (1 table)
 from app.db.models.attack_catalog import AttackTechniqueCatalog
 
@@ -108,4 +111,6 @@ __all__ = [
     # W7-D — Chat
     "Conversation",
     "ChatMessage",
+    # F1 — CyberStrikeAI pattern
+    "ProcessDetail",
 ]

@@ -1609,6 +1609,27 @@ def create_app() -> FastAPI:
     from app.routes.orchestration import router as orch_router
     app.include_router(orch_router)
 
+    # ---------- F3: Scan history + process_details timeline ----------
+    # CyberStrikeAI-pattern endpoints for scan history UI:
+    #   GET    /api/scans/history                       — paginated scan list
+    #   GET    /api/scans/{scan_id}                     — single scan detail
+    #   GET    /api/scans/{scan_id}/process-details     — paginated timeline
+    #   GET    /api/scans/{scan_id}/process-details/{id} — single full payload
+    #   DELETE /api/scans/{scan_id}                     — hard delete (findings survive)
+    from app.routes.scans import router as scans_history_router
+    app.include_router(scans_history_router)
+
+    # ---------- F6: Markdown export + scan results aggregation ----------
+    # CyberStrikeAI-pattern on-demand report (no PDF auto-gen — just Markdown
+    # export via /api/vulnerabilities/export).
+    #   GET  /api/vulnerabilities/export?group_by=scan|severity|vuln_type&mode=summary|split
+    #       Export findings as Markdown. Returns JSON with file contents
+    #       inline — frontend downloads via Blob/saveAs.
+    #   GET  /api/scans/{scan_id}/results
+    #       Aggregated JSON (scan + vulnerabilities + optional process_details).
+    from app.routes.vulnerabilities import router as vulns_router
+    app.include_router(vulns_router)
+
     # ---------- W14-S8: C2 Routes ----------
     from app.routes.c2 import router as c2_router
     app.include_router(c2_router)

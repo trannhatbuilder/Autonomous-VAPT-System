@@ -163,6 +163,22 @@ async def execute_tool_call(
     giving us unified hard timeout, cancellation, concurrency cap, and
     status tracking (visible via get_tool_execution meta-tool).
 
+    Phase F5 (CyberStrikeAI-aligned): adds 3-layer cache to avoid
+    wasted subprocess executions:
+
+        1. Tool availability cache — if a binary was marked unavailable
+           (Binary not found / Permission denied) earlier in this scan,
+           return the cached error immediately. Skip subprocess spawn.
+        2. Tool call result cache — if the same (tool_name, args) was
+           already executed in this scan, return the cached output.
+           Skip subprocess spawn.
+        3. Scope-blocked cache — if a (tool_name, args) was blocked by
+           the scope guard earlier, return the cached block message.
+           Skip subprocess spawn.
+
+    All caches are per-scan (in-memory) and cleared when the scan
+    completes/aborts via clear_scan_cache(scan_id).
+
     Args:
         tool_name: tool name (e.g. "nmap", "nuclei", "record_vulnerability", "exit")
         tool_args: arguments dict from LLM tool call
@@ -182,6 +198,34 @@ async def execute_tool_call(
 
     if tool_name == "record_vulnerability":
         return await _record_vulnerability(tool_args, scan_id)
+
+    # ── Phase F5: cache lookups BEFORE subprocess spawn ──────────────
+    # All 3 caches are per-scan (in-memory). A cache HIT means we can
+    # skip the subprocess entirely — saving 0.02-300s of execution time
+    # + LLM tokens that would have been wasted on the same result.
+    from app.agents.tool_call_cache import (
+        get_cached_unavailable,
+        get_cached_result,
+        is_scope_blocked,
+        mark_unavailable,
+        cache_result,
+        mark_scope_blocked,
+    )
+
+    # Layer 1: tool availability (binary missing/blocked)
+    cached_unavail = get_cached_unavailable(scan_id, tool_name)
+    if cached_unavail is not None:
+        return cached_unavail
+
+    # Layer 2: scope-blocked combo (tool + args were blocked earlier)
+    cached_block = is_scope_blocked(scan_id, tool_name, tool_args)
+    if cached_block is not None:
+        return cached_block
+
+    # Layer 3: same tool call with same args (result dedup)
+    cached_result = get_cached_result(scan_id, tool_name, tool_args)
+    if cached_result is not None:
+        return cached_result
 
     # Security tool — execute via ExecutionService + SubprocessExecutor
     all_tools = load_all_tools()
@@ -282,6 +326,23 @@ async def execute_tool_call(
     # Truncate for LLM context (keep first + last 2000 chars)
     if len(output) > 4000:
         output = output[:2000] + "\n... [truncated] ...\n" + output[-2000:]
+
+    # ── Phase F5: populate caches AFTER subprocess returns ──────────
+    # Detect patterns in the output and mark the appropriate cache so
+    # future calls with the same tool/args can skip the subprocess.
+    output_lower_head = output[:500].lower()  # check first 500 chars only
+    if "binary not found" in output_lower_head or "[errno 13] permission denied" in output_lower_head:
+        # Layer 1: tool unavailable (binary missing or no execute perms)
+        # Mark for ALL future calls to this tool_name — no point retrying.
+        mark_unavailable(scan_id, tool_name, output)
+    elif "scope violation" in output_lower_head:
+        # Layer 3: scope-blocked combo — mark for this specific (tool, args)
+        # so different args of the same tool are still tried.
+        mark_scope_blocked(scan_id, tool_name, tool_args, output)
+    else:
+        # Layer 2: successful (or non-binary/scope error) — cache result
+        # so the LLM's retry with same args returns cached output.
+        cache_result(scan_id, tool_name, tool_args, output)
 
     logger.info(
         "Tool result | scan=%s | tool=%s | status=%s | exec_id=%s | output_len=%d",

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
@@ -9,47 +9,40 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Badge } from "../ui/badge";
 import { Progress } from "../ui/progress";
 import { Alert, AlertDescription } from "../ui/alert";
-import { Loader2, Play, Square, Activity, Terminal, ChevronDown, ChevronRight } from "lucide-react";
-import { startScan, getScanEventsUrl, abortScan } from "../../lib/api";
+import {
+  Loader2, Play, Square, RefreshCw, Activity, Terminal,
+  ChevronDown, ChevronRight, Search, History, Trash2, Download,
+} from "lucide-react";
+import {
+  startScan, getScanEventsUrl, abortScan,
+  getScanHistory, getScanDetail, getProcessDetails, getProcessDetail,
+  deleteScan, exportVulnerabilities, downloadTextFile,
+  type ScanSummary, type ScanDetail, type ProcessDetailRow, type ProcessDetailFull,
+} from "../../lib/api";
 import { useToast } from "../../hooks/use-toast";
 
-// ── Event types ────────────────────────────────────────────────────────────
-// Mirrors the Phase D event catalog in app/pentest/events.py.
+// ── Scan event types (for live SSE) ────────────────────────────────────
 type EventType =
-  | "scan_started"
-  | "scan_progress"
-  | "phase_change"
-  | "iteration"
-  | "tool_call_started"
-  | "tool_call_progress"
-  | "tool_call_completed"
-  | "assistant_message"
-  | "thinking"
-  | "finding_detected"
-  | "hitl_approval_required"
-  | "hitl_decision_made"
-  | "scan_complete"
-  | "scan_error"
-  | "heartbeat"
-  | "unknown";
+  | "scan_started" | "scan_progress" | "phase_change" | "iteration"
+  | "tool_call_started" | "tool_call_completed" | "tool_call_progress"
+  | "assistant_message" | "thinking" | "finding_detected"
+  | "hitl_approval_required" | "hitl_decision_made"
+  | "scan_complete" | "scan_error" | "heartbeat" | "unknown";
 
 interface ScanEvent {
   event?: string;
   type: EventType;
   scan_id?: string;
-  // progress / iteration
   turn?: number;
   progress?: number;
   iteration?: number;
   scope?: string;
   phase?: string;
   message?: string;
-  // scan_progress fields
   thought?: string;
   tool_name?: string;
   observation?: string;
   agent_name?: string;
-  // tool_call_started / _completed fields
   tool_call_id?: string;
   arguments?: Record<string, unknown>;
   index?: number;
@@ -57,543 +50,631 @@ interface ScanEvent {
   success?: boolean;
   result_preview?: string;
   execution_id?: string;
-  elapsed_seconds?: number;
   error?: string;
   status?: string;
-  // assistant_message
   content?: string;
   reasoning?: string;
-  // thinking
   text?: string;
-  // finding_detected
   finding_id?: string;
   vuln_type?: string;
   severity?: string;
   location?: string;
-  // terminal
   findings_count?: number;
   duration_seconds?: number;
-  // hitl
-  hitl_id?: string;
-  target?: string;
-  predicted_impact?: string;
-  decision?: string;
-  decided_by?: string;
-  comment?: string;
-  // housekeeping
-  // Unix epoch seconds (backend sends `time.time()`), NOT an ISO string.
-  timestamp?: number;
+  /**
+   * Unix timestamp in SECONDS (float) — set by the backend event bus via
+   * Python's `time.time()` (see app/pentest/events.py) and sent as a JSON
+   * number. Typed loosely because non-SSE sources may serialize it as an
+   * ISO-8601 string.
+   */
+  timestamp?: number | string;
 }
 
-// ── Per-tool-call status tracker ───────────────────────────────────────────
-// Mirrors CyberStrikeAI's toolCallStatusMap: each `tool_call_started` event
-// registers a "running" entry keyed by `tool_call_id`; the matching
-// `tool_call_completed` event flips it to completed/failed. The EventLine
-// for the started event re-renders with the new status when the completed
-// event arrives (we re-scan the events list).
-interface ToolCallState {
-  tool_call_id: string;
-  tool_name: string;
-  status: "running" | "completed" | "failed";
-  args_preview: string;
-  result_preview?: string;
-  error?: string;
-  started_at: string;
-  completed_at?: string;
-  agent_name?: string;
-  iteration?: number;
-  // Latest elapsed time reported by a tool_call_progress heartbeat (seconds).
-  elapsed_seconds?: number;
+/**
+ * Format an event timestamp for display.
+ *
+ * The SSE bus emits Unix seconds (`time.time()`), so numeric values must be
+ * multiplied by 1000 before being passed to `new Date(...)`. ISO strings are
+ * used as-is. Returns "" for missing/invalid input so callers can fall back
+ * to a dash.
+ */
+function formatEventTime(ts: number | string | null | undefined): string {
+  if (ts === null || ts === undefined || ts === "") return "";
+  const date = typeof ts === "number" ? new Date(ts * 1000) : new Date(ts);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString();
 }
 
-/** Convert an event's unix-epoch (seconds) timestamp to an ISO string. */
-function toIso(timestamp?: number): string {
-  return timestamp ? new Date(timestamp * 1000).toISOString() : new Date().toISOString();
-}
-
-function computeToolCallStates(events: ScanEvent[]): Record<string, ToolCallState> {
-  const map: Record<string, ToolCallState> = {};
-  for (const ev of events) {
-    if (ev.type === "tool_call_started" && ev.tool_call_id) {
-      map[ev.tool_call_id] = {
-        tool_call_id: ev.tool_call_id,
-        tool_name: ev.tool_name || "?",
-        status: "running",
-        args_preview: ev.arguments ? JSON.stringify(ev.arguments).slice(0, 120) : "",
-        started_at: toIso(ev.timestamp),
-        agent_name: ev.agent_name,
-        iteration: ev.iteration,
-      };
-    } else if (ev.type === "tool_call_progress") {
-      // Heartbeat while a tool runs. Progress events carry tool_name (not
-      // tool_call_id), so attach to the most recent still-running card for
-      // that tool. Keeps the tool card's elapsed timer ticking instead of
-      // leaving the timeline frozen on `tool_call_started`.
-      const running = Object.values(map).filter(
-        (s) => s.status === "running" && s.tool_name === ev.tool_name,
-      );
-      const target = running[running.length - 1];
-      if (target) {
-        target.elapsed_seconds = ev.elapsed_seconds;
-      }
-    } else if (ev.type === "tool_call_completed" && ev.tool_call_id) {
-      const existing = map[ev.tool_call_id];
-      if (existing) {
-        existing.status = ev.success ? "completed" : "failed";
-        existing.result_preview = ev.result_preview;
-        existing.error = ev.error;
-        existing.completed_at = toIso(ev.timestamp);
-      } else {
-        // tool_call_completed without matching started (e.g. replay) — synthesize
-        map[ev.tool_call_id] = {
-          tool_call_id: ev.tool_call_id,
-          tool_name: ev.tool_name || "?",
-          status: ev.success ? "completed" : "failed",
-          args_preview: "",
-          result_preview: ev.result_preview,
-          error: ev.error,
-          started_at: toIso(ev.timestamp),
-          completed_at: toIso(ev.timestamp),
-          agent_name: ev.agent_name,
-          iteration: ev.iteration,
-        };
-      }
-    }
-  }
-  return map;
-}
+// ── Main ScansView (2-pane layout) ─────────────────────────────────────
+// Mirrors CyberStrikeAI chat UI:
+//   Left sidebar: list past scans + start new scan form
+//   Right main: when scan selected → show live timeline (SSE if running,
+//                DB replay if finished)
 
 export function ScansView() {
-  const { toast } = useToast();
+  const [scans, setScans] = useState<ScanSummary[]>([]);
+  const [scansTotal, setScansTotal] = useState(0);
+  const [scansPage, setScansPage] = useState(0);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [loadingScans, setLoadingScans] = useState(true);
+  const [selectedScanId, setSelectedScanId] = useState<string | null>(null);
+  const [liveScanId, setLiveScanId] = useState<string | null>(null);
+  const [liveStatus, setLiveStatus] = useState<string>("idle");
+
+  // Start new scan form state
   const [target, setTarget] = useState("");
   const [userPrompt, setUserPrompt] = useState("");
   const [starting, setStarting] = useState(false);
-  const [activeScanId, setActiveScanId] = useState<string | null>(null);
-  const [events, setEvents] = useState<ScanEvent[]>([]);
-  const [progress, setProgress] = useState(0);
-  const [currentPhase, setCurrentPhase] = useState<string>("");
-  const [status, setStatus] = useState<string>("idle");
-  const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
-  const eventSourceRef = useRef<EventSource | null>(null);
 
-  // Cleanup EventSource on unmount
-  useEffect(() => {
-    return () => {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-      }
-    };
-  }, []);
+  const { toast } = useToast();
+  const PAGE_SIZE = 20;
 
-  const handleStartScan = async () => {
-    if (!target) {
-      toast({
-        title: "Target required",
-        description: "Enter a target URL or IP to start a scan.",
-        variant: "destructive",
-      });
-      return;
-    }
-    setStarting(true);
-    setEvents([]);
-    setProgress(0);
-    setCurrentPhase("");
-    setStatus("starting");
+  const loadScans = useCallback(async (page = 0, search = "") => {
+    setLoadingScans(true);
     try {
-      const result = await startScan(target, userPrompt);
-
-      // Phase D preflight check — backend may refuse to start scan
-      // if critical tools are missing. Surface the message to the user.
-      if (result.status === "preflight_failed" || !result.scan_id) {
-        setStatus("error");
-        toast({
-          title: "Cannot start scan — tools missing",
-          description: result.message || "Critical tools not installed.",
-          variant: "destructive",
-        });
-        return;
-      }
-
-      setActiveScanId(result.scan_id);
-      setStatus("running");
-      toast({
-        title: "Scan started",
-        description: `Scan ID: ${result.scan_id.slice(0, 16)}...`,
+      const resp = await getScanHistory({
+        limit: PAGE_SIZE,
+        offset: page * PAGE_SIZE,
+        search: search || undefined,
+        sort_by: "started_at",
+        sort_dir: "desc",
       });
-
-      // Connect SSE
-      const url = getScanEventsUrl(result.scan_id);
-      console.log("[VAPT-SSE] Connecting to:", url);
-      const es = new EventSource(url);
-      eventSourceRef.current = es;
-
-      es.onopen = () => {
-        console.log("[VAPT-SSE] Connection opened");
-      };
-
-      es.onmessage = (e) => {
-        try {
-          const raw: ScanEvent = JSON.parse(e.data);
-          const evtName = (raw as any).event || (raw as any).type || "unknown";
-          if (evtName === "heartbeat") return;
-          const data: ScanEvent = { ...raw, type: evtName as EventType };
-
-          setEvents((prev) => [...prev, data]);
-
-          if (data.progress !== undefined && data.progress !== null) {
-            setProgress(data.progress);
-          }
-          if (data.type === "phase_change" && data.phase) {
-            setCurrentPhase(data.phase);
-          }
-          if (data.type === "scan_complete") {
-            console.log("[VAPT-SSE] Scan complete:", data);
-            setStatus("completed");
-            setProgress(100);
-            es.close();
-          } else if (data.type === "scan_error") {
-            console.error("[VAPT-SSE] Scan error:", data);
-            setStatus("error");
-            es.close();
-          }
-        } catch (err) {
-          console.warn("[VAPT-SSE] Failed to parse SSE event:", e.data);
-        }
-      };
-
-      es.onerror = (e: any) => {
-        const state = es.readyState;
-        const stateName = state === 0 ? "CONNECTING" : state === 1 ? "OPEN" : "CLOSED";
-        console.warn(`[VAPT-SSE] Error (readyState=${stateName}). Will auto-reconnect if not CLOSED.`);
-        if (state === 2) {
-          setStatus("error");
-          toast({
-            title: "SSE connection lost",
-            description: "Scan status stream disconnected. Check backend log.",
-            variant: "destructive",
-          });
-        }
-      };
+      setScans(resp.scans);
+      setScansTotal(resp.total);
+      setScansPage(page);
     } catch (err: any) {
-      setStatus("error");
       toast({
-        title: "Failed to start scan",
+        title: "Failed to load scan history",
         description: err.message,
         variant: "destructive",
       });
+    } finally {
+      setLoadingScans(false);
+    }
+  }, [toast]);
+
+  useEffect(() => { loadScans(0, ""); }, [loadScans]);
+
+  // ── Start a new scan ─────────────────────────────────────────────────
+  const handleStartScan = async () => {
+    if (!target) {
+      toast({ title: "Target required", description: "Enter a target URL or IP to start a scan.", variant: "destructive" });
+      return;
+    }
+    setStarting(true);
+    setLiveStatus("starting");
+    try {
+      const result = await startScan(target, userPrompt);
+      if (result.status === "preflight_failed" || !result.scan_id) {
+        setLiveStatus("error");
+        toast({ title: "Cannot start scan", description: result.message || "Tools missing.", variant: "destructive" });
+        return;
+      }
+      setLiveScanId(result.scan_id);
+      setSelectedScanId(result.scan_id);
+      setLiveStatus("running");
+      toast({ title: "Scan started", description: `Scan ID: ${result.scan_id.slice(0, 16)}...` });
+    } catch (err: any) {
+      setLiveStatus("error");
+      toast({ title: "Failed to start scan", description: err.message, variant: "destructive" });
     } finally {
       setStarting(false);
     }
   };
 
   const handleAbort = async () => {
-    if (!activeScanId) return;
+    if (!liveScanId) return;
     try {
-      await abortScan(activeScanId);
-      toast({
-        title: "Scan aborted",
-        description: `Cancelled scan ${activeScanId.slice(0, 16)}...`,
-      });
-      setStatus("aborted");
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-      }
+      await abortScan(liveScanId);
+      toast({ title: "Scan aborted", description: `Cancelled scan ${liveScanId.slice(0, 16)}...` });
+      setLiveStatus("aborted");
+      setLiveScanId(null);
     } catch (err: any) {
-      toast({
-        title: "Abort failed",
-        description: err.message,
-        variant: "destructive",
-      });
+      toast({ title: "Abort failed", description: err.message, variant: "destructive" });
     }
   };
 
-  const toggleTool = (id: string) => {
-    setExpandedTools((prev) => ({ ...prev, [id]: !prev[id] }));
+  const handleSelectScan = (scanId: string) => {
+    setSelectedScanId(scanId);
+    // If the selected scan is still running (from getScanHistory we have status),
+    // use live SSE; otherwise use DB replay
+    const scan = scans.find(s => s.id === scanId);
+    if (scan && (scan.status === "running" || scan.status === "pending")) {
+      setLiveScanId(scanId);
+      setLiveStatus("running");
+    } else {
+      setLiveScanId(null);
+      setLiveStatus("idle");
+    }
   };
 
-  const isRunning = status === "running" || status === "starting";
+  const handleDeleteScan = async (scanId: string) => {
+    if (!confirm(`Delete scan ${scanId.slice(0, 16)}...? Findings will be preserved (with scan_tag snapshot).`)) return;
+    try {
+      const result = await deleteScan(scanId);
+      toast({
+        title: "Scan deleted",
+        description: `Findings preserved: ${result.findings_preserved}, process_details deleted: ${result.process_details_deleted}`,
+      });
+      // Reload the list
+      loadScans(scansPage, searchQuery);
+      if (selectedScanId === scanId) setSelectedScanId(null);
+    } catch (err: any) {
+      toast({ title: "Delete failed", description: err.message, variant: "destructive" });
+    }
+  };
+
+  const isLive = liveScanId === selectedScanId && (liveStatus === "running" || liveStatus === "starting");
 
   return (
-    <div className="max-w-5xl mx-auto space-y-6">
-      <div>
-        <h2 className="text-2xl font-semibold text-zinc-50">Start a scan</h2>
-        <p className="text-sm text-zinc-400 mt-1">
-          Enter a single target (URL, IP, or hostname). VAPT-AI will run the supervisor
-          multi-agent flow: recon → vuln-triage → penetration (HITL) → reporting.
-        </p>
-      </div>
+    <div className="flex h-[calc(100vh-4rem)] -mx-6 -my-6">
+      {/* Left sidebar: Start form + scan history list */}
+      <aside className="w-96 border-r border-zinc-800 bg-zinc-900/40 flex flex-col overflow-hidden">
+        {/* Start new scan form */}
+        <div className="p-4 border-b border-zinc-800">
+          <h3 className="text-sm font-semibold text-zinc-200 mb-3">Start new scan</h3>
+          <div className="space-y-3">
+            <div>
+              <Label htmlFor="target" className="text-xs text-zinc-400">Target</Label>
+              <Input
+                id="target"
+                type="text"
+                placeholder="https://example.com or 10.0.0.1"
+                value={target}
+                onChange={(e) => setTarget(e.target.value)}
+                disabled={starting}
+                className="bg-zinc-950 border-zinc-800 text-zinc-50 placeholder-zinc-600 font-mono text-sm h-9"
+              />
+            </div>
+            <div>
+              <Label htmlFor="prompt" className="text-xs text-zinc-400">Prompt (optional)</Label>
+              <Input
+                id="prompt"
+                type="text"
+                placeholder="Scan for SQLi + XSS"
+                value={userPrompt}
+                onChange={(e) => setUserPrompt(e.target.value)}
+                disabled={starting}
+                className="bg-zinc-950 border-zinc-800 text-zinc-50 placeholder-zinc-600 text-sm h-9"
+              />
+            </div>
+            {!isLive ? (
+              <Button onClick={handleStartScan} disabled={!target || starting} className="w-full bg-emerald-600 hover:bg-emerald-500 text-zinc-50 h-9" size="sm">
+                {starting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Play className="w-4 h-4 mr-2" />}
+                Start scan
+              </Button>
+            ) : (
+              <Button onClick={handleAbort} variant="destructive" className="w-full bg-red-700 hover:bg-red-600 h-9" size="sm">
+                <Square className="w-4 h-4 mr-2" /> Abort scan
+              </Button>
+            )}
+          </div>
+        </div>
 
-      {/* Start form */}
-      <Card className="bg-zinc-900/60 border-zinc-800">
-        <CardHeader>
-          <CardTitle className="text-zinc-50">New scan</CardTitle>
-          <CardDescription className="text-zinc-400">
-            Single-target web pentest. For network ranges, use the CLI.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="target" className="text-zinc-200">Target</Label>
+        {/* Search + scan history list */}
+        <div className="p-3 border-b border-zinc-800">
+          <div className="flex items-center gap-2">
+            <Search className="w-4 h-4 text-zinc-500 shrink-0" />
             <Input
-              id="target"
               type="text"
-              placeholder="https://example.com  |  192.168.1.10  |  example.com"
-              value={target}
-              onChange={(e) => setTarget(e.target.value)}
-              disabled={isRunning}
-              className="bg-zinc-950 border-zinc-800 text-zinc-50 placeholder-zinc-600 font-mono"
+              placeholder="Search scans..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") loadScans(0, searchQuery); }}
+              className="bg-zinc-950 border-zinc-800 text-zinc-50 placeholder-zinc-600 text-sm h-8"
             />
-            <p className="text-xs text-zinc-500">
-              Must include scheme for URLs (https://). Subdomains of the target are auto-included in scope.
-            </p>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="prompt" className="text-zinc-200">Prompt <span className="text-zinc-500">(optional)</span></Label>
-            <Textarea
-              id="prompt"
-              placeholder="Scan for OWASP Top 10 vulnerabilities. Focus on SQLi + XSS."
-              value={userPrompt}
-              onChange={(e) => setUserPrompt(e.target.value)}
-              disabled={isRunning}
-              className="bg-zinc-950 border-zinc-800 text-zinc-50 placeholder-zinc-600 min-h-[80px] resize-y"
-            />
-            <p className="text-xs text-zinc-500">
-              Natural-language scan goal. Empty = full default pentest.
-            </p>
-          </div>
-        </CardContent>
-        <CardFooter className="flex gap-2">
-          {!isRunning ? (
-            <Button
-              onClick={handleStartScan}
-              disabled={!target || starting}
-              className="bg-emerald-600 hover:bg-emerald-500 text-zinc-50"
-            >
-              {starting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Play className="w-4 h-4 mr-2" />}
-              Start scan
+            <Button size="sm" variant="ghost" onClick={() => loadScans(0, searchQuery)} className="text-zinc-400 hover:text-zinc-100 h-8 px-2">
+              <Search className="w-3 h-3" />
             </Button>
+          </div>
+        </div>
+
+        {/* Scan list */}
+        <div className="flex-1 overflow-y-auto">
+          {loadingScans ? (
+            <div className="p-4 text-center text-zinc-600 text-sm">
+              <Loader2 className="w-4 h-4 animate-spin mx-auto mb-2" />
+              Loading scans...
+            </div>
+          ) : scans.length === 0 ? (
+            <div className="p-4 text-center text-zinc-600 text-sm">No scans found.</div>
           ) : (
-            <Button
-              onClick={handleAbort}
-              variant="destructive"
-              className="bg-red-700 hover:bg-red-600"
-            >
-              <Square className="w-4 h-4 mr-2" />
-              Abort scan
-            </Button>
+            scans.map((scan) => (
+              <ScanListItem
+                key={scan.id}
+                scan={scan}
+                isSelected={selectedScanId === scan.id}
+                onSelect={() => handleSelectScan(scan.id)}
+                onDelete={() => handleDeleteScan(scan.id)}
+              />
+            ))
           )}
-        </CardFooter>
-      </Card>
-
-      {/* Live progress */}
-      {activeScanId && (
-        <Card className="bg-zinc-900/60 border-zinc-800">
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <div>
-                <CardTitle className="text-zinc-50 flex items-center gap-2">
-                  <Activity className={`w-4 h-4 ${isRunning ? "text-emerald-400 animate-pulse" : "text-zinc-500"}`} />
-                  Live scan progress
-                </CardTitle>
-                <CardDescription className="text-zinc-400 mt-1 font-mono text-xs">
-                  scan_id: {activeScanId}
-                  {currentPhase && <span className="ml-2 text-zinc-500">· phase: {currentPhase}</span>}
-                </CardDescription>
+          {/* Pagination */}
+          {scansTotal > PAGE_SIZE && (
+            <div className="p-2 flex items-center justify-between text-xs text-zinc-500">
+              <span>Page {scansPage + 1} of {Math.ceil(scansTotal / PAGE_SIZE)}</span>
+              <div className="flex gap-1">
+                <Button size="sm" variant="ghost" disabled={scansPage === 0} onClick={() => loadScans(scansPage - 1, searchQuery)} className="h-7 px-2 text-xs">
+                  Prev
+                </Button>
+                <Button size="sm" variant="ghost" disabled={(scansPage + 1) * PAGE_SIZE >= scansTotal} onClick={() => loadScans(scansPage + 1, searchQuery)} className="h-7 px-2 text-xs">
+                  Next
+                </Button>
               </div>
-              <Badge
-                variant={status === "completed" ? "default" : status === "error" ? "destructive" : "secondary"}
-                className={
-                  status === "completed" ? "bg-emerald-700 text-zinc-50" :
-                  status === "error" ? "bg-red-700 text-zinc-50" :
-                  status === "aborted" ? "bg-zinc-700 text-zinc-200" :
-                  "bg-zinc-800 text-zinc-100"
-                }
-              >
-                {status}
-              </Badge>
             </div>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {/* Progress bar */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-xs text-zinc-400">
-                <span>Progress</span>
-                <span className="tabular-nums">{progress}%</span>
-              </div>
-              <Progress value={progress} className="h-2 bg-zinc-800" />
-            </div>
+          )}
+        </div>
+      </aside>
 
-            {/* Timeline */}
-            <div className="space-y-1 max-h-[600px] overflow-y-auto bg-zinc-950 rounded border border-zinc-800 p-3 font-mono text-xs">
-              {events.length === 0 ? (
-                <div className="text-zinc-600 italic">Waiting for events...</div>
-              ) : (
-                events.map((ev, idx) => (
-                  <EventLine
-                    key={idx}
-                    event={ev}
-                    toolCallStates={computeToolCallStates(events.slice(0, idx + 1))}
-                    expanded={expandedTools}
-                    onToggle={toggleTool}
-                  />
-                ))
-              )}
+      {/* Right main: scan detail / live timeline */}
+      <main className="flex-1 overflow-hidden flex flex-col">
+        {!selectedScanId ? (
+          <div className="flex-1 flex items-center justify-center text-zinc-600">
+            <div className="text-center">
+              <History className="w-12 h-12 mx-auto mb-3 text-zinc-700" />
+              <p className="text-sm">Select a scan from the sidebar or start a new scan.</p>
             </div>
-          </CardContent>
-        </Card>
-      )}
+          </div>
+        ) : (
+          <ScanTimeline
+            scanId={selectedScanId}
+            isLive={isLive}
+            onLiveComplete={() => { setLiveScanId(null); setLiveStatus("completed"); loadScans(0, searchQuery); }}
+          />
+        )}
+      </main>
     </div>
   );
 }
 
-// ── EventLine ──────────────────────────────────────────────────────────────
-// Renders a single event in the timeline. Different event types get
-// different visual treatments so the user can immediately see what's
-// happening (e.g. a tool card with status dot, a phase divider, a
-// chat bubble for assistant messages, etc.).
+// ── ScanListItem (sidebar item) ───────────────────────────────────────
 
-function EventLine({
-  event,
-  toolCallStates,
-  expanded,
-  onToggle,
-}: {
-  event: ScanEvent;
-  toolCallStates: Record<string, ToolCallState>;
-  expanded: Record<string, boolean>;
-  onToggle: (id: string) => void;
+function ScanListItem({ scan, isSelected, onSelect, onDelete }: {
+  scan: ScanSummary;
+  isSelected: boolean;
+  onSelect: () => void;
+  onDelete: () => void;
 }) {
-  const time = event.timestamp ? new Date(event.timestamp * 1000).toLocaleTimeString() : "";
-
-  // ── Tool call events: render as a tool card with status dot ────────
-  if (event.type === "tool_call_started" && event.tool_call_id) {
-    const state = toolCallStates[event.tool_call_id];
-    if (!state) return null; // shouldn't happen
-    return (
-      <ToolCard
-        state={state}
-        time={time}
-        expanded={!!expanded[event.tool_call_id]}
-        onToggle={() => onToggle(event.tool_call_id!)}
-      />
-    );
-  }
-  // tool_call_completed events don't render their own line — they update
-  // the matching tool card's status. The card is rendered when its
-  // tool_call_started event was emitted earlier in the timeline.
-  if (event.type === "tool_call_completed") {
-    return null;
-  }
-  // tool_call_progress heartbeats update the running tool card's elapsed
-  // timer (see computeToolCallStates) — no separate timeline line.
-  if (event.type === "tool_call_progress") {
-    return null;
-  }
-
-  // ── Phase change: render as a divider ──────────────────────────────
-  if (event.type === "phase_change") {
-    return (
-      <div className="flex items-center gap-2 py-1 mt-2 border-t border-zinc-800">
-        <span className="text-zinc-600">{time}</span>
-        <span className="text-purple-400 shrink-0">━━━ phase:</span>
-        <span className="text-purple-300 font-semibold">{event.phase}</span>
-        {event.message && <span className="text-zinc-500">— {event.message}</span>}
-        {event.progress !== undefined && (
-          <span className="text-zinc-600 ml-auto">[{event.progress}%]</span>
+  const statusColor =
+    scan.status === "completed" ? "text-emerald-400" :
+    scan.status === "running" ? "text-blue-400" :
+    scan.status === "failed" ? "text-red-400" :
+    scan.status === "aborted" ? "text-zinc-400" :
+    "text-zinc-500";
+  const bgClass = isSelected ? "bg-zinc-800/60 border-l-2 border-emerald-600" : "hover:bg-zinc-800/30 border-l-2 border-transparent";
+  return (
+    <div onClick={onSelect} className={`cursor-pointer px-3 py-3 border-b border-zinc-800 ${bgClass} transition-colors`}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex-1 min-w-0">
+          <div className={`text-xs font-mono truncate ${statusColor}`}>{scan.target}</div>
+          <div className="text-[10px] text-zinc-600 mt-1 truncate">
+            {scan.started_at ? new Date(scan.started_at).toLocaleString() : "—"}
+          </div>
+        </div>
+        <button
+          onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          className="text-zinc-700 hover:text-red-400 shrink-0"
+          title="Delete scan (findings preserved)"
+        >
+          <Trash2 className="w-3 h-3" />
+        </button>
+      </div>
+      <div className="flex items-center gap-2 mt-1.5 text-[10px]">
+        <span className={statusColor}>{scan.status}</span>
+        {scan.findings_count !== null && scan.findings_count > 0 && (
+          <span className="text-amber-400">{scan.findings_count} findings</span>
+        )}
+        {scan.progress !== null && scan.progress < 100 && scan.status === "running" && (
+          <span className="text-zinc-500">{scan.progress}%</span>
         )}
       </div>
-    );
+    </div>
+  );
+}
+
+// ── ScanTimeline (right pane) ─────────────────────────────────────────
+// If scan is live (running): connect SSE, append events as they arrive.
+// If scan is finished: fetch process_details from DB (paginated).
+
+function ScanTimeline({ scanId, isLive, onLiveComplete }: {
+  scanId: string;
+  isLive: boolean;
+  onLiveComplete: () => void;
+}) {
+  const [scan, setScan] = useState<ScanDetail | null>(null);
+  const [events, setEvents] = useState<ScanEvent[]>([]);
+  const [progress, setProgress] = useState(0);
+  const [dbEvents, setDbEvents] = useState<ProcessDetailRow[]>([]);
+  const [dbTotal, setDbTotal] = useState(0);
+  const [dbOffset, setDbOffset] = useState(0);
+  const [loadingDb, setLoadingDb] = useState(false);
+  const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const timelineEndRef = useRef<HTMLDivElement | null>(null);
+
+  // ── Load scan detail (always) ─────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const detail = await getScanDetail(scanId, { include_process_details: 0 });
+        if (!cancelled) {
+          setScan(detail);
+          setProgress(detail.progress);
+        }
+      } catch (err) {
+        console.error("Failed to load scan detail", err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [scanId]);
+
+  // ── Live mode: SSE stream ────────────────────────────────────────
+  useEffect(() => {
+    if (!isLive) {
+      // Cleanup SSE if switching from live to non-live
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+      return;
+    }
+    const url = getScanEventsUrl(scanId);
+    console.log("[VAPT-SSE] Connecting to:", url);
+    const es = new EventSource(url);
+    eventSourceRef.current = es;
+
+    es.onopen = () => console.log("[VAPT-SSE] Connection opened");
+    es.onmessage = (e) => {
+      try {
+        const raw: ScanEvent = JSON.parse(e.data);
+        const evtName = (raw as any).event || (raw as any).type || "unknown";
+        if (evtName === "heartbeat") return;
+        const data: ScanEvent = { ...raw, type: evtName as EventType };
+        setEvents((prev) => [...prev, data]);
+        if (data.progress !== undefined && data.progress !== null) setProgress(data.progress);
+        if (data.type === "scan_complete") { es.close(); onLiveComplete(); }
+        else if (data.type === "scan_error") { es.close(); onLiveComplete(); }
+      } catch (err) { console.warn("[VAPT-SSE] Failed to parse SSE event:", e.data); }
+    };
+    es.onerror = () => {
+      if (es.readyState === 2) console.warn("[VAPT-SSE] Connection closed (state=2)");
+    };
+    return () => { es.close(); eventSourceRef.current = null; };
+  }, [scanId, isLive, onLiveComplete]);
+
+  // ── DB replay mode: fetch process_details ────────────────────────
+  useEffect(() => {
+    if (isLive) { setDbEvents([]); setDbTotal(0); setDbOffset(0); return; }
+    setLoadingDb(true);
+    (async () => {
+      try {
+        const resp = await getProcessDetails(scanId, { limit: 100, offset: 0 });
+        setDbEvents(resp.process_details);
+        setDbTotal(resp.total);
+        setDbOffset(resp.process_details.length);
+      } catch (err) {
+        console.error("Failed to load process_details", err);
+      } finally { setLoadingDb(false); }
+    })();
+  }, [scanId, isLive]);
+
+  // ── Auto-scroll to bottom on new events ─────────────────────────
+  useEffect(() => {
+    if (timelineEndRef.current) {
+      timelineEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [events, dbEvents]);
+
+  const loadMoreDb = async () => {
+    if (dbOffset >= dbTotal) return;
+    setLoadingDb(true);
+    try {
+      const resp = await getProcessDetails(scanId, { limit: 100, offset: dbOffset });
+      setDbEvents((prev) => [...prev, ...resp.process_details]);
+      setDbOffset((prev) => prev + resp.process_details.length);
+    } finally { setLoadingDb(false); }
+  };
+
+  const toggleTool = (id: string) => setExpandedTools((prev) => ({ ...prev, [id]: !prev[id] }));
+
+  // ── Build unified timeline ──────────────────────────────────────
+  // Live events come from SSE (ScanEvent[]), DB events come from
+  // process_details (ProcessDetailRow[]). We render both in the same
+  // timeline — live takes precedence (newer) when both are present.
+  type TimelineItem =
+    | { kind: "live"; event: ScanEvent; key: string }
+    | { kind: "db"; row: ProcessDetailRow; key: string };
+
+  const timeline: TimelineItem[] = [];
+  if (isLive && events.length > 0) {
+    events.forEach((ev, idx) => timeline.push({ kind: "live", event: ev, key: `live-${idx}` }));
+  } else if (!isLive && dbEvents.length > 0) {
+    dbEvents.forEach((row) => timeline.push({ kind: "db", row, key: `db-${row.id}` }));
   }
 
-  // ── Iteration: render as a sub-divider ──────────────────────────────
-  if (event.type === "iteration") {
-    const scope = event.scope === "main" ? "Main agent" : `Sub-agent ${event.agent_name || "?"}`;
+  return (
+    <div className="flex-1 overflow-hidden flex flex-col">
+      {/* Scan header */}
+      <div className="px-6 py-4 border-b border-zinc-800 bg-zinc-900/40">
+        <div className="flex items-center justify-between">
+          <div className="flex-1 min-w-0">
+            <h2 className="text-lg font-semibold text-zinc-100 truncate">
+              {scan?.target || "Loading..."}
+            </h2>
+            <p className="text-xs text-zinc-500 font-mono mt-1">
+              {scanId}
+              {scan?.started_at && <span className="ml-2">· {new Date(scan.started_at).toLocaleString()}</span>}
+              {scan?.completed_at && <span className="ml-2">→ {new Date(scan.completed_at).toLocaleString()}</span>}
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <Badge className={
+              scan?.status === "completed" ? "bg-emerald-700 text-zinc-50" :
+              scan?.status === "running" ? "bg-blue-700 text-zinc-50" :
+              scan?.status === "failed" ? "bg-red-700 text-zinc-50" :
+              "bg-zinc-700 text-zinc-200"
+            }>
+              {isLive ? "live" : scan?.status || "—"}
+            </Badge>
+            {scan?.findings_count !== null && scan?.findings_count !== undefined && scan.findings_count > 0 && (
+              <Badge className="bg-amber-700 text-zinc-50">
+                {scan.findings_count} findings
+              </Badge>
+            )}
+          </div>
+        </div>
+        {/* Progress bar */}
+        <div className="mt-3 flex items-center gap-3">
+          <Progress value={progress} className="h-1.5 bg-zinc-800 flex-1" />
+          <span className="text-xs text-zinc-500 tabular-nums w-10 text-right">{progress}%</span>
+        </div>
+      </div>
+
+      {/* Timeline */}
+      <div className="flex-1 overflow-y-auto bg-zinc-950 p-4">
+        <div className="max-w-4xl mx-auto space-y-1 font-mono text-xs">
+          {timeline.length === 0 ? (
+            <div className="text-zinc-600 italic text-center py-12">
+              {isLive ? "Waiting for events..." : (loadingDb ? "Loading timeline..." : "No events recorded.")}
+            </div>
+          ) : (
+            timeline.map((item) => {
+              if (item.kind === "live") {
+                return <LiveEventLine key={item.key} event={item.event} />;
+              } else {
+                return <DbEventLine key={item.key} row={item.row} scanId={scanId} expanded={!!expandedTools[item.row.id]} onToggle={() => toggleTool(item.row.id)} />;
+              }
+            })
+          )}
+          {timeline.length > 0 && <div ref={timelineEndRef} />}
+        </div>
+        {/* Load more (DB mode only) */}
+        {!isLive && dbOffset < dbTotal && (
+          <div className="text-center py-4">
+            <Button size="sm" variant="ghost" onClick={loadMoreDb} disabled={loadingDb} className="text-zinc-400">
+              {loadingDb ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <ChevronDown className="w-4 h-4 mr-2" />}
+              Load more ({dbTotal - dbOffset} remaining)
+            </Button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── LiveEventLine (rendered for SSE events during live scan) ──────────
+
+function LiveEventLine({ event }: { event: ScanEvent }) {
+  const time = formatEventTime(event.timestamp);
+  const type = event.type;
+
+  if (type === "phase_change") {
     return (
-      <div className="flex items-center gap-2 py-1 mt-1 text-zinc-500">
+      <div className="flex items-center gap-2 py-1 mt-2 border-t border-zinc-800">
         <span className="text-zinc-700">{time}</span>
-        <span className="text-zinc-500">──</span>
-        <span>{scope} · round {event.iteration}</span>
+        <span className="text-purple-400">━━━</span>
+        <span className="text-purple-300 font-semibold">{event.phase}</span>
+        {event.message && <span className="text-zinc-500">— {event.message}</span>}
+        {event.progress !== undefined && <span className="text-zinc-600 ml-auto">[{event.progress}%]</span>}
       </div>
     );
   }
-
-  // ── Thinking: brief status line ─────────────────────────────────────
-  if (event.type === "thinking") {
+  if (type === "iteration") {
+    return (
+      <div className="flex gap-2 py-1 mt-1 text-zinc-500">
+        <span className="text-zinc-700">{time}</span>
+        <span>──</span>
+        <span>{event.scope === "main" ? "Main agent" : `Sub-agent ${event.agent_name || "?"}`} · round {event.iteration}</span>
+      </div>
+    );
+  }
+  if (type === "thinking") {
     return (
       <div className="flex gap-2 leading-relaxed text-zinc-500 italic">
         <span className="text-zinc-700 shrink-0">{time || "—"}</span>
-        <span className="shrink-0">🤔</span>
+        <span className="shrink-0">think</span>
         <span className="break-all">{event.text}</span>
       </div>
     );
   }
-
-  // ── Assistant message: render as a chat bubble ─────────────────────
-  if (event.type === "assistant_message") {
+  if (type === "assistant_message") {
     return (
-      <div className="flex gap-2 leading-relaxed my-1">
+      <div className="flex gap-2 leading-relaxed my-1 p-2 bg-blue-950/20 border border-blue-900/50 rounded">
         <span className="text-zinc-700 shrink-0">{time || "—"}</span>
-        <span className="shrink-0 text-blue-400">💬 {event.agent_name || "assistant"}</span>
+        <span className="shrink-0 text-blue-400">{event.agent_name || "assistant"}</span>
         <span className="text-zinc-200 break-all whitespace-pre-wrap">{event.content}</span>
       </div>
     );
   }
-
-  // ── Finding detected: amber highlight ──────────────────────────────
-  if (event.type === "finding_detected") {
+  if (type === "finding_detected") {
     return (
       <div className="flex gap-2 leading-relaxed my-1 p-2 bg-amber-950/30 border border-amber-900 rounded">
         <span className="text-zinc-700 shrink-0">{time || "—"}</span>
-        <span className="shrink-0 text-amber-400">⚠ FINDING [{event.severity}]</span>
-        <span className="text-amber-200 break-all">
-          {event.vuln_type} @ {event.location}
-        </span>
+        <span className="shrink-0 text-amber-400">FINDING [{event.severity}]</span>
+        <span className="text-amber-200 break-all">{event.vuln_type} @ {event.location}</span>
       </div>
     );
   }
-
-  // ── Scan terminal events ────────────────────────────────────────────
-  if (event.type === "scan_complete") {
+  if (type === "scan_started") {
+    return (
+      <div className="flex gap-2 leading-relaxed py-1 border-b border-zinc-800 mb-2">
+        <span className="text-zinc-700">{time || "—"}</span>
+        <span className="text-blue-400">SCAN STARTED</span>
+        <span className="text-zinc-300 break-all">target: {event.scan_id || ""}</span>
+      </div>
+    );
+  }
+  if (type === "scan_complete") {
     return (
       <div className="flex gap-2 leading-relaxed my-1 p-2 bg-emerald-950/30 border border-emerald-900 rounded">
-        <span className="text-zinc-700 shrink-0">{time || "—"}</span>
-        <span className="shrink-0 text-emerald-400">✓ SCAN COMPLETE</span>
-        <span className="text-emerald-200 break-all">
-          {event.findings_count} findings · {event.duration_seconds?.toFixed(1)}s
-        </span>
+        <span className="text-zinc-700">{time || "—"}</span>
+        <span className="text-emerald-400">SCAN COMPLETE</span>
+        <span className="text-emerald-200">{event.findings_count} findings · {event.duration_seconds?.toFixed(1)}s</span>
       </div>
     );
   }
-  if (event.type === "scan_error") {
+  if (type === "scan_error") {
     return (
       <div className="flex gap-2 leading-relaxed my-1 p-2 bg-red-950/30 border border-red-900 rounded">
-        <span className="text-zinc-700 shrink-0">{time || "—"}</span>
-        <span className="shrink-0 text-red-400">✗ SCAN ERROR</span>
+        <span className="text-zinc-700">{time || "—"}</span>
+        <span className="text-red-400">SCAN ERROR</span>
         <span className="text-red-200 break-all">{event.error}</span>
       </div>
     );
   }
-
-  // ── scan_started ────────────────────────────────────────────────────
-  if (event.type === "scan_started") {
+  if (type === "tool_call_started") {
     return (
-      <div className="flex gap-2 leading-relaxed py-1 border-b border-zinc-800 mb-2">
-        <span className="text-zinc-700 shrink-0">{time || "—"}</span>
-        <span className="shrink-0 text-blue-400">▶ SCAN STARTED</span>
-        <span className="text-zinc-300 break-all">target: {event.target || ""}</span>
+      <div className="flex gap-2 leading-relaxed my-0.5 p-2 bg-amber-950/20 border border-amber-900/50 rounded">
+        <span className="text-zinc-700 shrink-0">{time}</span>
+        <span className="shrink-0 text-amber-400">TOOL</span>
+        <span className="text-zinc-200 font-semibold shrink-0">{event.tool_name}</span>
+        {event.agent_name && <span className="text-zinc-500 text-[10px]">[{event.agent_name}]</span>}
+        {event.arguments && <span className="text-zinc-500 truncate flex-1">({JSON.stringify(event.arguments).slice(0, 80)})</span>}
+        <span className="text-amber-400 animate-pulse shrink-0">running</span>
       </div>
     );
   }
-
-  // ── Generic scan_progress fallback ─────────────────────────────────
-  // Renders with agent_name prefix + thought text. Used by the older
-  // emit_scan_progress call sites that haven't been migrated to granular
-  // events yet.
-  if (event.type === "scan_progress") {
+  if (type === "tool_call_completed") {
+    const success = event.success;
+    return (
+      <div className={`flex gap-2 leading-relaxed my-0.5 p-2 border rounded ${success ? "bg-emerald-950/20 border-emerald-900/50" : "bg-red-950/20 border-red-900/50"}`}>
+        <span className="text-zinc-700 shrink-0">{time}</span>
+        <span className={`shrink-0 ${success ? "text-emerald-400" : "text-red-400"}`}>
+          {success ? "OK" : "FAIL"} {event.tool_name}
+        </span>
+        {event.result_preview && (
+          <span className={`truncate flex-1 ${success ? "text-zinc-400" : "text-red-300"}`}>
+            {event.result_preview}
+          </span>
+        )}
+      </div>
+    );
+  }
+  // scan_progress fallback
+  if (type === "scan_progress") {
     const prefix = event.agent_name ? `[${event.agent_name}]` : "[orchestrator]";
     let content = event.thought || "";
     if (event.tool_name) content += ` | tool=${event.tool_name}`;
-    if (event.observation) content += ` | obs=${event.observation.slice(0, 100)}`;
     return (
       <div className="flex gap-2 leading-relaxed">
         <span className="text-zinc-700 shrink-0">{time || "—"}</span>
@@ -602,125 +683,111 @@ function EventLine({
       </div>
     );
   }
+  // Unknown — skip rendering
+  return null;
+}
 
-  // ── HITL ────────────────────────────────────────────────────────────
-  if (event.type === "hitl_approval_required") {
+// ── DbEventLine (rendered for DB-replayed events from process_details) ─
+
+function DbEventLine({ row, scanId, expanded, onToggle }: {
+  row: ProcessDetailRow;
+  scanId: string;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const time = row.created_at ? new Date(row.created_at).toLocaleTimeString() : "";
+  const type = row.event_type;
+  const message = row.message || "";
+  // data JSONB from DB — parse tool_name, agent_name, etc.
+  const data = row.data as Record<string, any> | null;
+  const toolName = data?.tool_name;
+  const agentName = data?.agent_name;
+  const success = data?.success;
+  const argsPreview = data?.arguments ? JSON.stringify(data.arguments).slice(0, 100) : "";
+  const resultPreview = data?.result_preview || data?.result || "";
+
+  // Tool call events — render as expandable card
+  if (type === "tool_call_started" || type === "tool_call_completed") {
+    const isCompleted = type === "tool_call_completed";
+    const statusIcon = isCompleted ? (success ? "OK" : "FAIL") : "...";
+    const statusColor = isCompleted ? (success ? "text-emerald-400" : "text-red-400") : "text-amber-400 animate-pulse";
+    const bgClass = isCompleted ? (success ? "bg-emerald-950/20 border-emerald-900/50" : "bg-red-950/20 border-red-900/50") : "bg-amber-950/20 border-amber-900/50";
     return (
-      <div className="flex gap-2 leading-relaxed my-1 p-2 bg-purple-950/30 border border-purple-900 rounded">
-        <span className="text-zinc-700 shrink-0">{time || "—"}</span>
-        <span className="shrink-0 text-purple-400">🛡 HITL required</span>
-        <span className="text-purple-200 break-all">
-          {event.tool_name} @ {event.target} ({event.predicted_impact})
-        </span>
+      <div className={`my-0.5 p-2 border rounded ${bgClass}`}>
+        <div className="flex items-center gap-2 cursor-pointer" onClick={onToggle}>
+          <span className="text-zinc-700 shrink-0">{time}</span>
+          <span className={`shrink-0 font-semibold ${statusColor}`}>{statusIcon}</span>
+          <span className="text-zinc-200 shrink-0">{toolName}</span>
+          {agentName && <span className="text-zinc-500 text-[10px]">[{agentName}]</span>}
+          {argsPreview && <span className="text-zinc-500 truncate flex-1">({argsPreview})</span>}
+          {expanded ? <ChevronDown className="w-3 h-3 ml-auto shrink-0" /> : <ChevronRight className="w-3 h-3 ml-auto shrink-0" />}
+        </div>
+        {expanded && (
+          <DbToolPayload row={row} scanId={scanId} />
+        )}
       </div>
     );
   }
-  if (event.type === "hitl_decision_made") {
-    const isApprove = event.decision === "approve";
-    return (
-      <div className="flex gap-2 leading-relaxed my-1">
-        <span className="text-zinc-700 shrink-0">{time || "—"}</span>
-        <span className={`shrink-0 ${isApprove ? "text-emerald-400" : "text-red-400"}`}>
-          {isApprove ? "✓" : "✗"} HITL {event.decision}
-        </span>
-        <span className="text-zinc-300 break-all">
-          by {event.decided_by} — {event.tool_name} @ {event.target}
-        </span>
-      </div>
-    );
-  }
-
-  // Unknown event — render raw
+  // Other event types — render as simple line
   return (
-    <div className="flex gap-2 leading-relaxed text-zinc-600">
+    <div className="flex gap-2 leading-relaxed">
       <span className="text-zinc-700 shrink-0">{time || "—"}</span>
-      <span className="shrink-0">{event.type}</span>
-      <span className="break-all">{JSON.stringify(event).slice(0, 200)}</span>
+      <span className="shrink-0 text-zinc-500">{type}</span>
+      <span className="text-zinc-300 break-all">{message}</span>
+      {resultPreview && <span className="text-zinc-500 break-all">— {String(resultPreview).slice(0, 100)}</span>}
     </div>
   );
 }
 
-// ── ToolCard ────────────────────────────────────────────────────────────────
-// Renders a tool_call_started event with status dot. Updates its status
-// when the matching tool_call_completed event arrives (the EventLine
-// parent passes fresh toolCallStates on each render).
+// ── DbToolPayload (lazy-loaded full payload for expanded tool card) ───
 
-function ToolCard({
-  state,
-  time,
-  expanded,
-  onToggle,
-}: {
-  state: ToolCallState;
-  time: string;
-  expanded: boolean;
-  onToggle: () => void;
-}) {
-  const statusColor =
-    state.status === "running" ? "text-amber-400 animate-pulse" :
-    state.status === "completed" ? "text-emerald-400" :
-    "text-red-400";
-  const statusIcon =
-    state.status === "running" ? "⏳" :
-    state.status === "completed" ? "✓" :
-    "✗";
-  const bgClass =
-    state.status === "running" ? "bg-amber-950/20 border-amber-900/50" :
-    state.status === "completed" ? "bg-emerald-950/20 border-emerald-900/50" :
-    "bg-red-950/20 border-red-900/50";
+function DbToolPayload({ row, scanId }: { row: ProcessDetailRow; scanId: string }) {
+  const [full, setFull] = useState<ProcessDetailFull | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!row.data) {
+      // If row.data is null, fetch full payload from /process-details/{id}
+      setLoading(true);
+      (async () => {
+        try {
+          const f = await getProcessDetail(scanId, row.id);
+          setFull(f);
+        } catch (err) {
+          console.error("Failed to load full payload", err);
+        } finally { setLoading(false); }
+      })();
+    }
+  }, [row, scanId]);
+
+  const data = full?.data || row.data;
+  if (loading) return <div className="mt-2 pl-6 text-zinc-500 text-[11px]"><Loader2 className="w-3 h-3 animate-spin inline mr-1" /> Loading payload...</div>;
+  if (!data) return <div className="mt-2 pl-6 text-zinc-600 text-[11px]">No payload.</div>;
+
+  const argsStr = (data as any).arguments ? JSON.stringify((data as any).arguments, null, 2) : "";
+  const resultStr = (data as any).result_preview || (data as any).result || "";
+  const errorStr = (data as any).error || "";
 
   return (
-    <div className={`my-1 p-2 border rounded ${bgClass}`}>
-      <div
-        className="flex items-center gap-2 cursor-pointer"
-        onClick={onToggle}
-      >
-        <span className="text-zinc-700 shrink-0">{time}</span>
-        <span className={`shrink-0 ${statusColor}`}>🔧 {statusIcon}</span>
-        <span className="text-zinc-200 font-semibold shrink-0">{state.tool_name}</span>
-        {state.agent_name && (
-          <span className="text-zinc-500 text-[10px] shrink-0">[{state.agent_name}]</span>
-        )}
-        {state.iteration && (
-          <span className="text-zinc-600 text-[10px] shrink-0">iter {state.iteration}</span>
-        )}
-        {state.status === "running" && state.elapsed_seconds !== undefined && (
-          <span className="text-amber-400/80 text-[10px] shrink-0">
-            running {state.elapsed_seconds}s
-          </span>
-        )}
-        {state.args_preview && (
-          <span className="text-zinc-500 truncate flex-1">({state.args_preview})</span>
-        )}
-        {expanded ? <ChevronDown className="w-3 h-3 ml-auto shrink-0" /> : <ChevronRight className="w-3 h-3 ml-auto shrink-0" />}
-      </div>
-      {expanded && (
-        <div className="mt-2 pl-6 text-[11px] space-y-1">
-          {state.args_preview && (
-            <div>
-              <span className="text-zinc-600">args:</span>
-              <pre className="text-zinc-400 whitespace-pre-wrap break-all mt-1">{state.args_preview}</pre>
-            </div>
-          )}
-          {state.result_preview && (
-            <div>
-              <span className="text-zinc-600">result:</span>
-              <pre className={`whitespace-pre-wrap break-all mt-1 ${state.status === "completed" ? "text-zinc-300" : "text-red-300"}`}>
-                {state.result_preview}
-              </pre>
-            </div>
-          )}
-          {state.error && (
-            <div>
-              <span className="text-zinc-600">error:</span>
-              <pre className="text-red-300 whitespace-pre-wrap break-all mt-1">{state.error}</pre>
-            </div>
-          )}
-          {state.completed_at && (
-            <div className="text-zinc-600">
-              completed at {new Date(state.completed_at).toLocaleTimeString()}
-            </div>
-          )}
+    <div className="mt-2 pl-6 text-[11px] space-y-1">
+      {argsStr && (
+        <div>
+          <span className="text-zinc-600">args:</span>
+          <pre className="text-zinc-400 whitespace-pre-wrap break-all mt-1">{argsStr}</pre>
+        </div>
+      )}
+      {resultStr && (
+        <div>
+          <span className="text-zinc-600">result:</span>
+          <pre className={`whitespace-pre-wrap break-all mt-1 ${(data as any).success === false ? "text-red-300" : "text-zinc-300"}`}>
+            {String(resultStr).slice(0, 500)}
+          </pre>
+        </div>
+      )}
+      {errorStr && (
+        <div>
+          <span className="text-zinc-600">error:</span>
+          <pre className="text-red-300 whitespace-pre-wrap break-all mt-1">{String(errorStr).slice(0, 300)}</pre>
         </div>
       )}
     </div>

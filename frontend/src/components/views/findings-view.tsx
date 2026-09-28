@@ -7,8 +7,9 @@ import { Badge } from "../ui/badge";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
-import { Loader2, Bug, Filter, ShieldAlert } from "lucide-react";
-import { getFindings } from "../../lib/api";
+import { Loader2, Bug, Filter, ShieldAlert, Download } from "lucide-react";
+import { getFindings, exportVulnerabilities, downloadTextFile } from "../../lib/api";
+import { useToast } from "../../hooks/use-toast";
 
 interface Finding {
   id: string;
@@ -42,6 +43,8 @@ export function FindingsView() {
   const [scanIdFilter, setScanIdFilter] = useState("");
   const [severityFilter, setSeverityFilter] = useState<string>("all");
   const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const { toast } = useToast();
 
   const loadFindings = async () => {
     setLoading(true);
@@ -66,16 +69,54 @@ export function FindingsView() {
     loadFindings();
   };
 
+  // Phase F6/F7: Markdown export (CyberStrikeAI pattern — on-demand,
+  // not auto-generated after scan). User clicks button → backend builds
+  // Markdown → frontend downloads via Blob + <a download>.
+  const handleExportMarkdown = async () => {
+    setExporting(true);
+    try {
+      const params: any = { group_by: "scan", mode: "summary", limit: 1000 };
+      if (scanIdFilter) params.scan_id = scanIdFilter;
+      if (severityFilter !== "all") params.severity = severityFilter;
+      const resp = await exportVulnerabilities(params);
+      if (!resp.files || resp.files.length === 0) {
+        toast({ title: "No findings to export", description: resp.message || "No findings match the filter.", variant: "destructive" });
+        return;
+      }
+      // Download each file (summary mode = 1 file, split mode = N files)
+      for (const file of resp.files) {
+        downloadTextFile(file.filename, file.content);
+      }
+      toast({ title: "Markdown exported", description: `${resp.total} findings in ${resp.files.length} file(s).` });
+    } catch (err: any) {
+      toast({ title: "Export failed", description: err.message, variant: "destructive" });
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <div className="max-w-6xl mx-auto space-y-6">
-      <div>
-        <h2 className="text-2xl font-semibold text-zinc-50 flex items-center gap-2">
-          <Bug className="w-6 h-6 text-amber-400" />
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-semibold text-zinc-50 flex items-center gap-2">
+            <Bug className="w-6 h-6 text-amber-400" />
           Findings
         </h2>
         <p className="text-sm text-zinc-400 mt-1">
           All vulnerability findings across scans. {total} total.
         </p>
+        </div>
+        {/* Phase F7: Export Markdown button (CyberStrikeAI pattern — on-demand) */}
+        <Button
+          onClick={handleExportMarkdown}
+          disabled={exporting || total === 0}
+          variant="outline"
+          className="border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+        >
+          {exporting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Download className="w-4 h-4 mr-2" />}
+          Export Markdown
+        </Button>
       </div>
 
       {/* Filters */}

@@ -511,7 +511,232 @@ export async function getFindings(params?: {
   return apiFetch("/api/findings", undefined, params as any);
 }
 
-/** GET /api/scans/active — list active scans. */
+// ============================================================
+// Phase F6 — Markdown export (CyberStrikeAI pattern)
+// ============================================================
+
+export interface VulnerabilityExportFile {
+  filename: string;
+  content: string;
+}
+
+export interface VulnerabilityExportResponse {
+  mode: "summary" | "split";
+  group_by: "scan" | "severity" | "vuln_type" | "none";
+  total: number;
+  groups_count: number;
+  files: VulnerabilityExportFile[];
+  message?: string;
+}
+
+/** GET /api/vulnerabilities/export — export findings as Markdown.
+ *
+ * Returns JSON with file contents inline — frontend downloads via
+ * Blob + saveAs (matches CyberStrikeAI's on-demand export pattern).
+ *
+ * Usage:
+ *   const resp = await exportVulnerabilities({
+ *     group_by: "scan",
+ *     mode: "summary",
+ *     severity: "critical",
+ *   });
+ *   if (resp.files.length > 0) {
+ *     const blob = new Blob([resp.files[0].content], { type: "text/markdown" });
+ *     saveAs(blob, resp.files[0].filename);
+ *   }
+ */
+export async function exportVulnerabilities(params: {
+  group_by?: "scan" | "severity" | "vuln_type" | "none";
+  mode?: "summary" | "split";
+  scan_id?: string;
+  severity?: string;
+  verified?: "true" | "false";
+  limit?: number;
+}): Promise<VulnerabilityExportResponse> {
+  return apiFetch("/api/vulnerabilities/export", undefined, params as any);
+}
+
+/** GET /api/scans/{scan_id}/results — aggregated scan results JSON.
+ *
+ * Mirrors CyberStrikeAI's GET /api/conversations/{id}/results.
+ * Useful for one-shot API consumers (CI/CD, external dashboards).
+ */
+export async function getScanResults(
+  scanId: string,
+  params?: {
+    include_process_details?: 0 | 1;
+    process_details_limit?: number;
+  }
+): Promise<{
+  scan_id: string;
+  scan: Record<string, unknown>;
+  vulnerabilities: Array<Record<string, unknown>>;
+  vulnerabilities_count: number;
+  process_details?: Array<Record<string, unknown>>;
+  process_details_returned?: number;
+  process_details_total?: number;
+}> {
+  return apiFetch(`/api/scans/${scanId}/results`, undefined, params as any);
+}
+
+// ============================================================
+// Phase F7 — Scan history + process_details timeline helpers
+// (CyberStrikeAI-pattern chat UI)
+// ============================================================
+
+export interface ScanSummary {
+  id: string;
+  target: string;
+  target_type: string;
+  agent_mode: string;
+  hitl_mode: string;
+  user_prompt: string | null;
+  status: string;
+  progress: number;
+  started_at: string | null;
+  completed_at: string | null;
+  findings_count: number | null;
+  process_details_count: number | null;
+  scope: Record<string, unknown>;
+}
+
+export interface ScanHistoryResponse {
+  scans: ScanSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/** GET /api/scans/history — list scans (paginated, searchable). */
+export async function getScanHistory(params?: {
+  limit?: number;
+  offset?: number;
+  search?: string;
+  sort_by?: "started_at" | "completed_at" | "target" | "status" | "created_at";
+  sort_dir?: "asc" | "desc";
+}): Promise<ScanHistoryResponse> {
+  return apiFetch("/api/scans/history", undefined, params as any);
+}
+
+export interface ScanDetail extends ScanSummary {
+  findings_by_severity: Record<string, number>;
+  result_summary: Record<string, unknown> | null;
+  process_details?: Array<{
+    id: string;
+    event_type: string;
+    message: string | null;
+    created_at: string | null;
+    has_payload: boolean;
+  }>;
+  process_details_returned?: number;
+  process_details_total?: number;
+}
+
+/** GET /api/scans/{scan_id} — single scan detail (lite by default). */
+export async function getScanDetail(
+  scanId: string,
+  params?: { include_process_details?: 0 | 1; limit_process_details?: number }
+): Promise<ScanDetail> {
+  return apiFetch(`/api/scans/${scanId}`, undefined, params as any);
+}
+
+export interface ProcessDetailRow {
+  id: string;
+  event_type: string;
+  message: string | null;
+  data: Record<string, unknown> | null;
+  signature: string | null;
+  created_at: string | null;
+}
+
+export interface ProcessDetailsResponse {
+  scan_id: string;
+  process_details: ProcessDetailRow[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+/** GET /api/scans/{scan_id}/process-details — paginated timeline. */
+export async function getProcessDetails(
+  scanId: string,
+  params?: {
+    limit?: number;
+    offset?: number;
+    event_type?: string;
+    summary?: 0 | 1;
+    anchor_id?: string;
+  }
+): Promise<ProcessDetailsResponse> {
+  return apiFetch(`/api/scans/${scanId}/process-details`, undefined, params as any);
+}
+
+export interface ProcessDetailSummary {
+  scan_id: string;
+  total: number;
+  by_event_type: Record<string, number>;
+  first_created_at: string | null;
+  last_created_at: string | null;
+}
+
+/** GET /api/scans/{scan_id}/process-details?summary=1 — counts only. */
+export async function getProcessDetailsSummary(
+  scanId: string
+): Promise<ProcessDetailSummary> {
+  return apiFetch(`/api/scans/${scanId}/process-details`, undefined, { summary: 1 } as any);
+}
+
+export interface ProcessDetailFull {
+  id: string;
+  scan_id: string | null;
+  event_type: string;
+  message: string | null;
+  data: Record<string, unknown> | null;
+  signature: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+/** GET /api/scans/{scan_id}/process-details/{detail_id} — single full record. */
+export async function getProcessDetail(
+  scanId: string,
+  detailId: string
+): Promise<ProcessDetailFull> {
+  return apiFetch(`/api/scans/${scanId}/process-details/${detailId}`);
+}
+
+/** DELETE /api/scans/{scan_id} — hard delete scan (findings survive). */
+export async function deleteScan(
+  scanId: string
+): Promise<{
+  scan_id: string;
+  deleted: boolean;
+  findings_preserved: number;
+  process_details_deleted: number;
+}> {
+  return apiFetch(`/api/scans/${scanId}`, { method: "DELETE" });
+}
+
+/**
+ * Trigger a browser download of a text/markdown file.
+ *
+ * Phase F7 helper for the "Export Markdown" button on the Findings tab.
+ * Mirrors CyberStrikeAI's frontend saveAs pattern (uses <a download>
+ * instead of FileSaver.js to avoid an extra dependency).
+ */
+export function downloadTextFile(filename: string, content: string, mimeType: string = "text/markdown"): void {
+  const blob = new Blob([content], { type: `${mimeType};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  // Revoke the URL after a short delay to ensure the download starts
+  setTimeout(() => URL.revokeObjectURL(url), 100);
+}
 export async function getActiveScans(): Promise<{
   active_scans: Array<{
     scan_id: string;
