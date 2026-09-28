@@ -181,6 +181,15 @@ def get_cached_result(
 
     Returns the cached output string if found, or None if no cached
     result exists for this (tool_name, tool_args) combination.
+
+    ── PATCH (cache-loop fix): prepend a `[cached]` marker to the returned
+    value so the LLM knows this is a cached result, NOT a fresh execution.
+    Without this marker, the LLM sometimes perceived the cached output as
+    a "different" result (due to varying execution_id prefixes from older
+    code) and retried the same tool → degenerate loop.
+
+    The marker also helps debugging — `journalctl` will show
+    "TOOL_RESULT_CACHE_HIT" lines that match what the LLM actually saw.
     """
     cache = _get_scan_cache(scan_id)
     signature = _compute_call_signature(tool_name, tool_args)
@@ -190,6 +199,11 @@ def get_cached_result(
             "TOOL_RESULT_CACHE_HIT | scan=%s | tool=%s | sig=%s | returning cached result",
             scan_id, tool_name, signature,
         )
+        # Prepend a marker so the LLM understands this is a cached result
+        # (no new subprocess was spawned). This is informational — the LLM
+        # should treat this as the same result it saw before and NOT retry
+        # the same tool call expecting different output.
+        return f"[cached] {cached}"
     return cached
 
 
@@ -251,6 +265,44 @@ def mark_scope_blocked(
     )
 
 
+# ── PATCH (cache-loop fix): duplicate tool call counter ────────────────
+# Tracks how many times the agent has called each (tool, args) signature
+# in this scan. The agent loop (base.py) checks this counter to detect
+# degenerate retry loops — e.g. if nuclei was called 3 times with the
+# same args in the same scan, the agent should be told to STOP and try
+# a different tool/approach instead of burning more iterations.
+#
+# We track this separately from the result cache because:
+#   - Cache HIT means we DIDN'T spawn a subprocess (returned cached output)
+#   - Counter tracks ATTEMPTS, including cache hits + cache misses
+#     (the LLM may have requested the call either way — we want to know)
+
+
+def get_call_count(scan_id: str, tool_name: str, tool_args: dict[str, Any]) -> int:
+    """Return how many times this (tool, args) signature has been called.
+
+    Returns 0 if never called, 1+ if called before.
+    """
+    cache = _get_scan_cache(scan_id)
+    signature = _compute_call_signature(tool_name, tool_args)
+    return cache.get("call_counts", {}).get(signature, 0)
+
+
+def increment_call_count(scan_id: str, tool_name: str, tool_args: dict[str, Any]) -> int:
+    """Increment the call counter for this signature. Returns the new count.
+
+    Called BEFORE the cache lookup in execute_tool_call() so we track
+    EVERY attempt — including ones that hit the cache and don't spawn
+    a subprocess.
+    """
+    cache = _get_scan_cache(scan_id)
+    if "call_counts" not in cache:
+        cache["call_counts"] = {}
+    signature = _compute_call_signature(tool_name, tool_args)
+    cache["call_counts"][signature] = cache["call_counts"].get(signature, 0) + 1
+    return cache["call_counts"][signature]
+
+
 __all__ = [
     "get_cached_unavailable",
     "mark_unavailable",
@@ -259,4 +311,6 @@ __all__ = [
     "is_scope_blocked",
     "mark_scope_blocked",
     "clear_scan_cache",
+    "get_call_count",
+    "increment_call_count",
 ]

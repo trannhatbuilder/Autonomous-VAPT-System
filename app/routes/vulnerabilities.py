@@ -122,11 +122,18 @@ def _append_vulnerability_markdown(buf: list[str], finding: Finding, scan_tag: s
         buf.append(f"- **PoC Status**: {finding.poc_status}")
     buf.append(f"- **Verified**: {'yes' if finding.verified else 'no'}")
     buf.append(f"- **Scan**: `{scan_tag or finding.scan_id or '(unknown)'}`")
-    if finding.description:
+    # ── PATCH (findings-visibility fix): pull `description` from metadata_json ──
+    # vapt_findings has no `description` column — only `metadata_json` JSONB.
+    # The previous code did `if finding.description:` which raised AttributeError
+    # on the ORM model (no such attribute) → 500 error on Markdown export.
+    description_text: str = ""
+    if isinstance(finding.metadata_json, dict):
+        description_text = (finding.metadata_json.get("description") or "").strip()
+    if description_text:
         buf.append("")
         buf.append("**Description**:")
         buf.append("")
-        buf.append(finding.description)
+        buf.append(description_text)
     if finding.remediation:
         buf.append("")
         buf.append("**Recommendation**:")
@@ -448,7 +455,12 @@ async def get_scan_results(
             "poc_status": f.poc_status,
             "verified": f.verified,
             "false_positive": f.false_positive,
-            "description": f.description,
+            # ── PATCH (findings-visibility fix): pull description from metadata_json ──
+            "description": (
+                (f.metadata_json or {}).get("description", "")
+                if isinstance(f.metadata_json, dict)
+                else ""
+            ),
             "remediation": f.remediation,
             "confidence_score": f.confidence_score,
             "scan_id": f.scan_id,

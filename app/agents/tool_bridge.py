@@ -210,21 +210,86 @@ async def execute_tool_call(
         mark_unavailable,
         cache_result,
         mark_scope_blocked,
+        increment_call_count,
     )
+
+    # ── PATCH (cache-loop fix): increment call counter ──
+    # Tracks EVERY attempt for this (tool, args) signature in this scan.
+    # We do this BEFORE any cache lookup so the counter captures both
+    # cache hits AND cache misses (i.e. real subprocess spawns).
+    # The counter is then used below to detect degenerate retry loops
+    # — if the LLM calls the same (tool, args) 3+ times, we prepend a
+    # warning to the cached output so the LLM understands it's stuck.
+    call_count = increment_call_count(scan_id, tool_name, tool_args)
 
     # Layer 1: tool availability (binary missing/blocked)
     cached_unavail = get_cached_unavailable(scan_id, tool_name)
     if cached_unavail is not None:
+        if call_count >= 3:
+            logger.warning(
+                "DUPLICATE_TOOL_CALL_WARNING | scan=%s | tool=%s | count=%d | "
+                "agent may be stuck in a retry loop — appending guidance to output",
+                scan_id, tool_name, call_count,
+            )
+            return (
+                f"{cached_unavail}\n\n"
+                f"⚠️ You have called '{tool_name}' {call_count} times with the same "
+                f"args in this scan, and it has been marked unavailable. The tool "
+                f"is NOT installed or permission-denied. STOP calling this tool — "
+                f"try an alternative tool or skip this test. Calling again will "
+                f"return the same cached error."
+            )
         return cached_unavail
 
     # Layer 2: scope-blocked combo (tool + args were blocked earlier)
     cached_block = is_scope_blocked(scan_id, tool_name, tool_args)
     if cached_block is not None:
+        if call_count >= 3:
+            logger.warning(
+                "DUPLICATE_TOOL_CALL_WARNING | scan=%s | tool=%s | count=%d | "
+                "scope-blocked combo retried — appending guidance to output",
+                scan_id, tool_name, call_count,
+            )
+            return (
+                f"{cached_block}\n\n"
+                f"⚠️ You have called '{tool_name}' {call_count} times with the same "
+                f"args, and it was scope-blocked each time. The target is NOT in the "
+                f"declared scan scope. STOP calling this combo — try a different "
+                f"target or ask the user to expand the scope. Calling again will "
+                f"return the same cached block."
+            )
         return cached_block
 
     # Layer 3: same tool call with same args (result dedup)
     cached_result = get_cached_result(scan_id, tool_name, tool_args)
     if cached_result is not None:
+        # ── PATCH (cache-loop fix): warn LLM about degenerate retries ──
+        # When the LLM requests the SAME (tool, args) for the 3rd+ time,
+        # it's a sign of a retry loop. The cached result is already in the
+        # LLM's context history — calling it again wastes an iteration.
+        # Append a guidance message that tells the LLM explicitly:
+        #   - This is a cached result (already seen)
+        #   - The agent should try a DIFFERENT tool or DIFFERENT args
+        #   - Or call `exit` if there's nothing more to do
+        if call_count >= 3:
+            logger.warning(
+                "DUPLICATE_TOOL_CALL_WARNING | scan=%s | tool=%s | count=%d | "
+                "same args called %d times — appending 'try different approach' guidance",
+                scan_id, tool_name, call_count, call_count,
+            )
+            return (
+                f"{cached_result}\n\n"
+                f"⚠️ DUPLICATE CALL: You have called '{tool_name}' with the SAME "
+                f"args {call_count} times in this scan. The result above is cached "
+                f"— calling again will return the SAME output. "
+                f"To make progress, you must EITHER:\n"
+                f"  1. Call '{tool_name}' with DIFFERENT args (e.g. different "
+                f"target/port/severity/depth), OR\n"
+                f"  2. Switch to a different tool to gather new information, OR\n"
+                f"  3. If you have enough findings, call `exit` with a summary.\n"
+                f"Continuing to retry the same call will burn your iteration budget "
+                f"without producing new results."
+            )
         return cached_result
 
     # Security tool — execute via ExecutionService + SubprocessExecutor
@@ -293,9 +358,6 @@ async def execute_tool_call(
         error = result_dict.get("error")
         if error:
             output_parts.append(f"[error] {error}")
-        # Surface execution_id for traceability (LLM doesn't need this but
-        # the SSE consumer / debug logs do)
-        output_parts.append(f"[execution_id] {execution.id}")
     elif execution.status == ExecutionStatus.HARD_TIMEOUT:
         output_parts.append(
             f"[error] Hard timeout after {tool_def.timeout}s. "
@@ -304,45 +366,73 @@ async def execute_tool_call(
         output_parts.append(f"  - reducing scan scope (fewer ports, smaller CIDR)")
         output_parts.append(f"  - using a faster tool (e.g. masscan instead of nmap for full-range port scan)")
         output_parts.append(f"  - increasing timeout in the tool YAML")
-        output_parts.append(f"[execution_id] {execution.id}")
     elif execution.status == ExecutionStatus.CANCELLED:
         output_parts.append(
             f"[error] Tool execution was cancelled. "
             f"This may have been triggered by the panic button or by the scan "
             f"being aborted. Do NOT retry this tool — wait for user input."
         )
-        output_parts.append(f"[execution_id] {execution.id}")
     elif execution.status == ExecutionStatus.FAILED:
         output_parts.append(f"[error] Tool execution failed: {execution.error}")
-        output_parts.append(f"[execution_id] {execution.id}")
     else:
         output_parts.append(
             f"[error] Unexpected execution status: {execution.status.value}"
         )
-        output_parts.append(f"[execution_id] {execution.id}")
 
-    output = "\n".join(output_parts) if output_parts else "(no output)"
+    # ── PATCH (cache-loop fix): separate body from execution_id ──
+    # The previous code appended `[execution_id] {uuid}` to `output_parts`
+    # BEFORE calling `cache_result(...)`. The cached value therefore
+    # contained a fresh UUID per call — meaning even when the LLM retried
+    # with identical args, `get_cached_result()` returned a hit but the
+    # string started with a stale execution_id that differed from what
+    # the LLM had seen previously.
+    #
+    # The LLM, not understanding why the execution_id changed, would
+    # sometimes retry the SAME tool call (assuming the cached result was
+    # somehow "different" from what it expected). This caused degenerate
+    # loops — e.g. vulnerability-triage burning 28/30 iterations calling
+    # nuclei with the same args, each time spawning a fresh subprocess +
+    # caching a new execution_id string.
+    #
+    # Fix: build the cacheable body SEPARATELY from the execution_id
+    # metadata. Cache ONLY the body. Append execution_id to the LLM-facing
+    # output AFTER cache lookup/store, so the cached value is stable
+    # across calls.
+    body = "\n".join(output_parts) if output_parts else "(no output)"
 
-    # Truncate for LLM context (keep first + last 2000 chars)
-    if len(output) > 4000:
-        output = output[:2000] + "\n... [truncated] ...\n" + output[-2000:]
+    # Truncate for LLM context (keep first + last 2000 chars).
+    # NOTE: truncation must happen on `body` BEFORE caching — otherwise
+    # the cached value is the un-truncated version, which won't match
+    # the truncated version returned to the LLM on the next call.
+    if len(body) > 4000:
+        body = body[:2000] + "\n... [truncated] ...\n" + body[-2000:]
 
     # ── Phase F5: populate caches AFTER subprocess returns ──────────
     # Detect patterns in the output and mark the appropriate cache so
     # future calls with the same tool/args can skip the subprocess.
-    output_lower_head = output[:500].lower()  # check first 500 chars only
+    # NOTE: cache the TRUNCATED `body` (no execution_id), not the
+    # final `output` — this is what makes the cache stable.
+    output_lower_head = body[:500].lower()  # check first 500 chars only
     if "binary not found" in output_lower_head or "[errno 13] permission denied" in output_lower_head:
         # Layer 1: tool unavailable (binary missing or no execute perms)
         # Mark for ALL future calls to this tool_name — no point retrying.
-        mark_unavailable(scan_id, tool_name, output)
+        mark_unavailable(scan_id, tool_name, body)
     elif "scope violation" in output_lower_head:
         # Layer 3: scope-blocked combo — mark for this specific (tool, args)
         # so different args of the same tool are still tried.
-        mark_scope_blocked(scan_id, tool_name, tool_args, output)
+        mark_scope_blocked(scan_id, tool_name, tool_args, body)
     else:
-        # Layer 2: successful (or non-binary/scope error) — cache result
+        # Layer 2: successful (or non-binary/scope error) — cache body
         # so the LLM's retry with same args returns cached output.
-        cache_result(scan_id, tool_name, tool_args, output)
+        cache_result(scan_id, tool_name, tool_args, body)
+
+    # Now build the LLM-facing output by appending the execution_id AFTER
+    # the cache has been populated. This way:
+    #   - Cached value = body (stable, deterministic)
+    #   - LLM-facing output = body + "\n[execution_id] {uuid}" (variable)
+    # The LLM can still see the execution_id for traceability, but the
+    # cache never includes it → no false "different result" perception.
+    output = body + f"\n[execution_id] {execution.id}"
 
     logger.info(
         "Tool result | scan=%s | tool=%s | status=%s | exec_id=%s | output_len=%d",

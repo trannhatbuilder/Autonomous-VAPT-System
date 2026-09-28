@@ -1960,23 +1960,44 @@ def create_app() -> FastAPI:
                 {
                     "id": str(f.id),
                     "scan_id": f.scan_id,
+                    "scan_tag": f.scan_tag,
                     "name": f.name,
                     "vuln_type": f.vuln_type,
                     "severity": f.severity,
                     "cvss_vector": f.cvss_vector,
-                    "cvss_score": f.cvss_score,
+                    # ── PATCH (findings-visibility fix): use correct column name ──
+                    # The Finding model (app/db/models/pentest.py:118) has
+                    # `cvss_base_score`, NOT `cvss_score`. Previous code did
+                    # `f.cvss_score` which raised AttributeError → 500 error
+                    # on GET /api/findings → frontend showed empty list.
+                    "cvss_score": f.cvss_base_score,  # alias for frontend compat
+                    "cvss_base_score": f.cvss_base_score,
+                    "cvss_severity": f.cvss_severity,
                     "location": f.location,
                     "cwe_id": f.cwe_id,
                     "cve_id": f.cve_id,
                     "wstg_test_id": f.wstg_test_id,
                     "mitre_attack_technique": f.mitre_attack_technique,
                     "mitre_attack_tactic": f.mitre_attack_tactic,
+                    "mitre_attack_subtechnique": f.mitre_attack_subtechnique,
                     "poc_status": f.poc_status,
                     "poc_tier": f.poc_tier,
                     "exploit_method": f.exploit_method,
                     "remediation": f.remediation,
                     "verified": f.verified,
                     "false_positive": f.false_positive,
+                    "auditor_verdict": f.auditor_verdict,
+                    "confidence_score": f.confidence_score,
+                    # ── PATCH: surface `description` from metadata_json ──
+                    # The model has no `description` column (only `metadata_json`
+                    # JSONB). The frontend's findings-view.tsx expects a
+                    # `description` field — pull it from metadata_json.
+                    "description": (
+                        (f.metadata_json or {}).get("description", "")
+                        if isinstance(f.metadata_json, dict)
+                        else ""
+                    ),
+                    "metadata_json": f.metadata_json,
                     "created_at": f.created_at.isoformat() if f.created_at else None,
                 }
                 for f in findings

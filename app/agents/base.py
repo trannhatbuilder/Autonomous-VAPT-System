@@ -215,7 +215,7 @@ class AgentRunResult:
     scan_id: str
     target: str
     task_description: str
-    status: str  # completed | failed | max_iterations | timeout
+    status: str  # completed | failed | max_iterations | timeout | aborted | max_duplicates
     decisions: list[AgentDecision] = field(default_factory=list)
     findings: list[dict[str, Any]] = field(default_factory=list)
     total_tokens: int = 0
@@ -645,6 +645,30 @@ class BaseAgent:
         consecutive_failures = 0
         failed_tools_seen: set[str] = set()
 
+        # ── PATCH (cache-loop fix): hard cap on duplicate tool calls ──
+        # Even with the warning message appended to cached outputs (see
+        # tool_bridge.py Patch 4), the LLM may still retry the same call.
+        # This hard cap stops the agent after 5 duplicate attempts with
+        # the same signature — preventing the "28/30 iterations all calling
+        # nuclei with same args" pattern reported by users.
+        #
+        # We track per-(tool, args) signature call counts in the
+        # tool_call_cache (increment_call_count) and check the count here
+        # BEFORE invoking execute_tool_call. If the count exceeds the cap,
+        # we exit the agent loop with status="max_duplicates" — same effect
+        # as "max_iterations" but with a clearer error message.
+        MAX_DUPLICATE_CALLS_PER_SIGNATURE = 5  # 5 retries with same args → exit
+
+        # ── PATCH (cache-loop fix): per-tool iteration cap ──
+        # The LLM may also vary args slightly (e.g. nuclei with -severity
+        # high vs -severity medium) — different signatures, so the duplicate
+        # check above won't catch it. To prevent the agent from spending
+        # 28/30 iterations all calling nuclei with slightly different args,
+        # we track per-TOOL call counts (across all arg variations). If the
+        # agent calls the SAME tool 8 times with ANY args, we exit.
+        MAX_CALLS_PER_TOOL = 8  # 8 calls to same tool (any args) → exit
+        tool_call_counts: dict[str, int] = {}  # tool_name -> total call count
+
         # ---------- ReAct loop ----------
         for iteration in range(self.max_iterations):
             turn = len(self.decisions)
@@ -991,6 +1015,75 @@ class BaseAgent:
                             })
                         else:
                             # Normal tool — execute via ExecutionService (P2 path)
+                            # ── PATCH (cache-loop fix #1): check duplicate signature ──
+                            # Before executing, check if the LLM is in a degenerate
+                            # retry loop calling the SAME (tool, args) signature
+                            # repeatedly. If so, exit the agent loop with a clear
+                            # status — this prevents the "28/30 iterations calling
+                            # nuclei with same args" symptom users reported.
+                            if tool_name not in ("exit", "record_vulnerability"):
+                                try:
+                                    from app.agents.tool_call_cache import get_call_count
+                                    dup_count = get_call_count(self.scan_id, tool_name, tool_args)
+                                    if dup_count > MAX_DUPLICATE_CALLS_PER_SIGNATURE:
+                                        logger.error(
+                                            "Agent %s aborting: %d duplicate calls to %s with same args | "
+                                            "iter=%d | scan=%s — exiting to stop degenerate retry loop",
+                                            self.AGENT_NAME, dup_count, tool_name,
+                                            iteration + 1, self.scan_id,
+                                        )
+                                        abort_msg = (
+                                            f"⚠️ Agent {self.AGENT_NAME} dừng vì lặp lại {dup_count} lần "
+                                            f"cùng tool '{tool_name}' với cùng args. Đây là dấu hiệu "
+                                            f"degenerate retry loop — agent không tìm thấy cách tiếp cận "
+                                            f"khác. Hãy review prompt/tool config hoặc thử target khác. "
+                                            f"Args đã gọi: {str(tool_args)[:200]}"
+                                        )
+                                        await emit_assistant_message(
+                                            scan_id=self.scan_id, content=abort_msg,
+                                            agent_name=self.AGENT_NAME, iteration=iteration + 1,
+                                        )
+                                        return self._finalize(
+                                            "max_duplicates",
+                                            error=f"Exceeded {MAX_DUPLICATE_CALLS_PER_SIGNATURE} duplicate calls to {tool_name}",
+                                        )
+                                except Exception as dup_check_exc:
+                                    # Don't let the duplicate check itself break the agent
+                                    logger.debug(
+                                        "Duplicate signature check failed (non-fatal): %s",
+                                        dup_check_exc,
+                                    )
+
+                                # ── PATCH (cache-loop fix #2): per-tool cap ──
+                                # Catches the "vary args slightly" pattern — e.g.
+                                # nuclei with -severity high vs medium vs low — which
+                                # produces different signatures so the duplicate
+                                # check above won't catch it. If the agent calls
+                                # the SAME tool N times with ANY args, exit.
+                                tool_call_counts[tool_name] = tool_call_counts.get(tool_name, 0) + 1
+                                if tool_call_counts[tool_name] > MAX_CALLS_PER_TOOL:
+                                    logger.error(
+                                        "Agent %s aborting: %d total calls to tool %s (any args) | "
+                                        "iter=%d | scan=%s — exiting to stop tool-obsession loop",
+                                        self.AGENT_NAME,
+                                        tool_call_counts[tool_name], tool_name,
+                                        iteration + 1, self.scan_id,
+                                    )
+                                    abort_msg = (
+                                        f"⚠️ Agent {self.AGENT_NAME} dừng vì đã gọi tool '{tool_name}' "
+                                        f"{tool_call_counts[tool_name]} lần (với nhiều args khác nhau). "
+                                        f"Agent có thể đang bị stuck — không tìm thấy thông tin mới. "
+                                        f"Hãy thử tool khác, hoặc gọi `exit` nếu đã đủ findings."
+                                    )
+                                    await emit_assistant_message(
+                                        scan_id=self.scan_id, content=abort_msg,
+                                        agent_name=self.AGENT_NAME, iteration=iteration + 1,
+                                    )
+                                    return self._finalize(
+                                        "max_duplicates",
+                                        error=f"Exceeded {MAX_CALLS_PER_TOOL} total calls to tool {tool_name}",
+                                    )
+
                             tool_output = await execute_tool_call(
                                 tool_name=tool_name,
                                 tool_args=tool_args,

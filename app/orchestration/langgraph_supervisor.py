@@ -594,6 +594,39 @@ class SupervisorOrchestrator(BaseOrchestrator):
                 f"Run {expert_name} on {target}"
             )
 
+            # ── PATCH (phase-event fix): emit phase_change IN REAL-TIME when the
+            # expert node starts executing — NOT deferred to after the whole
+            # orchestrator.run() completes.
+            #
+            # The old behavior:
+            #   1. supervisor.run() executes (5-30 minutes for full kill-chain)
+            #   2. ONLY AFTER orchestrator.run() returns, _phase_orchestrator()
+            #      loops through transfer_targets and emits a phase_change for
+            #      each one in a tight burst (microsecond gaps).
+            #   3. UI sees all 6 phase_change events clustered at the END of
+            #      the timeline, AFTER the orchestrator's scan_complete —
+            #      which makes the timeline look like phases ran after the
+            #      scan ended.
+            #
+            # New behavior: emit phase_change HERE, when the expert node is
+            # about to start. The UI will see phase changes interspersed
+            # with the agent's tool_call_started/tool_call_completed events
+            # — giving an accurate picture of when each phase actually ran.
+            try:
+                # Look up progress for this phase from the pipeline's
+                # PHASE_PROGRESS map (imported lazily to avoid circular).
+                from app.pentest.scan_pipeline import PHASE_PROGRESS
+                progress = PHASE_PROGRESS.get(expert_name, 50)
+            except Exception:
+                progress = 50  # fallback
+            await emit_phase_change(
+                scan_id=self.scan_id,
+                phase=expert_name,
+                progress=progress,
+                message=f"Starting {expert_name} phase",
+                agent_name=expert_name,
+            )
+
             # ---------- P3 dispatch ----------
             if self.llm_config is not None and self.executor is not None:
                 # Real sub-agent invocation
@@ -620,19 +653,75 @@ class SupervisorOrchestrator(BaseOrchestrator):
                     last_obs = result.decisions[-1].observation or "(no observation)"
                 else:
                     last_obs = "(agent produced no decisions)"
-                self._supervisor_messages.append({
-                    "role": "user",
-                    "content": (
+
+                # ── PATCH (kill-chain fix): handle max_iterations explicitly ──
+                # When a sub-agent hits its iteration cap (status="max_iterations"
+                # or "max_duplicates"), it means the agent burned its full
+                # budget without calling `exit`. The supervisor LLM, seeing
+                # only "Status: max_iterations" in the result summary, often
+                # misinterprets this as a soft failure and either:
+                #   (a) re-transfers to the SAME agent (waste another 30 iter),
+                #   (b) calls `exit` early without running penetration/priv-esc.
+                #
+                # We rewrite the message to make the situation UNAMBIGUOUS:
+                #   - The agent DID find vulnerabilities (N findings recorded)
+                #   - It just didn't explicitly call `exit`
+                #   - The supervisor SHOULD transfer to the NEXT agent in
+                #     the kill-chain (e.g. triage → penetration)
+                #   - The supervisor should NOT re-transfer to the same agent
+                #
+                # This is critical for the penetration phase: if triage
+                # hits max_iterations after recording 3 findings, the
+                # supervisor must still transfer to penetration to attempt
+                # PoC/exploitation — otherwise no PoC/evidence is ever
+                # produced and the entire scan is wasted.
+                if result.status in ("max_iterations", "max_duplicates"):
+                    findings_count = len(result.findings)
+                    next_recommended = self._recommend_next_agent(expert_name)
+                    supervisor_guidance = (
                         f"[Result from {expert_name} on {target}]\n"
                         f"Task: {task_description}\n"
-                        f"Status: {result.status}\n"
+                        f"Status: {result.status} — the agent exhausted its iteration budget\n"
+                        f"  without explicitly calling `exit`. This is NOT a failure — the agent\n"
+                        f"  may have been recording findings when the cap was hit.\n"
                         f"Decisions: {len(result.decisions)}\n"
-                        f"Findings: {len(result.findings)}\n"
+                        f"Findings: {findings_count}\n"
                         f"Tokens: {result.total_tokens}\n"
                         f"Last observation: {last_obs[:500]}\n"
-                        f"Findings list: {result.findings[:5]}"
-                    ),
-                })
+                        f"Findings list: {result.findings[:5]}\n\n"
+                        f"⚠️ KILL-CHAIN GUIDANCE:\n"
+                        f"  - {expert_name} produced {findings_count} finding(s) before hitting the cap.\n"
+                        f"  - DO NOT re-transfer to {expert_name} — that would waste another iteration cycle.\n"
+                    )
+                    if next_recommended and next_recommended in self.transfer_targets:
+                        supervisor_guidance += (
+                            f"  - DO transfer to '{next_recommended}' next to continue the kill-chain.\n"
+                            f"  - Use `transfer(target_agent='{next_recommended}', task_description='<specific task>')`.\n"
+                            f"  - If {findings_count} > 0: pass the findings list above to {next_recommended}\n"
+                            f"    so it knows what to exploit/escalate.\n"
+                        )
+                    else:
+                        supervisor_guidance += (
+                            f"  - If no further agents to transfer to, call `exit` with a summary of all findings.\n"
+                        )
+                    self._supervisor_messages.append({
+                        "role": "user",
+                        "content": supervisor_guidance,
+                    })
+                else:
+                    self._supervisor_messages.append({
+                        "role": "user",
+                        "content": (
+                            f"[Result from {expert_name} on {target}]\n"
+                            f"Task: {task_description}\n"
+                            f"Status: {result.status}\n"
+                            f"Decisions: {len(result.decisions)}\n"
+                            f"Findings: {len(result.findings)}\n"
+                            f"Tokens: {result.total_tokens}\n"
+                            f"Last observation: {last_obs[:500]}\n"
+                            f"Findings list: {result.findings[:5]}"
+                        ),
+                    })
 
                 # Aggregate findings into the orchestrator's findings list
                 for f in result.findings:
@@ -697,6 +786,49 @@ class SupervisorOrchestrator(BaseOrchestrator):
 
         return expert_node
 
+    def _recommend_next_agent(self, current_agent: str) -> str | None:
+        """Recommend the next agent in the kill-chain after `current_agent`.
+
+        Used by expert_node when a sub-agent returns status="max_iterations"
+        or "max_duplicates". The supervisor LLM, left to its own devices,
+        may re-transfer to the same agent or call `exit` early — neither
+        is desirable. We hint at the next logical phase in the kill-chain
+        so the supervisor makes progress.
+
+        Order:
+            recon → attack-surface-enumeration → vulnerability-triage →
+            penetration → privilege-escalation → reporting-remediation
+
+        Returns None if `current_agent` is the last in the chain (or not
+        recognized) — in which case the supervisor should call `exit`.
+        """
+        kill_chain_order = [
+            "recon",
+            "attack-surface-enumeration",
+            "vulnerability-triage",
+            "penetration",
+            "privilege-escalation",
+            "reporting-remediation",
+        ]
+        try:
+            idx = kill_chain_order.index(current_agent)
+        except ValueError:
+            # Unknown agent — no recommendation
+            return None
+        if idx + 1 >= len(kill_chain_order):
+            return None
+        next_agent = kill_chain_order[idx + 1]
+        # Only recommend if next_agent is actually in transfer_targets
+        # (e.g., if penetration isn't in transfer_targets, recommend the
+        # one after it — privilege-escalation, etc.)
+        if next_agent in self.transfer_targets:
+            return next_agent
+        # Skip ahead — find the next available transfer_target in the chain
+        for ahead in kill_chain_order[idx + 1:]:
+            if ahead in self.transfer_targets:
+                return ahead
+        return None
+
     def _stub_expert_observe(self, expert_name: str, target: str) -> str:
         """W10 stub: return canned observation per expert. P3 deprecated."""
         if expert_name == "recon":
@@ -755,10 +887,40 @@ class SupervisorOrchestrator(BaseOrchestrator):
             return self.finalize("failed", error=str(e))
 
         result = self.finalize(status, error=error)
-        await emit_scan_complete(
-            scan_id=self.scan_id, status=result.status,
-            findings_count=len(result.findings),
-            duration_seconds=result.duration_seconds,
+        # ── PATCH (phase-event fix): REMOVE the orchestrator's emit_scan_complete ──
+        # Previously, this method called:
+        #     await emit_scan_complete(
+        #         scan_id=self.scan_id, status=result.status,
+        #         findings_count=len(result.findings),
+        #         duration_seconds=result.duration_seconds,
+        #     )
+        #
+        # This caused a SECOND scan_complete event to fire when the pipeline
+        # later called its own emit_scan_complete (after Phase 5-8 finished).
+        # The UI's scans-view.tsx closes the SSE stream on the FIRST
+        # scan_complete event, so the second one was lost — but the first
+        # was premature (it fired before audit/persist/report phases ran).
+        #
+        # Symptom: UI showed "SCAN COMPLETE — 3 findings" mid-scan, before
+        # the audit phase ran, then showed another scan_complete later
+        # with potentially a different finding count.
+        #
+        # Fix: orchestrator no longer emits scan_complete. The pipeline
+        # (_phase_orchestrator + _phase_audit_findings + _phase_persist +
+        # _phase_generate_report + _phase_cleanup) is the single source
+        # of truth for scan_complete — it fires only when ALL phases finish
+        # and the final finding count is known.
+        #
+        # We DO still emit a `scan_progress` event so the UI can show a
+        # progress update when the orchestrator finishes (before the audit
+        # phases run).
+        await emit_scan_progress(
+            scan_id=self.scan_id,
+            thought=f"Orchestrator finished (status={result.status}, "
+                    f"decisions={len(result.decisions)}, findings={len(result.findings)}). "
+                    f"Proceeding to audit + persist + report phases...",
+            agent_name="orchestrator",
+            progress=85,  # leave room for audit (90), persist (95), report (95), cleanup (98)
         )
         return result
 
