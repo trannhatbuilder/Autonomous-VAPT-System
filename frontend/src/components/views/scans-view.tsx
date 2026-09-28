@@ -204,6 +204,26 @@ export function ScansView() {
         // and close on its own.
         setLiveStatus("aborted");
         setLiveScanId(null);
+
+        // ── PATCH (history-sync fix): refetch scan history after abort ──
+        // Previously: only the live SSE panel updated, while the sidebar
+        // scan-history list kept showing the "running" badge for the just-
+        // aborted scan. The backend now reliably writes status='aborted' to
+        // DB (see backend patches), so a fresh getScanHistory call will pick
+        // up the new status. We also do a second refetch after 2s as a
+        // belt-and-suspenders (DB commit may lag by ~100-500ms).
+        try {
+          await loadScans(scansPage, searchQuery);
+          // Give backend a moment to commit the DB update (race window
+          // between abort_scan() returning + pipeline's CancelledError
+          // handler writing UPDATE vapt_scans).
+          setTimeout(() => {
+            loadScans(scansPage, searchQuery);
+          }, 2000);
+        } catch (refetchErr) {
+          // Refetch failure is non-fatal — user can manually refresh
+          console.warn("[VAPT] Failed to refetch scan history after abort:", refetchErr);
+        }
       } else {
         // Both endpoints failed — surface both error messages so the user
         // can decide to retry / check server logs.

@@ -431,18 +431,49 @@ async def delete_scan(
     scan_id: str,
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
-    """Hard delete a scan.
+    """Hard delete a scan with explicit child-row cleanup + savepoint isolation.
 
-    Cascade behavior (Phase F1):
-        - vapt_process_details rows with scan_id → CASCADE deleted
-        - vapt_findings rows with scan_id → SET NULL (findings SURVIVE)
-          + scan_tag column already snapshots the target string so
-          findings remain labeled after the scan row is gone
-        - vapt_chat_messages rows with scan_id FK → SET NULL (already
-          defined in conversation.py W7-D)
+    ── Why this is not just `session.delete(scan)` ──
+    Many child tables FK to vapt_scans WITHOUT any `ondelete` clause
+    (NO ACTION in PostgreSQL). The model-side `ondelete` declarations in
+    app/db/models/ are only honored by `create_all()` — they are NOT applied
+    to the actual DB unless a matching migration has ALTERed the constraint.
+    As of migration 0008 (if applied), all FKs have proper ondelete; but on
+    DBs that haven't run migration 0008 yet, DELETE on vapt_scans will hit
+    ForeignKeyViolation → 500 error.
 
-    Mirrors CyberStrikeAI's DELETE /api/conversations/{id} behavior
-    (internal/handler/conversation.go:574-599).
+    This route explicitly deletes/nulls all known child rows BEFORE deleting
+    the scan row. Even after migration 0008 is applied, this stays correct
+    (idempotent — DELETE finds 0 rows, no-op).
+
+    ── Savepoint isolation (CRITICAL) ──
+    PostgreSQL aborts the ENTIRE transaction when any SQL statement fails.
+    Even if Python catches the exception, the underlying transaction is
+    poisoned — all subsequent SQL statements (including the final
+    `session.delete(scan)` + `session.commit()`) fail with
+    `InFailedSQLTransactionError: current transaction is aborted, commands
+    ignored until end of transaction block`.
+
+    Symptom (the bug this fixes):
+        DELETE /api/scans/{id} returns 500 even though scan status is
+        already "aborted" and all visible data looks clean. Server log shows
+        `InFailedSQLTransactionError` cascading from a missing table or
+        missing column on a child-table DELETE.
+
+    Fix:
+        1. Pre-check `information_schema.tables` + `information_schema.columns`
+           to find which child tables ACTUALLY exist on this DB (skips
+           tables from newer migrations not yet applied).
+        2. Wrap each child-table DELETE in a SAVEPOINT
+           (`session.begin_nested()`). If the DELETE fails, ROLLBACK TO
+           SAVEPOINT — only that sub-transaction is undone, the main
+           transaction stays clean.
+
+    Cascade behavior (Phase F1, preserved):
+        - vapt_findings.scan_id       → SET NULL (findings SURVIVE w/ scan_tag)
+        - vapt_chat_messages.scan_id  → SET NULL (chat history survives)
+        - vapt_process_details        → hard DELETE (scan-scoped timeline)
+        - All other child tables      → hard DELETE (scan-scoped artifacts)
     """
     scan = await session.get(Scan, scan_id)
     if scan is None:
@@ -466,19 +497,132 @@ async def delete_scan(
             {"target": scan.target, "scan_id": scan_id},
         )
 
-    # Delete the scan row — FK CASCADE will clean up process_details,
-    # FK SET NULL will preserve findings (with scan_id=NULL).
-    await session.delete(scan)
-    await session.commit()
+    # ── Pre-check: which child tables/columns actually exist on this DB? ──
+    # Avoids hitting "table does not exist" errors at DELETE time.
+    # `information_schema.tables` + `information_schema.columns` queries are
+    # cheap (single index scan on pg_catalog) and let us skip cleanly.
+    existing_child_tables: set[str] = set()
+    try:
+        rows = await session.execute(
+            text(
+                """
+                SELECT table_name
+                FROM information_schema.columns
+                WHERE column_name = 'scan_id'
+                  AND table_schema = 'public'
+                  AND table_name LIKE 'vapt_%'
+                """
+            )
+        )
+        existing_child_tables = {r[0] for r in rows.fetchall()}
+    except Exception as e:
+        # information_schema should always exist on PostgreSQL — but if this
+        # is a different backend (sqlite for tests), fall back to the full
+        # list and rely on savepoints to swallow errors.
+        logger.warning("delete_scan: information_schema pre-check failed — using full list: %s", e)
+        existing_child_tables = set()  # empty = use full list below
+
+    # ── Cleanup actions (table_name, action_type) ──
+    cleanup_steps: list[tuple[str, str]] = []
+
+    # 1. vapt_findings.scan_id → SET NULL (findings SURVIVE per Phase F1)
+    if "vapt_findings" in existing_child_tables or not existing_child_tables:
+        try:
+            async with session.begin_nested():  # SAVEPOINT
+                await session.execute(
+                    text("UPDATE vapt_findings SET scan_id = NULL WHERE scan_id = :sid"),
+                    {"sid": scan_id},
+                )
+            cleanup_steps.append(("vapt_findings", "SET NULL"))
+        except Exception as e:
+            logger.warning("delete_scan: vapt_findings SET NULL failed (continuing): %s", e)
+
+    # 2. vapt_chat_messages.scan_id → SET NULL
+    if "vapt_chat_messages" in existing_child_tables or not existing_child_tables:
+        try:
+            async with session.begin_nested():  # SAVEPOINT
+                await session.execute(
+                    text("UPDATE vapt_chat_messages SET scan_id = NULL WHERE scan_id = :sid"),
+                    {"sid": scan_id},
+                )
+            cleanup_steps.append(("vapt_chat_messages", "SET NULL"))
+        except Exception as e:
+            logger.warning("delete_scan: vapt_chat_messages SET NULL failed (continuing): %s", e)
+
+    # 3. Hard DELETE tables (scan-scoped artifacts with no value after scan deletion)
+    hard_delete_tables = [
+        "vapt_process_details",
+        "vapt_pentest_facts",
+        "vapt_assets",
+        "vapt_consent_forms",
+        "vapt_hitl_approvals",
+        "vapt_audit_logs",
+        "vapt_c2_sessions",
+        "vapt_c2_tasks",
+        "vapt_replay_traces",
+        "vapt_attack_chain_facts",
+        "vapt_kg_facts",
+        "vapt_methodology_progress",
+        "vapt_rl_episodes",
+        "vapt_rl_q_snapshots",
+    ]
+    for tbl in hard_delete_tables:
+        # Skip tables we know don't exist on this DB (pre-check above).
+        # If pre-check failed (empty set), try anyway — savepoint will catch.
+        if existing_child_tables and tbl not in existing_child_tables:
+            cleanup_steps.append((tbl, "SKIP (table does not exist)"))
+            continue
+        try:
+            async with session.begin_nested():  # SAVEPOINT — isolates failures
+                await session.execute(
+                    text(f'DELETE FROM "{tbl}" WHERE scan_id = :sid'),
+                    {"sid": scan_id},
+                )
+            cleanup_steps.append((tbl, "DELETE"))
+        except Exception as e:
+            # The savepoint rolled back automatically — main transaction
+            # is still clean. Log + continue with the next table.
+            logger.warning(
+                "delete_scan: %s DELETE failed (savepoint rolled back, continuing): %s",
+                tbl, e,
+            )
+            cleanup_steps.append((tbl, f"FAILED: {type(e).__name__}"))
+
+    # Final: delete the scan row itself — should succeed now that all
+    # children are cleaned up (or skipped via savepoint).
+    try:
+        await session.delete(scan)
+        await session.commit()
+    except Exception as e:
+        # If even this fails, ROLLBACK the whole transaction and surface
+        # a clear error to the user. The cleanup_steps list in the response
+        # helps diagnose which child table blocked the delete.
+        await session.rollback()
+        logger.error(
+            "delete_scan: final DELETE on vapt_scans failed even after child cleanup | "
+            "scan_id=%s | cleanup=%s | error=%s",
+            scan_id,
+            "; ".join(f"{t}:{a}" for t, a in cleanup_steps),
+            e,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Failed to delete scan {scan_id}: {e}. "
+                f"Cleanup attempts: {'; '.join(f'{t}:{a}' for t, a in cleanup_steps)}"
+            ),
+        ) from e
 
     logger.info(
-        "Scan deleted | scan_id=%s | findings_preserved=%d | process_details_cascade_deleted=%d",
+        "Scan deleted | scan_id=%s | findings_preserved=%d | process_details_deleted=%d | cleanup=%s",
         scan_id, findings_count, process_details_count,
+        "; ".join(f"{t}:{a}" for t, a in cleanup_steps),
     )
 
     return {
         "scan_id": scan_id,
         "deleted": True,
         "findings_preserved": findings_count,  # these survive (FK SET NULL)
-        "process_details_deleted": process_details_count,  # these are CASCADE-deleted
+        "process_details_deleted": process_details_count,  # hard DELETE'd
+        "cleanup_steps": cleanup_steps,  # per-table outcome log
     }

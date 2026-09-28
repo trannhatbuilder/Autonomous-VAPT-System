@@ -482,6 +482,19 @@ async def start_mode_scan(
     to customize the agent sequence (default: ["recon", "reporting-remediation"]).
 
     Authentication: pass Bearer token in Authorization header.
+
+    ── PATCH (history-sync fix): register scan in scan_registry ──
+    Previously this endpoint ran the orchestrator synchronously without
+    registering the scan in scan_registry. If the client disconnected
+    (Next.js proxy timeout, browser close), uvicorn cancelled the HTTP
+    request task → CancelledError propagated into orchestrator.run() →
+    DB row stayed status='running' (no scan_registry.abort_scan() to
+    clean up — panic button returns "scan_not_found").
+
+    Now we register the scan + a sentinel asyncio.Task reference so the
+    panic button endpoint can cancel it. We also wrap orchestrator.run()
+    in try/except for CancelledError to write a final DB status='aborted'
+    before re-raising.
     """
     # Auto-select mode if requested
     if req.mode == "auto":
@@ -514,6 +527,24 @@ async def start_mode_scan(
         scan_id, chosen_mode.value, req.target,
     )
 
+    # ── PATCH: register scan in scan_registry so panic button works ──
+    # This makes the scan abortable via POST /api/scans/{id}/abort even
+    # though this endpoint runs synchronously (no background asyncio.Task).
+    # We get the current asyncio.Task (the HTTP request handler) and store
+    # it as the pipeline_task — that way abort_scan().task.cancel() will
+    # raise CancelledError into the orchestrator's next await point.
+    import asyncio
+    from app.pentest.scan_registry import scan_registry
+    from app.db.models.scan import Scan as _Scan
+    from app.db.session import async_session as _async_session
+    from datetime import datetime as _dt
+
+    await scan_registry.register_scan(scan_id)
+    current_task = asyncio.current_task()
+    if current_task is not None:
+        await scan_registry.set_pipeline_task(scan_id, current_task)
+        logger.debug("start_mode_scan: registered current_task as pipeline_task for scan=%s", scan_id)
+
     # Dispatch to the right orchestrator
     if chosen_mode == OrchestratorMode.SUPERVISOR:
         orchestrator = SupervisorOrchestrator(
@@ -538,12 +569,47 @@ async def start_mode_scan(
     # Run orchestrator
     try:
         result = await orchestrator.run()
+    except asyncio.CancelledError:
+        # Client disconnected (or panic button fired). Write final DB
+        # status before re-raising.
+        logger.warning(
+            "start_mode_scan cancelled (client disconnect or panic) | scan=%s — finalizing DB",
+            scan_id,
+        )
+        try:
+            async with _async_session() as sess:
+                scan_row = await sess.get(_Scan, scan_id)
+                if scan_row is not None and scan_row.status in ("running", "pending"):
+                    scan_row.status = "aborted"
+                    scan_row.completed_at = _dt.now()
+                    scan_row.error = "Scan cancelled (client disconnect or panic button)"
+                    await sess.commit()
+        except Exception as db_exc:
+            logger.error("start_mode_scan finalize DB failed: %s", db_exc)
+        raise
     except Exception as e:
         logger.exception("Orchestrator run failed: scan=%s mode=%s", scan_id, chosen_mode.value)
+        # Also mark scan as failed in DB (best-effort)
+        try:
+            async with _async_session() as sess:
+                scan_row = await sess.get(_Scan, scan_id)
+                if scan_row is not None and scan_row.status in ("running", "pending"):
+                    scan_row.status = "failed"
+                    scan_row.completed_at = _dt.now()
+                    scan_row.error = str(e)
+                    await sess.commit()
+        except Exception:
+            pass
         raise HTTPException(
             status_code=500,
             detail=f"Orchestrator failed: {e}",
         ) from e
+    finally:
+        # Always unregister scan from registry (even on success)
+        try:
+            await scan_registry.unregister_scan(scan_id)
+        except Exception:
+            pass
 
     # Build response
     response = result.to_dict()
@@ -708,12 +774,22 @@ async def start_pipeline_scan(
         run_vapt_scan_task.delay(target=..., mode=..., ...)
 
     Authentication: pass Bearer token in Authorization header.
+
+    ── PATCH (history-sync fix): register scan in scan_registry ──
+    Same rationale as start_mode_scan — makes the scan abortable via the
+    panic button endpoint, and writes a final DB status='aborted' on
+    CancelledError (client disconnect or panic).
     """
     from app.pentest.scan_pipeline import (
         run_scan_pipeline,
         PipelineFinding,
         DVWA_FIXTURE_FINDINGS,
     )
+    import asyncio
+    from app.pentest.scan_registry import scan_registry
+    from app.db.models.scan import Scan as _Scan
+    from app.db.session import async_session as _async_session
+    from datetime import datetime as _dt
 
     scan_id = generate_scan_id()
 
@@ -727,6 +803,12 @@ async def start_pipeline_scan(
         scan_id, req.target, req.mode, bool(pipeline_findings),
     )
 
+    # ── PATCH: register scan in scan_registry ──
+    await scan_registry.register_scan(scan_id)
+    current_task = asyncio.current_task()
+    if current_task is not None:
+        await scan_registry.set_pipeline_task(scan_id, current_task)
+
     try:
         result = await run_scan_pipeline(
             target=req.target,
@@ -736,12 +818,46 @@ async def start_pipeline_scan(
             scan_id=scan_id,
             findings_override=pipeline_findings,
         )
+    except asyncio.CancelledError:
+        # Client disconnected or panic button fired.
+        logger.warning(
+            "start_pipeline_scan cancelled | scan=%s — finalizing DB",
+            scan_id,
+        )
+        try:
+            async with _async_session() as sess:
+                scan_row = await sess.get(_Scan, scan_id)
+                if scan_row is not None and scan_row.status in ("running", "pending"):
+                    scan_row.status = "aborted"
+                    scan_row.completed_at = _dt.now()
+                    scan_row.error = "Scan cancelled (client disconnect or panic button)"
+                    await sess.commit()
+        except Exception as db_exc:
+            logger.error("start_pipeline_scan finalize DB failed: %s", db_exc)
+        raise
     except Exception as e:
         logger.exception("Pipeline failed: scan=%s", scan_id)
+        # Mark scan as failed in DB (best-effort)
+        try:
+            async with _async_session() as sess:
+                scan_row = await sess.get(_Scan, scan_id)
+                if scan_row is not None and scan_row.status in ("running", "pending"):
+                    scan_row.status = "failed"
+                    scan_row.completed_at = _dt.now()
+                    scan_row.error = str(e)
+                    await sess.commit()
+        except Exception:
+            pass
         raise HTTPException(
             status_code=500,
             detail=f"Pipeline failed: {e}",
         ) from e
+    finally:
+        # Always unregister scan from registry
+        try:
+            await scan_registry.unregister_scan(scan_id)
+        except Exception:
+            pass
 
     return result.to_dict()
 

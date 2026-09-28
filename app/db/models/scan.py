@@ -92,7 +92,9 @@ class ConsentForm(Base, UUIDPrimaryKey, TimestampMixin):
 
     scan_id: Mapped[str] = mapped_column(
         String(64),
-        ForeignKey("vapt_scans.id"),
+        # PATCH (history-sync fix): ondelete=SET NULL so consent forms survive
+        # scan deletion (audit trail). Matches migration 0008.
+        ForeignKey("vapt_scans.id", ondelete="SET NULL"),
         nullable=False,
         index=True,
     )

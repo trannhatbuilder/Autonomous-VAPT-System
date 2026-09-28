@@ -235,6 +235,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.error("Failed to bootstrap KG", error=str(e))
         # Don't crash — agent can run without KG (no path ranking)
 
+    # ── PATCH (history-sync fix): reconcile orphaned scans on startup ──
+    # If the service crashed / was killed (systemd restart, OOM, etc.) while
+    # a scan was running, the in-memory scan_registry is wiped but the DB row
+    # stays status='running' forever. This leaves orphaned "running" scans in
+    # the history UI that can never be aborted (panic button returns
+    # "scan_not_found") and confuse users.
+    #
+    # On startup, we sweep the DB for scans in (running, pending) status and
+    # flip them to 'aborted' with a clear error message. This is safe because:
+    #   - No scan can survive a process restart (in-memory asyncio tasks die)
+    #   - Any scan that was genuinely "about to start" (pending) will be
+    #     re-submitted by the user
+    #   - Already-completed/failed/aborted scans are not touched
+    try:
+        await _reconcile_orphaned_scans()
+    except Exception as e:
+        logger.error("Failed to reconcile orphaned scans on startup", error=str(e))
+        # Non-fatal — UI will still show stale "running" status, but service runs
+
     yield
 
     # ----- Shutdown -----
@@ -413,6 +432,66 @@ async def _shutdown_kg() -> None:
         return
     # Skip SQL persist — KG is in-memory only for now
     logger.info("KG shutdown — in-memory only (SQL persist deferred)")
+
+
+# ── PATCH (history-sync fix): reconcile orphaned scans on startup ──
+async def _reconcile_orphaned_scans() -> None:
+    """On startup, mark any scans stuck in (running, pending) as 'aborted'.
+
+    Called from lifespan startup. Idempotent — safe to run multiple times.
+
+    Background:
+        scan_registry is an in-memory dict. When the service restarts (systemd
+        restart, OOM kill, deploy, etc.), all in-flight asyncio tasks die but
+        their vapt_scans rows stay status='running' in PostgreSQL forever.
+        Users see these as "ghost" running scans in the history UI; clicking
+        Abort returns "scan_not_found" (registry was wiped).
+
+    Strategy:
+        Sweep vapt_scans for status IN ('running', 'pending'), flip them to
+        'aborted' with error='Service restarted while scan was in-flight'.
+        Set completed_at = started_at + 1s (so duration > 0 in UI) if
+        completed_at is NULL.
+
+    Safety:
+        - No scan can survive a process restart (asyncio tasks live in memory)
+        - Already-terminal scans (completed/failed/aborted) are untouched
+        - The reconcile is wrapped in try/except — failure is logged but
+          does not block startup
+    """
+    from datetime import UTC, datetime
+    from sqlalchemy import text as sa_text
+
+    try:
+        async with async_session() as session:
+            # Use raw SQL for the UPDATE — SQLAlchemy ORM would require
+            # loading each row individually which is wasteful for a bulk fix.
+            result = await session.execute(
+                sa_text(
+                    """
+                    UPDATE vapt_scans
+                    SET status = 'aborted',
+                        completed_at = COALESCE(completed_at, NOW()),
+                        error = COALESCE(error, 'Service restarted while scan was in-flight (orphaned scan reconciled on startup)')
+                    WHERE status IN ('running', 'pending')
+                    RETURNING id
+                    """
+                )
+            )
+            orphaned_ids = [row[0] for row in result.fetchall()]
+            await session.commit()
+
+        if orphaned_ids:
+            logger.warning(
+                "Reconciled %d orphaned scan(s) on startup | ids=%s",
+                len(orphaned_ids),
+                [str(sid)[:16] + "..." for sid in orphaned_ids[:5]],  # first 5
+            )
+        else:
+            logger.info("Startup reconcile: no orphaned scans found")
+    except Exception as e:
+        logger.error("Startup reconcile failed (non-fatal): %s", e)
+        raise
 
 
 # ---------- App factory ----------
@@ -599,23 +678,84 @@ def create_app() -> FastAPI:
                     user_id=uuid_mod.UUID(user.id),
                 )
             except asyncio.CancelledError:
-                # Phase D-7: user pressed the panic button — abort_scan()
-                # called task.cancel() on us. Emit a final SSE event so
-                # the UI shows "stopped" status, then re-raise to let
-                # the asyncio runtime mark us as cancelled.
+                # ── PATCH (history-sync fix): write final DB status BEFORE re-raising ──
+                # The pipeline's own `try/except` only catches `Exception`, NOT
+                # CancelledError (which inherits BaseException on Python 3.8+).
+                # So when scan_registry.abort_scan() calls pipeline_task.cancel(),
+                # CancelledError raises at the next await point inside the pipeline
+                # and propagates up here WITHOUT the pipeline getting a chance to
+                # commit `UPDATE vapt_scans SET status='aborted'`.
+                #
+                # Symptom: scan history shows "running" forever even though SSE
+                # log shows "scan_complete(status=aborted)".
+                #
+                # Fix: in this outer handler, we:
+                #   1. Emit final SSE events (already done before)
+                #   2. Run a separate, shielded DB update to mark status='aborted'
+                #   3. Re-raise CancelledError so the asyncio runtime cleans up
                 logger.warning(
-                    "Pipeline task for scan %s cancelled by panic button",
+                    "Pipeline task for scan %s cancelled by panic button — finalizing DB status",
                     scan_id,
                 )
                 from app.pentest.events import emit_scan_progress, emit_scan_complete
-                await emit_scan_progress(
-                    scan_id=scan_id, thought="⛔ Scan đã bị dừng bởi panic button",
-                    agent_name="orchestrator", progress=100,
-                )
-                await emit_scan_complete(
-                    scan_id=scan_id, status="aborted",
-                    findings_count=0, duration_seconds=0.0,
-                )
+                try:
+                    await emit_scan_progress(
+                        scan_id=scan_id, thought="⛔ Scan đã bị dừng bởi panic button",
+                        agent_name="orchestrator", progress=100,
+                    )
+                    await emit_scan_complete(
+                        scan_id=scan_id, status="aborted",
+                        findings_count=0, duration_seconds=0.0,
+                    )
+                except Exception as emit_exc:
+                    logger.warning(
+                        "Final SSE emit failed during CancelledError handler (non-fatal): %s",
+                        emit_exc,
+                    )
+
+                # ── Shielded DB update — MUST complete before re-raise ──
+                # We use asyncio.shield() so that even if the pipeline_task
+                # receives a SECOND cancel signal while we are still in the
+                # DB commit await, the UPDATE will run to completion.
+                # The update is idempotent: if the pipeline already wrote
+                # status='aborted' (race won), this just rewrites the same
+                # value (no-op).
+                try:
+                    from datetime import UTC as _UTC
+                    from datetime import datetime as _dt
+                    from app.db.models.scan import Scan as _Scan
+
+                    async def _finalize_db_status():
+                        async with async_session() as sess:
+                            scan_row = await sess.get(_Scan, scan_id)
+                            if scan_row is None:
+                                logger.warning(
+                                    "Finalize DB: scan row not found %s — cannot update status",
+                                    scan_id,
+                                )
+                                return
+                            # Only flip if currently running/pending — don't
+                            # overwrite a terminal status (completed/failed)
+                            # that the pipeline may have already committed.
+                            if scan_row.status in ("running", "pending"):
+                                scan_row.status = "aborted"
+                                scan_row.completed_at = _dt.now(_UTC)
+                                scan_row.error = "Scan aborted by user (panic button)"
+                                await sess.commit()
+                                logger.info(
+                                    "Finalize DB: scan %s marked as aborted",
+                                    scan_id,
+                                )
+
+                    await asyncio.shield(_finalize_db_status())
+                except Exception as db_exc:
+                    # If even shielded DB write fails, log + continue — the
+                    # reconcile-on-startup (separate patch) will catch this
+                    # orphaned "running" scan on the next service restart.
+                    logger.error(
+                        "Finalize DB status FAILED for scan=%s — will be reconciled on next startup: %s",
+                        scan_id, db_exc,
+                    )
                 raise
             except Exception as e:
                 from app.pentest.events import emit_scan_error
