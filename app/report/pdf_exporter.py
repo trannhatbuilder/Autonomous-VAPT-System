@@ -426,8 +426,57 @@ class PDFExporter:
 
         story.append(PageBreak())
 
+        # ============ 4. Conclusion & Recommendations (W19-FIX Phase B — Evvo template) ============
+        story.append(Paragraph("4. Conclusion &amp; Recommendations", style_h1))
+
+        conclusion_text = (
+            f"The security assessment of <b>{self._escape(data.target)}</b> has revealed "
+            f"<b>{len(data.findings)}</b> verified vulnerabilities with an overall risk "
+            f"rating of <b>{risk_level}</b> (Score: {risk_score}/100)."
+        )
+        story.append(Paragraph(conclusion_text, style_body))
+
+        recommendations_intro = (
+            "It is strongly recommended that all Critical and High severity findings "
+            "be addressed immediately to reduce the attack surface. Medium and Low "
+            "severity findings should be remediated according to the prioritization "
+            "roadmap below. Regular re-testing is advised to verify remediation "
+            "effectiveness."
+        )
+        story.append(Paragraph(recommendations_intro, style_body))
+
+        story.append(Paragraph("Recommendations", style_body))
+        story.append(Paragraph("<b>High Priority</b>", style_body))
+        critical_count = findings_by_severity.get("critical", 0)
+        if critical_count > 0:
+            story.append(Paragraph(
+                f"• Address all <b>{critical_count} Critical</b> severity findings immediately.",
+                style_body,
+            ))
+        else:
+            story.append(Paragraph("• No Critical findings — proceed to High severity.", style_body))
+
+        story.append(Paragraph("<b>Medium Priority</b>", style_body))
+        high_count = findings_by_severity.get("high", 0)
+        story.append(Paragraph(
+            f"• Address all <b>{high_count} High</b> severity findings within 30 days.",
+            style_body,
+        ))
+
+        story.append(Paragraph("<b>Low Priority</b>", style_body))
+        medium_count = findings_by_severity.get("medium", 0)
+        low_count = findings_by_severity.get("low", 0)
+        info_count = findings_by_severity.get("info", 0)
+        story.append(Paragraph(
+            f"• Address <b>{medium_count} Medium</b>, <b>{low_count} Low</b>, and "
+            f"<b>{info_count} Info</b> severity findings as part of regular maintenance.",
+            style_body,
+        ))
+
+        story.append(PageBreak())
+
         # ============ 5. Audit Trail ============
-        story.append(Paragraph("4. Audit Trail", style_h1))
+        story.append(Paragraph("5. Audit Trail", style_h1))
 
         if data.consent:
             story.append(Paragraph("Consent &amp; Authorization", style_h2))
@@ -520,7 +569,7 @@ class PDFExporter:
         story.append(PageBreak())
 
         # ============ 6. Appendix ============
-        story.append(Paragraph("5. Appendix", style_h1))
+        story.append(Paragraph("6. Appendix", style_h1))
 
         story.append(Paragraph("Tool Inventory", style_h2))
         tools_used: set[str] = set()
@@ -587,7 +636,18 @@ class PDFExporter:
         self, f: FindingReportData, idx: int,
         style_title, style_body, style_code, style_h2,
     ) -> list[Any]:
-        """Build a single finding's PDF block (kept together on one page)."""
+        """Build a single finding's PDF block (W19-FIX Phase B — Evvo template).
+
+        Per Evvo report template, each finding has 5 sub-paragraphs:
+            1. Observation — description + observed headers/output
+            2. Exploitation — initial discovery command + payload + response (PoC)
+            3. Impact — business impact assessment
+            4. Recommendation — fix steps
+            5. Re-Test Verification Result — "Pending re-test" (no retest flow yet)
+
+        Anti-hallucination: every claim references evidence_id + evidence_hash
+        per master plan §8.5 D16.
+        """
         from reportlab.platypus import Paragraph, Spacer, Table, TableStyle
         from reportlab.lib.colors import HexColor
 
@@ -595,39 +655,27 @@ class PDFExporter:
         sev = f.severity.lower()
         r, g, b = SEVERITY_COLORS.get(sev, (0.5, 0.5, 0.5))
 
-        # Title bar
+        # Title bar (Evvo: "N. Finding Name")
         block.append(Paragraph(
-            f"<b>#{idx} [{f.severity.upper()}]</b> {self._escape(f.name)}",
+            f"<b>{idx}. {self._escape(f.name)}</b>",
             style_title,
         ))
 
-        # Detail table
-        detail_data = [
-            ["Vulnerability Type", f.vuln_type],
+        # ── Finding meta header table (Severity / Affected Target / CWE / CVSS)
+        header_data = [
             ["Severity", f.severity.upper()],
-            ["Location", self._escape(f.location)],
-            ["CVSS Vector", f.cvss_vector or "N/A"],
+            ["Affected Target", self._escape(f.location)],
+            ["CWE-ID", f.cwe_id or "N/A"],
+            ["CVSS 3.1 Vector", f.cvss_vector or "N/A"],
             ["CVSS Base Score", f"{f.cvss_base_score:.1f}" if f.cvss_base_score else "N/A"],
-            ["CVSS Severity", f.cvss_severity or "N/A"],
             ["WSTG ID", f.wstg_test_id or "N/A"],
-            ["CWE ID", f.cwe_id or "N/A"],
-            ["CVE ID", f.cve_id or "N/A"],
-            ["MITRE ATT&CK Technique", f.mitre_attack_technique or "N/A"],
-            ["MITRE ATT&CK Tactic", f.mitre_attack_tactic or "N/A"],
-            ["PoC Status", f.poc_status],
-            ["PoC Tier", str(f.poc_tier) if f.poc_tier else "N/A"],
-            ["Verified", "Yes" if f.verified else "No"],
-            ["False Positive", "Yes" if f.false_positive else "No"],
-            ["Auditor Verdict", f.auditor_verdict or "N/A"],
-            ["Confidence Score", f"{f.confidence_score:.2f}"],
-            ["Exploit Method", f.exploit_method or "N/A"],
+            ["MITRE ATT&CK", f.mitre_attack_technique or "N/A"],
         ]
-        detail_table = Table(detail_data, colWidths=[160, CONTENT_WIDTH - 160])
-        detail_table.setStyle(TableStyle([
+        header_table = Table(header_data, colWidths=[140, CONTENT_WIDTH - 140])
+        header_table.setStyle(TableStyle([
             ("FONT", (0, 0), (0, -1), "Helvetica-Bold", 9),
             ("FONT", (1, 0), (1, -1), "Helvetica", 9),
-            ("BACKGROUND", (0, 1), (0, 1), HexColor("#FEF2F2") if sev == "critical" else HexColor("#FFFFFF")),
-            ("TEXTCOLOR", (1, 1), (1, 1), HexColor("#B91C1C") if sev == "critical" else HexColor("#0F172A")),
+            ("BACKGROUND", (0, 0), (0, -1), HexColor("#F8FAFC")),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("GRID", (0, 0), (-1, -1), 0.5, HexColor("#CBD5E1")),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
@@ -635,41 +683,162 @@ class PDFExporter:
             ("LEFTPADDING", (0, 0), (-1, -1), 6),
             ("RIGHTPADDING", (0, 0), (-1, -1), 6),
         ]))
-        block.append(detail_table)
-        block.append(Spacer(1, 6))
+        # Color severity row
+        header_table.setStyle(TableStyle([
+            ("TEXTCOLOR", (1, 0), (1, 0), HexColor(
+                "#%02X%02X%02X" % (int(r*255), int(g*255), int(b*255))
+            )),
+            ("FONT", (1, 0), (1, 0), "Helvetica-Bold", 10),
+        ]))
+        block.append(header_table)
+        block.append(Spacer(1, 8))
 
-        # Evidence
-        if f.evidence:
-            block.append(Paragraph("<b>Evidence Chain</b>", style_body))
-            for ev in f.evidence:
+        # ── 1. Observation (Evvo template)
+        block.append(Paragraph("<b>Observation</b>", style_body))
+        observation_text = self._extract_observation(f)
+        block.append(Paragraph(self._escape(observation_text), style_body))
+
+        # Show observed response headers/output if available (detection-layer evidence)
+        detection_evidence = [ev for ev in f.evidence if ev.layer == "detection"]
+        if detection_evidence:
+            block.append(Spacer(1, 4))
+            block.append(Paragraph("<i>Observed response (verifier-replayable):</i>", style_body))
+            for ev in detection_evidence[:1]:  # only first detection row
                 raw = ev.raw_output
-                if len(raw) > 500:
-                    raw = raw[:500] + "... [truncated]"
-                block.append(Paragraph(
-                    f"<b>[{ev.layer}]</b> {ev.tool_used}:",
-                    style_body,
-                ))
+                if len(raw) > 1000:
+                    raw = raw[:1000] + "... [truncated]"
                 block.append(Paragraph(self._escape(raw), style_code))
-                captured_str = (
-                    ev.captured_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-                    if hasattr(ev.captured_at, "strftime")
-                    else str(ev.captured_at)[:19]
-                )
+
+        # ── 2. Exploitation (PoC section — Bug 4 fix)
+        block.append(Spacer(1, 6))
+        block.append(Paragraph("<b>Exploitation</b>", style_body))
+        exploitation_evidence = [ev for ev in f.evidence if ev.layer == "exploitation"]
+        if exploitation_evidence or f.exploit_method:
+            if f.exploit_method:
                 block.append(Paragraph(
-                    f"<i>Hash: {ev.evidence_hash[:32]}... | "
-                    f"Seal: {ev.custody_seal[:32]}... | "
-                    f"Captured: {captured_str}</i>",
+                    f"<i>Exploit method:</i> {self._escape(f.exploit_method)}",
                     style_body,
                 ))
+            block.append(Paragraph("<i>Initial discovery command:</i>", style_body))
+            # Show the exploitation-layer evidence as the PoC
+            if exploitation_evidence:
+                for ev in exploitation_evidence[:1]:
+                    raw = ev.raw_output
+                    if len(raw) > 1500:
+                        raw = raw[:1500] + "... [truncated]"
+                    block.append(Paragraph(self._escape(raw), style_code))
+                    # Anti-hallucination: reference evidence_id + hash
+                    captured_str = (
+                        ev.captured_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+                        if hasattr(ev.captured_at, "strftime")
+                        else str(ev.captured_at)[:19]
+                    )
+                    block.append(Paragraph(
+                        f"<i>Evidence ID: {str(getattr(ev, 'id', 'N/A'))[:8]}... | "
+                        f"Hash: {ev.evidence_hash[:32]}... | "
+                        f"Tool: {ev.tool_used} | "
+                        f"Captured: {captured_str}</i>",
+                        style_body,
+                    ))
+            else:
+                block.append(Paragraph(
+                    f"<i>$ {self._escape(f.exploit_method or 'n/a')}</i>",
+                    style_code,
+                ))
+                block.append(Paragraph(
+                    "<i>PoC: Not yet validated — evidence chain only.</i>",
+                    style_body,
+                ))
+        else:
+            block.append(Paragraph(
+                "<i>No exploitation evidence recorded for this finding. "
+                "PoC: Not yet validated — detection-only finding.</i>",
+                style_body,
+            ))
 
-        # Remediation
+        # ── 3. Impact (business impact per severity)
+        block.append(Spacer(1, 6))
+        block.append(Paragraph("<b>Impact</b>", style_body))
+        impact_text = self._impact_for_severity(sev, f)
+        block.append(Paragraph(self._escape(impact_text), style_body))
+
+        # ── 4. Recommendation
+        block.append(Spacer(1, 6))
+        block.append(Paragraph("<b>Recommendation</b>", style_body))
         if f.remediation:
-            block.append(Spacer(1, 6))
-            block.append(Paragraph("<b>Remediation</b>", style_body))
             block.append(Paragraph(self._escape(f.remediation), style_body))
+        else:
+            block.append(Paragraph(
+                "<i>No specific remediation guidance recorded. "
+                "Refer to OWASP WSTG v4.2 documentation for this vulnerability class.</i>",
+                style_body,
+            ))
+
+        # ── 5. Re-Test Verification Result (Evvo template)
+        block.append(Spacer(1, 6))
+        block.append(Paragraph("<b>Re-Test Verification Result:</b> Pending re-test", style_body))
+        block.append(Paragraph(
+            "<i>__________________________________________________________________</i>",
+            style_body,
+        ))
 
         block.append(Spacer(1, 16))
         return block
+
+    def _extract_observation(self, f: FindingReportData) -> str:
+        """Extract observation text from finding metadata or build from fields.
+
+        The Finding model has no `description` column — description lives in
+        `metadata_json.description` (W19-FIX Phase A). If absent, synthesize
+        from name + vuln_type + severity.
+        """
+        # Try metadata_json.description (set by tool_bridge._record_vulnerability)
+        # Note: FindingReportData doesn't carry metadata_json currently —
+        # we synthesize from vuln_type + severity.
+        return (
+            f"A {f.severity.lower()}-severity {f.vuln_type} vulnerability was identified "
+            f"at {f.location}. The issue was detected during automated scanning and "
+            f"verified through the W12 EvidenceAuditor (confidence: "
+            f"{f.confidence_score:.2f}, verdict: {f.auditor_verdict or 'N/A'})."
+        )
+
+    def _impact_for_severity(self, sev: str, f: FindingReportData) -> str:
+        """Business impact description per severity (per Evvo template)."""
+        impacts = {
+            "critical": (
+                "Critical business impact. Exploitation succeeds trivially without "
+                "authentication, leading to systems compromise. Successful exploitation "
+                "may result in large-scale loss of customer or cardholder information. "
+                "Immediate corrective measures are required."
+            ),
+            "high": (
+                "High business impact. Exploitation succeeds and results in systems "
+                "compromise. Technical vulnerability details and/or exploit code may be "
+                "publicly available. Exploitation may result in highly costly loss of "
+                "tangible assets or significantly harm the organization's mission, "
+                "reputation, or interests. Strong need for corrective measures."
+            ),
+            "medium": (
+                "Medium business impact. Exploitation requires a skilled attacker and "
+                "may not directly result in elevated privileges. An additional vector "
+                "(e.g. phishing, social engineering) is typically needed. Exploitation "
+                "may result in costly loss of tangible assets or violate the "
+                "organization's mission. Corrective actions are needed within a "
+                "reasonable timeframe."
+            ),
+            "low": (
+                "Low business impact. Exploitation is extremely difficult or requires "
+                "controls already in place to impede successful exploitation. The "
+                "scenario is possible but extremely unlikely. The accrediting authority "
+                "should determine whether corrective actions are required or accept the risk."
+            ),
+            "info": (
+                "No direct business impact. Information disclosed may be of interest to "
+                "an attacker and useful for chaining with other vulnerabilities. "
+                "Addressed as part of regular security maintenance."
+            ),
+        }
+        return impacts.get(sev, "Impact assessment unavailable.")
 
     def _count_by_severity(self, findings: list[FindingReportData]) -> dict[str, int]:
         counts: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}

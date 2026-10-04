@@ -138,6 +138,31 @@ import pytest  # noqa: E402
 from app.agents.base import create_agent  # noqa: E402
 
 
+# recon's allowlist — spread calls across several tools so the loop's
+# per-tool obsession guard (MAX_CALLS_PER_TOOL=8, any args) does not abort
+# the run before the context cap is reached.
+RECON_TOOLS = ["nmap", "httpx", "whatweb", "masscan", "rustscan"]
+TOTAL_TOOL_TURNS = 20
+
+
+def _fake_tool_calls(call_no: int) -> list[dict]:
+    """Variable 1-2 tool calls per turn, round-robin across recon's tools.
+
+    Variable counts mirror the real DeepSeek behaviour ("tool_calls=2" /
+    "tool_calls=3") that makes head/tail slicing land mid-exchange.
+    """
+    n_calls = 1 + (call_no % 2)
+    calls_before = sum(1 + (i % 2) for i in range(1, call_no))
+    return [
+        {
+            "id": f"call_{call_no:02d}_{k}",
+            "name": RECON_TOOLS[(calls_before + k) % len(RECON_TOOLS)],
+            "arguments": '{"target": "example.com"}',
+        }
+        for k in range(n_calls)
+    ]
+
+
 @pytest.mark.asyncio
 async def test_react_loop_history_stays_api_valid_across_context_cap(monkeypatch):
     """The real loop must never send an invalid history, even after capping.
@@ -154,20 +179,10 @@ async def test_react_loop_history_stays_api_valid_across_context_cap(monkeypatch
     async def fake_chat_completion(llm_config, messages, tools=None, temperature=None):
         requests.append([dict(m) for m in messages])
         call_no = len(requests)
-        if call_no <= 24:
-            # Cycle 1, 2, 3 tool calls per turn — mirrors the real logs
-            # ("finish=tool_calls | tool_calls=2" / "tool_calls=3").
-            n_calls = (call_no % 3) + 1
+        if call_no <= TOTAL_TOOL_TURNS:
             return {
                 "content": "",
-                "tool_calls": [
-                    {
-                        "id": f"call_{call_no:02d}_{k}",
-                        "name": "nmap",
-                        "arguments": '{"target": "example.com"}',
-                    }
-                    for k in range(n_calls)
-                ],
+                "tool_calls": _fake_tool_calls(call_no),
                 "finish_reason": "tool_calls",
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
             }
@@ -233,14 +248,10 @@ async def test_naive_cap_would_produce_invalid_history(monkeypatch):
     async def fake_chat_completion(llm_config, messages, tools=None, temperature=None):
         requests.append([dict(m) for m in messages])
         call_no = len(requests)
-        if call_no <= 24:
-            n_calls = (call_no % 3) + 1
+        if call_no <= TOTAL_TOOL_TURNS:
             return {
                 "content": "",
-                "tool_calls": [
-                    {"id": f"c_{call_no}_{k}", "name": "nmap", "arguments": "{}"}
-                    for k in range(n_calls)
-                ],
+                "tool_calls": _fake_tool_calls(call_no),
                 "finish_reason": "tool_calls",
                 "usage": {},
             }

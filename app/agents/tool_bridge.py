@@ -442,48 +442,136 @@ async def execute_tool_call(
 
 
 async def _record_vulnerability(args: dict[str, Any], scan_id: str) -> str:
-    """Record a vulnerability finding to DB.
+    """Record a vulnerability finding to DB (W19-FIX Phase A).
+
+    Bug 1 fix (master plan W19): the previous implementation passed `description=`
+    and `cvss_score=` kwargs to `Finding(...)` — neither column exists on the
+    SQLAlchemy model (which uses `cvss_base_score` + `cvss_severity` + stores
+    description in `metadata_json`). SQLAlchemy 2.0 DeclarativeBase raised
+    `TypeError` at construction time → no INSERT → no row in DB, but orchestrator
+    still counted the finding in memory. The `try/except` swallowed the error.
+
+    Bug 2 fix (master plan W19): the previous implementation hardcoded
+    `verified=True` at INSERT time — bypassing the W12 EvidenceAuditor gate.
+    Now insert with `verified=False, auditor_verdict=None` and let Phase 5
+    (`_phase_audit_findings`) flip it based on the auditor verdict.
 
     Args:
         args: finding fields from LLM (title, severity, vuln_type, target, ...)
         scan_id: scan ID for FK
 
     Returns:
-        Confirmation string for LLM.
+        Confirmation string for LLM (JSON).
     """
     try:
         from app.db.session import async_session
-        from app.db.models.pentest import Finding
-        from datetime import datetime, UTC
+        from app.evidence.service import EvidenceService
+
+        # Extract fields from LLM args (case-insensitive + alias tolerant)
+        title = args.get("title") or args.get("name") or "Unknown"
+        vuln_type = args.get("vuln_type") or args.get("type") or "unknown"
+        severity = (args.get("severity") or "info").lower()
+        location = args.get("location") or args.get("target") or args.get("endpoint") or ""
+        cvss_vector = args.get("cvss_vector") or None
+        cvss_base_score_raw = args.get("cvss_score") or args.get("cvss_base_score") or 0.0
+        try:
+            cvss_base_score = float(cvss_base_score_raw)
+        except (TypeError, ValueError):
+            cvss_base_score = 0.0
+        # Derive cvss_severity from base_score if not provided
+        cvss_severity: str | None
+        if cvss_base_score >= 9.0:
+            cvss_severity = "critical"
+        elif cvss_base_score >= 7.0:
+            cvss_severity = "high"
+        elif cvss_base_score >= 4.0:
+            cvss_severity = "medium"
+        elif cvss_base_score >= 0.1:
+            cvss_severity = "low"
+        else:
+            cvss_severity = "info"
+
+        # Standards mapping (LLM may supply these — pass-through)
+        cwe_id = args.get("cwe_id") or None
+        cve_id = args.get("cve_id") or None
+        wstg_test_id = args.get("wstg_test_id") or args.get("wstg_id") or None
+        mitre_attack_technique = args.get("mitre_attack_technique") or args.get("mitre_technique") or None
+        mitre_attack_tactic = args.get("mitre_attack_tactic") or args.get("mitre_tactic") or None
+
+        # PoC metadata
+        exploit_method = args.get("exploit_method") or args.get("source_tool") or "agent"
+        raw_evidence = args.get("evidence") or ""
+        poc_status = "successful" if raw_evidence else "not_attempted"
+
+        # Pack description + remediation into metadata_json (model has no `description` column)
+        description = args.get("description") or ""
+        remediation = args.get("remediation") or ""
+        metadata_payload: dict[str, Any] = {}
+        if description:
+            metadata_payload["description"] = description
+        if remediation:
+            metadata_payload["remediation"] = remediation
+        if raw_evidence:
+            metadata_payload["raw_evidence_excerpt"] = raw_evidence[:2000]
 
         async with async_session() as session:
-            finding = Finding(
+            svc = EvidenceService(session)
+            # Use EvidenceService.create_finding() — it sets verified=False,
+            # auditor_verdict=None, confidence_score=0.0 by default (the correct
+            # pre-audit state). No `description` kwarg; no `cvss_score` kwarg.
+            finding = await svc.create_finding(
                 scan_id=scan_id,
-                name=args.get("title", "Unknown"),
-                vuln_type=args.get("vuln_type", "unknown"),
-                severity=args.get("severity", "info"),
-                location=args.get("location") or args.get("target", ""),
-                description=args.get("description", ""),
-                remediation=args.get("remediation", ""),
-                cvss_score=args.get("cvss_score", 0.0),
-                poc_status="successful" if args.get("evidence") else "not_attempted",
-                verified=True,
-                false_positive=False,
+                name=title,
+                vuln_type=vuln_type,
+                severity=severity,
+                location=location,
+                cvss_vector=cvss_vector,
+                cvss_base_score=cvss_base_score,
+                wstg_test_id=wstg_test_id,
+                mitre_attack_technique=mitre_attack_technique,
+                mitre_attack_tactic=mitre_attack_tactic,
+                cwe_id=cwe_id,
+                cve_id=cve_id,
             )
-            session.add(finding)
+            # Override the cvss_severity + poc_status + exploit_method + metadata
+            # (EvidenceService.create_finding sets severity.lower() — we already
+            # computed a finer-grained value from the score).
+            finding.cvss_severity = cvss_severity
+            finding.poc_status = poc_status
+            finding.exploit_method = exploit_method
+            finding.remediation = remediation or None
+            if metadata_payload:
+                finding.metadata_json = metadata_payload
+
+            # Attach one Evidence row (detection layer) with the raw tool output.
+            # EvidenceService.add_evidence handles PII redaction + custody seal.
+            if raw_evidence:
+                await svc.add_evidence(
+                    finding_id=finding.id,
+                    layer="detection",
+                    raw_output=raw_evidence,
+                    tool_used=exploit_method,
+                )
             await session.commit()
             finding_id = str(finding.id)
 
-        logger.info("Finding recorded | scan=%s | title=%s | severity=%s | id=%s",
-                     scan_id, args.get("title"), args.get("severity"), finding_id[:8])
+        logger.info(
+            "Finding recorded | scan=%s | title=%s | severity=%s | cvss=%s | id=%s",
+            scan_id, title, severity, cvss_base_score, finding_id[:8],
+        )
 
         return json.dumps({
             "status": "recorded",
             "finding_id": finding_id,
-            "message": f"Vulnerability '{args.get('title')}' recorded with severity {args.get('severity')}.",
+            "verified": False,  # Bug 2 fix — will be flipped by Phase 5 auditor
+            "message": (
+                f"Vulnerability '{title}' recorded with severity {severity} "
+                f"(cvss_base_score={cvss_base_score}). Pending audit verification."
+            ),
         })
     except Exception as exc:
-        logger.error("Failed to record vulnerability: %s", exc)
+        logger.exception("Failed to record vulnerability | scan=%s | args_keys=%s",
+                         scan_id, list(args.keys()) if isinstance(args, dict) else None)
         return f"Error recording vulnerability: {exc}"
 
 

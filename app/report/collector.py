@@ -194,12 +194,22 @@ class ScanReportData:
 # Collector
 # ---------------------------------------------------------------------------
 
-async def collect_scan_data(scan_id: str, session: AsyncSession) -> ScanReportData:
+async def collect_scan_data(
+    scan_id: str,
+    session: AsyncSession,
+    *,
+    include_unverified: bool = False,
+    include_false_positives: bool = False,
+) -> ScanReportData:
     """Assemble the full scan report data from DB.
 
     Args:
         scan_id: Scan ID (string form, e.g. "scan_abc123")
         session: Async SQLAlchemy session
+        include_unverified: When True, also include findings where verified=False.
+            Default False — only verified findings appear in the report (W19-FIX Phase B).
+        include_false_positives: When True, also include findings flagged as
+            false_positive=True. Default False — FPs are excluded.
 
     Returns:
         ScanReportData with scan row + all findings + evidence chain +
@@ -207,16 +217,26 @@ async def collect_scan_data(scan_id: str, session: AsyncSession) -> ScanReportDa
 
     Raises:
         ValueError: if scan_id not found in vapt_scans table.
+
+    W19-FIX Phase B (Bug 4 fix):
+        Previously this function queried `WHERE Finding.scan_id == scan_id`
+        with no filter on `verified` or `false_positive` — meaning rejected
+        findings + auditor-flagged FPs would show up in the PDF report.
+        Now defaults to verified-only + FP-excluded.
     """
     scan_row = await session.get(Scan, scan_id)
     if scan_row is None:
         raise ValueError(f"Scan {scan_id!r} not found")
 
-    # Findings + evidence chain
-    findings_result = await session.execute(
-        select(Finding).where(Finding.scan_id == scan_id)
-        .order_by(Finding.severity.asc(), Finding.created_at.asc())
-    )
+    # Findings + evidence chain (W19-FIX Phase B: filter verified + exclude FPs)
+    findings_query = select(Finding).where(Finding.scan_id == scan_id)
+    if not include_unverified:
+        findings_query = findings_query.where(Finding.verified == True)  # noqa: E712
+    if not include_false_positives:
+        findings_query = findings_query.where(Finding.false_positive == False)  # noqa: E712
+    findings_query = findings_query.order_by(Finding.severity.asc(), Finding.created_at.asc())
+
+    findings_result = await session.execute(findings_query)
     findings_orm = findings_result.scalars().all()
 
     findings: list[FindingReportData] = []

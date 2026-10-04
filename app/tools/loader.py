@@ -23,6 +23,38 @@ logger = logging.getLogger(__name__)
 
 TOOLS_DIR = Path(__file__).parent
 
+# Bundled fallback wordlist (shipped with the repo). Used when a tool YAML
+# requests a path like /usr/share/seclists/... that isn't installed on the host,
+# so fuzzing tools still run instead of burning agent turns hunting for files.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+BUNDLED_WORDLIST = _PROJECT_ROOT / "data" / "wordlists" / "common.txt"
+
+
+def _resolve_wordlist(value: str | None) -> str | None:
+    """Return a usable wordlist path for a `wordlist` parameter.
+
+    Order:
+      1. the caller-provided path, if it exists on disk;
+      2. the bundled repo wordlist (data/wordlists/common.txt);
+      3. the original value (so the tool still reports a meaningful error).
+
+    A warning is logged on substitution so operators can install the real
+    SecLists/dirb wordlists and get richer results.
+    """
+    if value:
+        try:
+            if Path(value).is_file():
+                return value
+        except OSError:
+            pass
+    if BUNDLED_WORDLIST.is_file():
+        logger.warning(
+            "Wordlist %r not found — substituting bundled %s",
+            value, BUNDLED_WORDLIST,
+        )
+        return str(BUNDLED_WORDLIST)
+    return value
+
 
 # ---------- Data classes ----------
 
@@ -128,6 +160,12 @@ class ToolDef:
             if p.name == "additional_args":
                 continue  # handle last
             val = kwargs.get(p.name, p.default)
+            # Wordlist params: substitute the bundled list when the requested
+            # path doesn't exist (e.g. SecLists not installed). Without this,
+            # ffuf/gobuster abort immediately and the agent wastes turns
+            # searching the filesystem for wordlists.
+            if val and "wordlist" in p.name.lower():
+                val = _resolve_wordlist(str(val))
             if val is None or val == "" or val is False:
                 continue
             if p.type in ("bool", "boolean"):

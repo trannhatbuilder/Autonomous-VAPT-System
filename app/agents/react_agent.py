@@ -195,26 +195,27 @@ def _format_binary_not_found_hint(error_or_output: str) -> str:
 
 # ── System prompt (Vietnamese per master plan §2.3) ─────────────────────
 
-SYSTEM_PROMPT = """Bạn là VAPT-AI — một AI agent chuyên kiểm thử bảo mật (penetration testing).
+SYSTEM_PROMPT = """You are VAPT-AI — an AI agent specialized in security testing (penetration testing).
 
-Nhiệm vụ: Thực hiện quét bảo mật trên target mà người dùng cung cấp. Bạn có quyền
-đã được xác thực trước (consent form đã được chấp nhận). KHÔNG cần hỏi lại quyền.
+Task: Perform a security scan against the target provided by the user. You already
+have prior authorization (the consent form has been accepted). You do NOT need to
+ask for permission again.
 
-Quy trình scan:
-1. RECON: Dùng nmap, httpx, whatweb để khám phá target (port, service, tech stack)
-2. VULN SCAN: Dùng nuclei, nikto, dalfox để tìm lỗ hổng
-3. EXPLOIT: Dùng sqlmap, ffuf, gobuster để verify lỗ hổng (chỉ với HITL approval)
-4. RECORD: Khi tìm thấy lỗ hổng verified, gọi record_vulnerability để ghi nhận
-5. EXIT: Khi đã scan xong, gọi exit với summary
+Scan workflow:
+1. RECON: Use nmap, httpx, whatweb to discover the target (ports, services, tech stack)
+2. VULN SCAN: Use nuclei, nikto, dalfox to find vulnerabilities
+3. EXPLOIT: Use sqlmap, ffuf, gobuster to verify vulnerabilities (only with HITL approval)
+4. RECORD: When a verified vulnerability is found, call record_vulnerability to log it
+5. EXIT: When the scan is complete, call exit with a summary
 
-Quy tắc:
-- Luôn bắt đầu bằng recon (nmap + httpx) trước khi scan lỗ hổng
-- Chỉ ghi nhận finding khi CÓ EVIDENCE (tool output chứng minh)
-- KHÔNG bịa đặt lỗ hổng — chỉ báo cáo những gì tool phát hiện
-- Gọi record_vulnerability cho MỖI lỗ hổng tìm được
-- Khi xong, gọi exit với tóm tắt kết quả
+Rules:
+- Always start with recon (nmap + httpx) before scanning for vulnerabilities
+- Only record a finding when there is EVIDENCE (proven by tool output)
+- Do NOT fabricate vulnerabilities — only report what the tools detect
+- Call record_vulnerability for EVERY vulnerability found
+- When done, call exit with a summary of the results
 
-Bạn có các công cụ (tools) sau:
+You have the following tools:
 - nmap: port scan, service detection
 - nuclei: vulnerability scanner (CVE, misconfigurations)
 - sqlmap: SQL injection detection + exploitation
@@ -224,11 +225,11 @@ Bạn có các công cụ (tools) sau:
 - dalfox: XSS scanner
 - gobuster/ffuf/feroxbuster: directory/file brute-force
 - nikto: web server scanner
-- record_vulnerability: ghi nhận lỗ hổng
-- exit: kết thúc scan
+- record_vulnerability: record a vulnerability
+- exit: end the scan
 
-QUAN TRỌNG: Hãy thực sự CHẠY các tool (gọi tool function), KHÔNG chỉ mô tả
-những gì bạn sẽ làm. Mỗi lỗ hổng phải được ghi nhận qua record_vulnerability.
+IMPORTANT: Actually RUN the tools (call the tool functions), do NOT just describe
+what you are going to do. Every vulnerability must be recorded via record_vulnerability.
 """
 
 
@@ -264,13 +265,13 @@ async def run_react_scan(
     # base_url are all valid. If not, fail fast with a friendly error
     # instead of crashing mid-loop after spending tokens on the system
     # prompt.
-    await emit_scan_progress(scan_id, thought="Đang kiểm tra cấu hình LLM (OpenAI API key, model, base_url)...",
+    await emit_scan_progress(scan_id, thought="Verifying LLM configuration (OpenAI API key, model, base_url)...",
                              agent_name="orchestrator", progress=5)
 
     ok, err = await _preflight_llm_check(llm_config)
     if not ok:
         logger.error("LLM preflight failed | scan=%s | error=%s", scan_id, err)
-        await emit_scan_progress(scan_id, thought=f"❌ LLM preflight thất bại: {err}",
+        await emit_scan_progress(scan_id, thought=f"❌ LLM preflight failed: {err}",
                                  agent_name="orchestrator", progress=5)
         return {
             "status": "error",
@@ -283,7 +284,7 @@ async def run_react_scan(
 
     logger.info("LLM preflight OK | scan=%s | model=%s",
                 scan_id, llm_config.get("model"))
-    await emit_scan_progress(scan_id, thought="✅ LLM cấu hình OK. Bắt đầu ReAct loop...",
+    await emit_scan_progress(scan_id, thought="✅ LLM configuration OK. Starting ReAct loop...",
                              agent_name="orchestrator", progress=10)
 
     # Build tool schemas
@@ -293,7 +294,7 @@ async def run_react_scan(
     executor = create_executor(target, scan_id)
 
     # Build initial messages
-    user_message = f"Target: {target}\n\nYêu cầu: {user_prompt}\n\nHãy bắt đầu scan target này."
+    user_message = f"Target: {target}\n\nRequest: {user_prompt}\n\nStart scanning this target now."
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_message},
@@ -331,7 +332,7 @@ async def run_react_scan(
 
         try:
             # Call LLM
-            await emit_scan_progress(scan_id, thought=f"Đang suy nghĩ... (vòng {iterations}/{max_iterations})",
+            await emit_scan_progress(scan_id, thought=f"Thinking... (round {iterations}/{max_iterations})",
                                      agent_name="orchestrator", progress=20 + iteration * 2)
 
             response = await chat_completion(
@@ -376,7 +377,7 @@ async def run_react_scan(
                     tool_args = {}
 
                 # Emit SSE: tool_call
-                await emit_scan_progress(scan_id, thought=f"🔧 Đang chạy: {tool_name}({json.dumps(tool_args, ensure_ascii=False)[:100]})",
+                await emit_scan_progress(scan_id, thought=f"🔧 Running: {tool_name}({json.dumps(tool_args, ensure_ascii=False)[:100]})",
                                          agent_name="orchestrator", tool_name=tool_name,
                                          progress=20 + iteration * 2)
 
@@ -389,7 +390,7 @@ async def run_react_scan(
                     final_summary = tool_args.get("summary", "Scan complete.")
                     logger.info("Scan exit | scan=%s | iter=%d | summary=%s",
                                 scan_id, iterations, final_summary[:100])
-                    await emit_scan_progress(scan_id, thought=f"✅ Hoàn thành: {final_summary[:150]}",
+                    await emit_scan_progress(scan_id, thought=f"✅ Complete: {final_summary[:150]}",
                                              agent_name="orchestrator", progress=95)
 
                     # Count findings from DB
@@ -416,6 +417,22 @@ async def run_react_scan(
 
                 # Execute the tool
                 try:
+                    # W19-FIX Phase C: notify HarnessBridge BEFORE tool call.
+                    # Bridge.select_action() consults RL policy + EGATS path
+                    # ranking. Recommendation is recorded to trace JSONL.
+                    # Agent is autonomous — can override the recommendation.
+                    try:
+                        from app.harness.bridge_hooks import on_tool_call_start
+                        await on_tool_call_start(
+                            scan_id=scan_id,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                            target=target,
+                            turn=iterations,
+                        )
+                    except Exception as _hook_exc:
+                        logger.debug("on_tool_call_start hook failed (non-fatal): %s", _hook_exc)
+
                     tool_output = await execute_tool_call(
                         tool_name=tool_name,
                         tool_args=tool_args,
@@ -423,6 +440,23 @@ async def run_react_scan(
                         scan_id=scan_id,
                         executor=executor,
                     )
+
+                    # W19-FIX Phase C: notify HarnessBridge AFTER tool call.
+                    # bridge.record_experience() writes (s, a, r, s', done)
+                    # to RL store + appends turn_end event to JSONL trace.
+                    # Periodic train_step runs every 5 turns.
+                    try:
+                        from app.harness.bridge_hooks import on_tool_call_end
+                        await on_tool_call_end(
+                            scan_id=scan_id,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                            tool_output=tool_output,
+                            success=("error" not in tool_output.lower()[:50]),
+                            turn=iterations,
+                        )
+                    except Exception as _hook_exc:
+                        logger.debug("on_tool_call_end hook failed (non-fatal): %s", _hook_exc)
 
                     # P1: detect "Binary not found" inside the returned
                     # tool_output (SubprocessExecutor doesn't raise — it
@@ -433,13 +467,13 @@ async def run_react_scan(
 
                     if tool_name == "record_vulnerability":
                         findings_count += 1
-                        await emit_scan_progress(scan_id, thought=f"📋 Đã ghi nhận lỗ hổng #{findings_count}",
+                        await emit_scan_progress(scan_id, thought=f"📋 Recorded vulnerability #{findings_count}",
                                                  agent_name="orchestrator", tool_name="record_vulnerability",
                                                  progress=20 + iteration * 2)
                     else:
                         # Emit observation (truncated for SSE)
                         obs_preview = tool_output[:200].replace("\n", " ")
-                        await emit_scan_progress(scan_id, thought=f"📤 Kết quả {tool_name}: {obs_preview}",
+                        await emit_scan_progress(scan_id, thought=f"📤 Result {tool_name}: {obs_preview}",
                                                  agent_name="orchestrator", tool_name=tool_name,
                                                  progress=20 + iteration * 2)
 
@@ -453,7 +487,7 @@ async def run_react_scan(
                         tool_output = _format_binary_not_found_hint(err_str)
                     logger.error("Tool execution error | scan=%s | tool=%s | error=%s",
                                  scan_id, tool_name, exc)
-                    await emit_scan_progress(scan_id, thought=f"❌ Lỗi {tool_name}: {str(exc)[:100]}",
+                    await emit_scan_progress(scan_id, thought=f"❌ Error {tool_name}: {str(exc)[:100]}",
                                              agent_name="orchestrator", tool_name=tool_name,
                                              progress=20 + iteration * 2)
 
@@ -478,7 +512,7 @@ async def run_react_scan(
 
     # Max iterations reached
     logger.warning("Max iterations reached | scan=%s | iter=%d", scan_id, iterations)
-    await emit_scan_progress(scan_id, thought=f"⚠️ Đạt giới hạn {max_iterations} vòng. Kết thúc scan.",
+    await emit_scan_progress(scan_id, thought=f"⚠️ Reached the {max_iterations}-iteration limit. Ending scan.",
                              agent_name="orchestrator", progress=90)
 
     return {

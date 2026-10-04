@@ -50,6 +50,8 @@ interface ScanEvent {
   success?: boolean;
   result_preview?: string;
   execution_id?: string;
+  /** Seconds a tool has been running, from `tool_call_progress` heartbeats. */
+  elapsed_seconds?: number;
   error?: string;
   status?: string;
   content?: string;
@@ -720,6 +722,19 @@ function LiveEventLine({ event }: { event: ScanEvent }) {
         {event.agent_name && <span className="text-zinc-500 text-[10px]">[{event.agent_name}]</span>}
         {event.arguments && <span className="text-zinc-500 truncate flex-1">({JSON.stringify(event.arguments).slice(0, 80)})</span>}
         <span className="text-amber-400 animate-pulse shrink-0">running</span>
+      </div>
+    );
+  }
+  if (type === "tool_call_progress") {
+    // Heartbeat published every ~15s while a long tool (nmap, nuclei, sqlmap)
+    // is still running. Without it the timeline goes silent for minutes and
+    // the scan looks frozen.
+    return (
+      <div className="flex gap-2 leading-relaxed text-zinc-500 pl-6">
+        <span className="text-zinc-700 shrink-0">{time}</span>
+        <span className="shrink-0 text-amber-400/80">⏳</span>
+        <span className="shrink-0 text-zinc-400">{event.tool_name}</span>
+        <span>still running ({event.elapsed_seconds ?? "?"}s)</span>
       </div>
     );
   }

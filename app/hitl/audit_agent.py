@@ -361,7 +361,9 @@ class AuditAgent:
         from app.core.channels import Channel
 
         if not self.model:
-            return None
+            # No audit model configured — still better to use the app's channel
+            # than to reject every destructive tool.
+            return _channel_from_config_for_audit(self.max_tokens, self.temperature)
 
         # Map common model prefixes → (provider, base_url, env_var)
         # The native client only needs base_url + api_key; it figures out
@@ -393,7 +395,10 @@ class AuditAgent:
 
                 api_key = os.environ.get(env_var, "")
                 if not api_key and prefix != "ollama/":
-                    return None
+                    # No provider env key — fall back to Settings → AI Channels.
+                    return _channel_from_config_for_audit(
+                        self.max_tokens, self.temperature,
+                    )
                 return Channel(
                     id="audit_agent",
                     name="AuditAgent",
@@ -411,7 +416,7 @@ class AuditAgent:
         # (the native client will surface a friendly error if the env var is missing).
         api_key = os.environ.get("OPENAI_API_KEY", "")
         if not api_key:
-            return None
+            return _channel_from_config_for_audit(self.max_tokens, self.temperature)
         clean_model = self.model.split("/", 1)[1] if "/" in self.model else self.model
         return Channel(
             id="audit_agent",
@@ -556,6 +561,54 @@ def _resolve_audit_model() -> str:
         "ollama": "ollama/llama3.1:8b",
     }
     return defaults.get(provider, DEFAULT_AUDIT_MODEL)
+
+
+def _channel_from_config_for_audit(max_tokens: int, temperature: float):
+    """Build the audit Channel from config.yaml's default channel.
+
+    WHY: `_build_audit_channel()` resolves API keys from provider-specific ENV
+    vars (OPENAI_API_KEY, ANTHROPIC_API_KEY, ...). When the operator configured
+    their LLM through **Settings → AI Channels** (config.yaml) and left those
+    env vars empty, this returned None, `_is_llm_configured()` was False, and
+    EVERY destructive tool silently fell back to `reject` — including harmless
+    calls like `metasploit command:"version"`. That blocked the penetration
+    phase entirely.
+
+    Falling back to config.yaml makes the audit agent share the SAME LLM the
+    rest of the app uses. The channel's own model is reused (the audit model
+    string may name a provider this channel cannot serve).
+
+    Returns:
+        A Channel, or None when config.yaml has no usable channel.
+    """
+    try:
+        from app.core.channels import Channel, get_default_channel
+
+        base = get_default_channel()
+        if base is None or not (base.api_key or "").strip():
+            return None
+        logger.info(
+            "Audit agent: no provider env API key — using configured channel "
+            "%r (provider=%s, model=%s)",
+            base.id, base.provider, base.model,
+        )
+        return Channel(
+            id="audit_agent",
+            name="AuditAgent",
+            provider=base.provider,
+            base_url=base.base_url,
+            api_key=base.api_key,
+            model=base.model,
+            max_total_tokens=128000,
+            max_completion_tokens=max_tokens,
+            temperature=temperature,
+            # No extended thinking — the audit decision must be fast/cheap.
+            reasoning={},
+            failover_channels=[],
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Audit agent: config.yaml fallback failed: %s", exc)
+        return None
 
 
 def _resolve_audit_temperature() -> float:
