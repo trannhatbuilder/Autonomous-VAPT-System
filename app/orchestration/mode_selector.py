@@ -59,7 +59,9 @@ class ModeSelectionInput:
         scope_size: Number of in-scope hosts (1 = single target, >1 = range)
         has_post_exploitation: Whether user wants full kill-chain
         user_override: Explicit mode string from user (highest priority)
-                       — accepts "deep" / "plan_execute" / "supervisor"
+                       — accepts "deep" / "plan_execute" / "supervisor" / "single"
+                       (W19-FIX2: "single" = one ReAct agent with all 30+ tools,
+                        no specialist transfer — CyberStrikeAI calls this eino_single)
     """
     target: str = ""
     target_type: str | None = None

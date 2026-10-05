@@ -327,6 +327,23 @@ async def test_long_command_truncated_in_audit(in_scope_guard):
     assert len(after["command"]) <= 500
 
 
+# ---------- Test 11: Option B — masscan is HITL-gated, not hard-blocked ----------
+
+def test_masscan_not_hard_blocked_by_scope_guard(in_scope_guard):
+    """Option B: masscan was removed from HIGH_RISK_TOOLS so it is no longer
+    rejected by Layer 1 — it is gated by HITL instead (see DESTRUCTIVE_TOOLS
+    in app/hitl/manager.py)."""
+    result = in_scope_guard.check_destructive_command(
+        "masscan 192.168.1.5 -p 1-65535 --rate 1000"
+    )
+    assert result.allowed is True, f"masscan should not be hard-blocked: {result.reason}"
+
+def test_zmap_still_hard_blocked_by_scope_guard(in_scope_guard):
+    """zmap has no HITL route — it must stay hard-blocked by Layer 1."""
+    result = in_scope_guard.check_destructive_command("zmap -p 443 10.0.0.0/8")
+    assert result.allowed is False
+    assert "zmap" in result.reason
+
 if __name__ == "__main__":
     # Run tests directly when executed as a script
     pytest.main([__file__, "-v", "--tb=short"])

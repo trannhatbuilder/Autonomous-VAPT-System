@@ -10,6 +10,13 @@ import { Badge } from "../ui/badge";
 import { Progress } from "../ui/progress";
 import { Alert, AlertDescription } from "../ui/alert";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
+import {
   Loader2, Play, Square, RefreshCw, Activity, Terminal,
   ChevronDown, ChevronRight, Search, History, Trash2, Download,
 } from "lucide-react";
@@ -20,6 +27,7 @@ import {
   type ScanSummary, type ScanDetail, type ProcessDetailRow, type ProcessDetailFull,
 } from "../../lib/api";
 import { useToast } from "../../hooks/use-toast";
+import { HITLApprovalModal, type HITLApproval } from "./hitl-approval-modal";
 
 // ── Scan event types (for live SSE) ────────────────────────────────────
 type EventType =
@@ -50,8 +58,6 @@ interface ScanEvent {
   success?: boolean;
   result_preview?: string;
   execution_id?: string;
-  /** Seconds a tool has been running, from `tool_call_progress` heartbeats. */
-  elapsed_seconds?: number;
   error?: string;
   status?: string;
   content?: string;
@@ -105,6 +111,11 @@ export function ScansView() {
   // Start new scan form state
   const [target, setTarget] = useState("");
   const [userPrompt, setUserPrompt] = useState("");
+  // W19-FIX3 Phase E2: orchestration mode selector.
+  // Default "supervisor" (kill-chain specialist transfer — recommended per
+  // user feedback "nên dùng multi-agent để đạt kết quả tốt hơn"). Other modes:
+  // "single" (1 agent + all tools, no transfer), "deep", "plan_execute".
+  const [mode, setMode] = useState<"supervisor" | "single" | "deep" | "plan_execute">("supervisor");
   const [starting, setStarting] = useState(false);
 
   const { toast } = useToast();
@@ -145,7 +156,7 @@ export function ScansView() {
     setStarting(true);
     setLiveStatus("starting");
     try {
-      const result = await startScan(target, userPrompt);
+      const result = await startScan(target, userPrompt, mode);
       if (result.status === "preflight_failed" || !result.scan_id) {
         setLiveStatus("error");
         toast({ title: "Cannot start scan", description: result.message || "Tools missing.", variant: "destructive" });
@@ -306,6 +317,45 @@ export function ScansView() {
                 className="bg-zinc-950 border-zinc-800 text-zinc-50 placeholder-zinc-600 text-sm h-9"
               />
             </div>
+            {/* W19-FIX3 Phase E2: orchestration mode selector */}
+            <div>
+              <Label htmlFor="mode" className="text-xs text-zinc-400">Orchestration mode</Label>
+              <Select
+                value={mode}
+                onValueChange={(v: "supervisor" | "single" | "deep" | "plan_execute") => setMode(v)}
+                disabled={starting}
+              >
+                <SelectTrigger id="mode" className="bg-zinc-950 border-zinc-800 text-zinc-50 text-sm h-9">
+                  <SelectValue placeholder="Select mode" />
+                </SelectTrigger>
+                <SelectContent className="bg-zinc-900 border-zinc-800 text-zinc-50">
+                  <SelectItem value="supervisor" className="text-zinc-100 focus:bg-zinc-800">
+                    <div className="flex flex-col">
+                      <span className="font-medium">Supervisor (recommended)</span>
+                      <span className="text-xs text-zinc-500">Multi-agent kill-chain: recon → triage → penetration → privesc</span>
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="single" className="text-zinc-100 focus:bg-zinc-800">
+                    <div className="flex flex-col">
+                      <span className="font-medium">Single</span>
+                      <span className="text-xs text-zinc-500">1 agent + all 30+ tools, no specialist transfer</span>
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="deep" className="text-zinc-100 focus:bg-zinc-800">
+                    <div className="flex flex-col">
+                      <span className="font-medium">Deep</span>
+                      <span className="text-xs text-zinc-500">Parallel sub-agents (network range scans)</span>
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="plan_execute" className="text-zinc-100 focus:bg-zinc-800">
+                    <div className="flex flex-col">
+                      <span className="font-medium">Plan-Execute</span>
+                      <span className="text-xs text-zinc-500">Planner → executor → replanner (full kill-chain)</span>
+                    </div>
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
             {!isLive ? (
               <Button onClick={handleStartScan} disabled={!target || starting} className="w-full bg-emerald-600 hover:bg-emerald-500 text-zinc-50 h-9" size="sm">
                 {starting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Play className="w-4 h-4 mr-2" />}
@@ -459,8 +509,14 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
   const [dbOffset, setDbOffset] = useState(0);
   const [loadingDb, setLoadingDb] = useState(false);
   const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
+  // W19-FIX3 Phase E1: HITL approval modal state.
+  // When backend emits SSE event "hitl_approval_required", we set
+  // pendingHITL → modal pops up → user Approve/Abort → modal closes.
+  const [pendingHITL, setPendingHITL] = useState<HITLApproval | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const timelineEndRef = useRef<HTMLDivElement | null>(null);
+  // useToast inside ScanTimeline so we can fire finding-detected toast
+  const { toast } = useToast();
 
   // ── Load scan detail (always) ─────────────────────────────────────
   useEffect(() => {
@@ -503,6 +559,57 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
         const data: ScanEvent = { ...raw, type: evtName as EventType };
         setEvents((prev) => [...prev, data]);
         if (data.progress !== undefined && data.progress !== null) setProgress(data.progress);
+
+        // W19-FIX3 Phase E1: HITL approval modal — when backend intercepts
+        // a destructive op (sqlmap --os-shell, metasploit exploit, mimikatz),
+        // it emits hitl_approval_required. We pop the modal for user decision.
+        if (evtName === "hitl_approval_required") {
+          const approval: HITLApproval = {
+            id: (raw as any).hitl_id || (raw as any).id || (raw as any).approval_id,
+            scan_id: scanId,
+            tool_name: (raw as any).tool_name || "unknown",
+            target: (raw as any).target || "",
+            args: (raw as any).args || null,
+            predicted_impact: (raw as any).predicted_impact || null,
+            agent_reasoning: (raw as any).agent_reasoning || null,
+            kg_confidence: (raw as any).kg_confidence ?? null,
+            status: "pending",
+            user_decision: null,
+            decided_at: null,
+            expires_at: (raw as any).expires_at || null,
+            created_at: (raw as any).created_at || new Date().toISOString(),
+          };
+          setPendingHITL(approval);
+          // Toast also fires so user notices even if modal is missed
+          toast({
+            title: `HITL Approval Required: ${approval.tool_name}`,
+            description: approval.predicted_impact || "Destructive operation pending",
+            variant: "destructive",
+          });
+        }
+
+        // W19-FIX3 Phase E1: when HITL decision made (approved/aborted),
+        // close the modal.
+        if (evtName === "hitl_decision_made") {
+          setPendingHITL(null);
+        }
+
+        // W19-FIX3 Phase E3: finding warning toast — when a finding is
+        // detected, show a colored toast (severity-driven). User can
+        // immediately see new findings as they're discovered.
+        if (evtName === "finding_detected") {
+          const sev = ((raw as any).severity || "info").toLowerCase();
+          const findingName = (raw as any).name || (raw as any).vuln_type || "Unknown";
+          const location = (raw as any).location || "";
+          const isCritical = sev === "critical";
+          const isHigh = sev === "high";
+          toast({
+            title: `Finding Detected — ${sev.toUpperCase()}`,
+            description: `${findingName}${location ? ` @ ${location}` : ""}`,
+            variant: isCritical || isHigh ? "destructive" : "default",
+          });
+        }
+
         if (data.type === "scan_complete") { es.close(); onLiveComplete(); }
         else if (data.type === "scan_error") { es.close(); onLiveComplete(); }
       } catch (err) { console.warn("[VAPT-SSE] Failed to parse SSE event:", e.data); }
@@ -565,6 +672,14 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
 
   return (
     <div className="flex-1 overflow-hidden flex flex-col">
+      {/* W19-FIX3 Phase E1: HITL approval modal — pops up when backend
+          intercepts a destructive op (sqlmap --os-shell, metasploit exploit,
+          mimikatz, etc.). User must Approve/Abort within 5 min (auto-abort
+          on timeout). */}
+      <HITLApprovalModal
+        approval={pendingHITL}
+        onClose={() => setPendingHITL(null)}
+      />
       {/* Scan header */}
       <div className="px-6 py-4 border-b border-zinc-800 bg-zinc-900/40">
         <div className="flex items-center justify-between">
@@ -722,19 +837,6 @@ function LiveEventLine({ event }: { event: ScanEvent }) {
         {event.agent_name && <span className="text-zinc-500 text-[10px]">[{event.agent_name}]</span>}
         {event.arguments && <span className="text-zinc-500 truncate flex-1">({JSON.stringify(event.arguments).slice(0, 80)})</span>}
         <span className="text-amber-400 animate-pulse shrink-0">running</span>
-      </div>
-    );
-  }
-  if (type === "tool_call_progress") {
-    // Heartbeat published every ~15s while a long tool (nmap, nuclei, sqlmap)
-    // is still running. Without it the timeline goes silent for minutes and
-    // the scan looks frozen.
-    return (
-      <div className="flex gap-2 leading-relaxed text-zinc-500 pl-6">
-        <span className="text-zinc-700 shrink-0">{time}</span>
-        <span className="shrink-0 text-amber-400/80">⏳</span>
-        <span className="shrink-0 text-zinc-400">{event.tool_name}</span>
-        <span>still running ({event.elapsed_seconds ?? "?"}s)</span>
       </div>
     );
   }

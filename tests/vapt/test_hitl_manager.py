@@ -589,3 +589,14 @@ def test_constants():
     assert "nmap" in SAFE_TOOLS
     assert "nuclei" in SAFE_TOOLS
     assert HITL_REQUIRED_C2_LEVELS == {3, 4, 5}
+
+def test_masscan_requires_hitl_option_b():
+    """Option B: masscan was removed from the scope-guard hard-block list, so
+    it MUST be HITL-gated here to keep operator approval in the loop."""
+    assert "masscan" in DESTRUCTIVE_TOOLS
+
+    mgr = HITLManager.__new__(HITLManager)  # skip __init__ (no session needed)
+    mgr.session = None
+    mgr.mode = "audit_agent"
+    mgr._audit_agent = None
+    assert mgr.is_hitl_required("masscan") is True

@@ -796,7 +796,6 @@ def create_app() -> FastAPI:
     async def scan_events(
         scan_id: str,
         token: str | None = None,
-        session: AsyncSession = Depends(get_async_session),
     ) -> StreamingResponse:
         """SSE event stream for a scan — real-time progress.
 

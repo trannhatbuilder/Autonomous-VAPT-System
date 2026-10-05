@@ -49,17 +49,19 @@ MAX_SCAN_DURATION_SECONDS = 4 * 60 * 60  # 4 hours
 # ---------- Mode enum ----------
 
 class OrchestratorMode(str, Enum):
-    """The 3 orchestration modes per master plan §4.2.
+    """The 4 orchestration modes per master plan §4.2 + W19-FIX2.
 
-    Selection logic (master plan §12 W9 task 6):
+    Selection logic (master plan §12 W9 task 6 + W19-FIX2):
         single_web_app + ≤5 steps       → supervisor (default)
         network_range + subnets > 1     → deep
         full_kill_chain or post_exploit → plan_execute
+        user_explicit_single_agent      → single (W19-FIX2)
         default                          → supervisor
     """
     DEEP = "deep"
     PLAN_EXECUTE = "plan_execute"
     SUPERVISOR = "supervisor"
+    SINGLE = "single"  # W19-FIX2 — one agent + all tools (no transfer)
 
     def __str__(self) -> str:
         return self.value

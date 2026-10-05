@@ -1258,13 +1258,22 @@ class BaseAgent:
         if execution.status == ExecutionStatus.COMPLETED and execution.result:
             r = execution.result
             parts: list[str] = []
-            if r.get("scope_violation"):
-                parts.append("SCOPE VIOLATION: target not in declared scope. Tool blocked.")
+            scope_violation = bool(r.get("scope_violation"))
+            if scope_violation:
+                # The scope guard blocks for several distinct reasons (out-of-scope
+                # target, high-risk tool, binary not allowlisted, destructive
+                # pattern). Report the ACTUAL reason — previously this hardcoded
+                # "target not in declared scope", which was misleading whenever the
+                # real cause was e.g. a high-risk tool like zmap.
+                reason = r.get("error") or "blocked by scope guard"
+                parts.append(
+                    f"SCOPE VIOLATION: {reason.removeprefix('Scope violation: ')}"
+                )
             if r.get("stdout"):
                 parts.append(r["stdout"])
             if r.get("stderr") and r.get("exit_code") not in (0, None):
                 parts.append(f"[stderr] {r['stderr'][:500]}")
-            if r.get("error"):
+            if r.get("error") and not scope_violation:
                 parts.append(f"[error] {r['error']}")
             parts.append(f"[execution_id] {execution.id}")
             parts.append(f"[hitl] approved (safety_class={tool_def.safety_class})")

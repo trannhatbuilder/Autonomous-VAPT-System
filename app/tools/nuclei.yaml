@@ -55,10 +55,14 @@ parameters:
 
   - name: severity
     type: string
-    description: Severity filter (info,low,medium,high,critical — comma-separated)
+    description: |
+      Severity filter (info,low,medium,high,critical — comma-separated).
+      W19-FIX3-F3: default "high,critical" — reduce noise from info/low findings
+      that are typically not actionable for pentest reports. Override with
+      "medium,high,critical" if you need a broader sweep.
     required: false
     flag: "-severity"
-    default: "medium,high,critical"
+    default: "high,critical"
 
   - name: output_format
     type: string

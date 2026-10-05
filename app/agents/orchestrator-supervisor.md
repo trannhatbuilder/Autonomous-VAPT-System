@@ -173,3 +173,39 @@ Briefly explain the rationale before delegating or invoking tools; reply to the 
 - Evidence chain of custody: every `Evidence` row has an HMAC-SHA256 tamper seal; custody verifier runs on every read.
 - Replay trace: every scan turn is recorded in `data/traces/scan_<id>.jsonl` for offline replay.
 - LangGraph state graph: Supervisor node → transfer to Expert node → expert returns result → Supervisor decides next transfer or `exit`.
+
+## Pentest Strategy — Use Each Tool Strategically
+
+VAPT-AI enforces a **per-tool call cap** (`app/agents/tool_call_caps.py`) per scan. Each tool has a hard ceiling (nmap=5, nuclei=3, sqlmap=3, httpx=2, whatweb=1, gobuster/feroxbuster/ffuf=2, subfinder/amass=1, nikto=1, metasploit=5, mimikatz=1, generic=5). When the cap is hit, the tool returns `TOOL_CALL_CAP_EXHAUSTED` and the agent must switch strategy.
+
+**Core principle — each tool has ONE purpose. Do NOT repeat the same tool with slightly different args to "get more info". If a tool's first call didn't find anything, switch tools or summarize findings and exit.**
+
+### Per-tool strategy (when to call each, when to stop)
+
+- **nmap**: 1 fast scan by default (top-1000 ports + version + OS detection via `-sV -O --top-ports 1000 --version-intensity 5 -T4`). If you need port-specific detail (e.g. an unusual port that nuclei flagged), call nmap targeted ONCE MORE with `-p <port>`. Do NOT call nmap more than 2 times in a single scan — there is no third nmap configuration that yields new information. Never use `-A` by default (too slow + noisy); only opt in via `aggressive=true` + `additional_args="-p-"` if the user explicitly asks for a full aggressive sweep.
+
+- **nuclei**: 1 call with severity `high,critical` (the default). Do NOT re-run with all templates "to be sure" — that burns 5-15 minutes for noise. If nuclei reports a finding, do NOT re-run nuclei to "verify" — switch to the verification/exploitation tool (e.g. nuclei says SQLi → use sqlmap to exploit, not re-nuclei).
+
+- **sqlmap**: 1 call per endpoint that has SQLi suspicion. Do NOT retry the same endpoint with different `--level`/`--risk` — sqlmap's first run already tests all 6 techniques at level 1. Higher levels add tests for edge cases (e.g. WAF bypasses) — use only when you have specific reason to believe a WAF is present.
+
+- **httpx / whatweb**: 1 call per host for fingerprinting. whatweb should be called at most ONCE per scan (it returns the same fingerprint regardless of args).
+
+- **gobuster / feroxbuster / ffuf**: 1 call with the medium wordlist (default). Optional 2nd call with a large wordlist only when the first found nothing AND you have strong reason to believe hidden paths exist. Do NOT run 3+ directory brute-force runs on the same path — diminishing returns.
+
+- **metasploit**: 1 call per exploit module. Cap = 5 — that's enough for a typical kill-chain (initial foothold → privesc → persistence → lateral → exfil). Each call should use a DIFFERENT exploit module, not the same module with different OPTIONS.
+
+- **When stuck**: If you've called any tool 3+ times with similar results, call `exit` with a clear summary of what you found + what you didn't. Burning more iterations on the same tool wastes scan budget without producing new findings.
+
+### Tool switching rules (when a tool finds something)
+
+- If **nuclei** reports "SQLi on /login?id=1" → call **sqlmap** with `-u <that-url> --batch --level 1 --risk 1` to confirm + extract DB info. Do NOT re-call nuclei on the same endpoint.
+- If **nuclei** reports "XSS reflected" → call **dalfox** or manually craft the PoC with `curl`. Do NOT re-call nuclei.
+- If **nmap** reports an unusual port open (e.g. 8443) → call **httpx** with `-u https://<target>:8443` to fingerprint the service. Do NOT re-call nmap on the same target.
+- If **gobuster** finds `/admin` → call **httpx** to fingerprint, then call **nuclei** with `-u <that-url>` for targeted vuln scan. Do NOT re-call gobuster on the discovered path.
+
+### Anti-patterns explicitly forbidden
+
+- **"Hammer one tool"**: calling nmap 9 times with different port sets "to find more open ports". After the first 2 calls (fast scan + targeted), nmap has told you everything it can — switch to httpx/nuclei on discovered ports.
+- **"Re-verify with same tool"**: nuclei finds XSS → re-run nuclei on the same endpoint to "double-check". Wrong — nuclei's first call already verified via template match. Use a different tool (curl/dalfox) to demonstrate PoC.
+- **"Burn budget waiting for different result"**: calling gobuster with the same args 3 times because "the previous result didn't feel right". The cache returns the same output on the 3rd call + a `DUPLICATE_TOOL_CALL_WARNING` — switch strategy immediately.
+- **"Skip exploitation"**: nuclei finds SQLi but you call `exit` without running sqlmap. Always attempt at least one exploitation tool per finding class — that's how PoC evidence is produced for the audit phase.

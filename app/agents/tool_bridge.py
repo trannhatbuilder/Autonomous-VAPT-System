@@ -148,6 +148,152 @@ def build_tool_schemas(tool_names: list[str] | None = None) -> list[dict[str, An
     return schemas
 
 
+# ---------------------------------------------------------------------------
+# W19-FIX2: HITL gate — defense-in-depth wiring (per DIAG-W19-2 audit)
+# ---------------------------------------------------------------------------
+
+async def _maybe_run_hitl_gate(
+    scan_id: str,
+    tool_name: str,
+    tool_args: dict[str, Any],
+    target: str,
+    cmd_str: str,
+) -> str | None:
+    """Check if HITL is required for this tool call + run the gate if so.
+
+    Returns:
+        - None  → tool is approved (or not destructive) — proceed with execute.
+        - str   → HITL decision message to return to agent (reject/timeout/abort).
+
+    Behavior:
+        1. Determine if tool + args are destructive (DESTRUCTIVE_TOOLS set +
+           sqlmap --os-shell/--dump/--sql-shell/--os-pwn/--priv-esc detection).
+        2. If not destructive → return None (no gate needed).
+        3. If destructive → invoke HITLManager.request_and_wait() which:
+           - Creates HITLApproval row (pending)
+           - Emits SSE event 'hitl_approval_required'
+           - Branches by mode (auto_approve | audit_agent | human_block)
+           - Returns HITLDecision
+        4. If decision is 'approve' → return None (proceed).
+        5. If decision is 'reject'/'user_aborted'/'approval_timeout' →
+           return a clear message so the agent can reason about it.
+        6. If decision is 'suggest_alternative' → return the suggested
+           args as a hint (agent can retry with these).
+
+    Failure mode: if HITLManager raises (e.g. DB not reachable), default
+    to reject per master plan §W7-B (VAPT_AI_HITL_AUDIT_FALLBACK=reject).
+    """
+    try:
+        from app.db.session import async_session
+        from app.hitl.manager import HITLManager
+
+        async with async_session() as session:
+            mgr = HITLManager(session)
+            if not mgr.is_hitl_required(tool_name, tool_args):
+                return None  # not destructive — proceed normally
+
+            # Predicted impact — auto-derived from tool + args
+            predicted_impact = _derive_predicted_impact(tool_name, tool_args, cmd_str)
+            agent_reasoning = (
+                f"Agent invoked {tool_name} with args {tool_args} against {target}. "
+                f"Full command: {cmd_str[:200]}"
+            )
+
+            # KG confidence — default 0.5 (no KG lookup in this hot path)
+            kg_confidence = 0.5
+
+            decision = await mgr.request_and_wait(
+                scan_id=scan_id,
+                tool_name=tool_name,
+                target=target,
+                args=tool_args,
+                predicted_impact=predicted_impact,
+                agent_reasoning=agent_reasoning,
+                kg_confidence=kg_confidence,
+            )
+            await session.commit()
+
+        # Translate decision to agent-facing string
+        if decision.decision == "approve":
+            logger.info(
+                "HITL approved | scan=%s | tool=%s | decided_by=%s | duration=%.2fs",
+                scan_id, tool_name, decision.decided_by, decision.duration_seconds,
+            )
+            return None  # proceed with execute
+        elif decision.decision == "suggest_alternative" and decision.suggested_args:
+            suggested_str = json.dumps(decision.suggested_args, ensure_ascii=False)
+            return (
+                f"[HITL SUGGEST_ALTERNATIVE] {decision.comment}\n"
+                f"Suggested args: {suggested_str}\n"
+                f"Retry the tool with these args if appropriate."
+            )
+        else:
+            # reject / user_aborted / approval_timeout
+            return (
+                f"[HITL {decision.decision.upper()}] Tool '{tool_name}' was "
+                f"NOT executed. Reason: {decision.comment}\n"
+                f"Decided by: {decision.decided_by} "
+                f"(duration: {decision.duration_seconds:.2f}s).\n"
+                f"You can: (a) try a different exploit path, (b) try different "
+                f"args that are less destructive, or (c) report the finding "
+                f"with the evidence you already have."
+            )
+    except Exception as exc:
+        logger.exception(
+            "HITL gate failed (non-fatal — falling back to allow) | scan=%s | tool=%s | %s",
+            scan_id, tool_name, exc,
+        )
+        # Safe default: allow the tool to execute (HITL is a safety check,
+        # not a hard gate — failing open avoids blocking the agent entirely).
+        # If you want fail-closed, change this to:
+        #     return f"[HITL ERROR] Gate failed: {exc}. Tool blocked as safety measure."
+        return None
+
+
+def _derive_predicted_impact(tool_name: str, tool_args: dict[str, Any], cmd_str: str) -> str:
+    """Auto-derive a predicted impact string for the HITL approval row.
+
+    Looks at the tool + its args + the full command string to produce a
+    human-readable impact summary. Used by the audit_agent LLM critic.
+    """
+    tool_lower = tool_name.lower()
+    args_str = " ".join(str(v) for v in tool_args.values()).lower()
+    cmd_lower = cmd_str.lower()
+
+    if tool_lower == "sqlmap" or "sqlmap" in tool_lower:
+        if "--os-shell" in args_str or "--os-pwn" in args_str:
+            return "SQL Injection → remote shell on DB server (os-level RCE)"
+        if "--dump" in args_str:
+            return "SQL Injection → full database dump (PII exfiltration)"
+        if "--sql-shell" in args_str:
+            return "SQL Injection → SQL shell (DB-level access)"
+        return "SQL Injection detection/exploitation against target"
+
+    if tool_lower == "metasploit" or "msfconsole" in cmd_lower or "exploit/" in cmd_lower:
+        if "meterpreter" in cmd_lower or "reverse_tcp" in cmd_lower:
+            return "Metasploit → meterpreter reverse shell (full RCE)"
+        return "Metasploit exploit module execution"
+
+    if tool_lower == "mimikatz":
+        return "Credential extraction from Windows LSASS (W digest / Kerberos tickets)"
+
+    if tool_lower == "hydra":
+        return "Password brute force (auth spray — may lock accounts)"
+
+    if tool_lower in {"impacket", "netexec"}:
+        if "smbexec" in cmd_lower or "wmiexec" in cmd_lower:
+            return "Lateral movement via SMB/WMI exec (remote command execution)"
+        return "Network execution tool (lateral movement capability)"
+
+    if tool_lower == "responder":
+        return "LLMNR/NBT-NS poisoner — MITM credential capture"
+
+    if tool_lower in {"hashcat", "john"}:
+        return "Offline password cracking (when fed captured hashes)"
+
+    return f"Destructive operation: {tool_name} with args {tool_args}"
+
+
 async def execute_tool_call(
     tool_name: str,
     tool_args: dict[str, Any],
@@ -292,6 +438,20 @@ async def execute_tool_call(
             )
         return cached_result
 
+    # ── W19-FIX3 Phase F2: per-tool call cap ─────────────────────────────
+    # Check AFTER cache lookups (so cached hits — same args — do NOT burn
+    # the cap budget) but BEFORE the subprocess spawn (so a denied call
+    # never reaches the executor). When allowed, the counter is incremented
+    # as a side-effect of check_tool_call_cap().
+    from app.agents.tool_call_caps import check_tool_call_cap
+    allowed, cap_reason = check_tool_call_cap(scan_id, tool_name)
+    if not allowed:
+        logger.warning(
+            "Tool call blocked by per-scan cap | scan=%s | tool=%s",
+            scan_id, tool_name,
+        )
+        return cap_reason
+
     # Security tool — execute via ExecutionService + SubprocessExecutor
     all_tools = load_all_tools()
     tool_def = all_tools.get(tool_name)
@@ -309,6 +469,29 @@ async def execute_tool_call(
     cmd_str = " ".join(cmd)
 
     logger.info("Tool execute | scan=%s | tool=%s | cmd=%s", scan_id, tool_name, cmd_str[:120])
+
+    # ── W19-FIX2: HITL gate — defense-in-depth wiring ──────────────
+    # Per DIAG-W19-2: tool_bridge.execute_tool_call was NOT routing
+    # destructive tools through HITL. The production path goes via
+    # BaseAgent._execute_destructive_with_hitl (line 976 in base.py), but
+    # when the agent bypasses that (e.g. via react_agent.run_react_scan
+    # or specialist agents invoked directly), HITL never fires.
+    #
+    # This wiring makes HITL universal: ANY destructive tool call routed
+    # through execute_tool_call() will trigger the HITL approval gate.
+    # The gate is a no-op if VAPT_AI_HITL_MODE=auto_approve (debug).
+    hitl_decision_str = await _maybe_run_hitl_gate(
+        scan_id=scan_id,
+        tool_name=tool_name,
+        tool_args=tool_args,
+        target=target,
+        cmd_str=cmd_str,
+    )
+    if hitl_decision_str is not None:
+        # HITL rejected / timed out / user aborted — return the decision
+        # message to the agent so it can reason about it (e.g. try a
+        # different exploit path or report the finding without the PoC).
+        return hitl_decision_str
 
     # P2: build run closure + submit to ExecutionService
     from app.mcp.execution_service import get_execution_service, ExecutionStatus
@@ -346,8 +529,17 @@ async def execute_tool_call(
 
     if execution.status == ExecutionStatus.COMPLETED and execution.result:
         result_dict = execution.result
-        if result_dict.get("scope_violation"):
-            output_parts.append("SCOPE VIOLATION: target not in declared scope. Tool blocked.")
+        scope_violation = bool(result_dict.get("scope_violation"))
+        if scope_violation:
+            # The scope guard blocks for several distinct reasons: out-of-scope
+            # target, high-risk tool (zmap/hydra/...), binary not in the
+            # allowlist, or a destructive command pattern. Report the ACTUAL
+            # reason — previously this hardcoded "target not in declared scope",
+            # which was wrong and misleading whenever the real cause differed.
+            reason = result_dict.get("error") or "blocked by scope guard"
+            output_parts.append(
+                f"SCOPE VIOLATION: {reason.removeprefix('Scope violation: ')}"
+            )
         stdout = result_dict.get("stdout") or ""
         if stdout:
             output_parts.append(stdout)
@@ -356,7 +548,9 @@ async def execute_tool_call(
         if stderr and exit_code not in (0, None):
             output_parts.append(f"[stderr] {stderr[:500]}")
         error = result_dict.get("error")
-        if error:
+        if error and not scope_violation:
+            # Already surfaced above as the SCOPE VIOLATION reason — don't
+            # repeat it on a second line.
             output_parts.append(f"[error] {error}")
     elif execution.status == ExecutionStatus.HARD_TIMEOUT:
         output_parts.append(

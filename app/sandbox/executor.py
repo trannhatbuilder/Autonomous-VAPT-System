@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 
 # ---------- Constants ----------
 
-DEFAULT_OUTPUT_MAX_BYTES = 50_000  # 50KB cap (D24)
+DEFAULT_OUTPUT_MAX_BYTES = 50_000  # 50KB cap
 DEFAULT_TIMEOUT = 300               # 5 minutes
 SPILL_DIR = Path("data/evidence_spills")
 
@@ -579,14 +579,59 @@ class SubprocessExecutor:
                 f"Binary not found: {cmd_list[0]}", cmd_str, target,
             )
         except PermissionError as exc:
-            # execvp reports EACCES for a non-executable file (or an unreadable
-            # PATH entry). Surface the searched PATH so the operator can fix it
-            # instead of seeing a bare "[Errno 13] Permission denied".
-            return ToolResult.error_result(
-                f"Binary not executable: {cmd_list[0]} ({exc}). "
-                f"Install it, or chmod +x it. PATH searched: {env.get('PATH', '')}",
-                cmd_str, target,
-            )
+            # W19-FIX2 (per DIAG-W19-3): auto-chmod +x the binary + retry once.
+            # Many Go-built CLI tools (wpscan, httpx, naabu, etc.) are
+            # installed via `go install` to ~/.go/bin or ~/.cargo/bin with
+            # mode 0644 instead of 0755. The user typically just needs to
+            # chmod +x, but they shouldn't have to manually intervene.
+            import os as _os
+            import stat as _stat
+            binary_path = cmd_list[0]
+            try:
+                # Resolve via PATH if not absolute
+                if not _os.path.isabs(binary_path):
+                    from shutil import which as _which
+                    resolved = _which(binary_path)
+                    if resolved:
+                        binary_path = resolved
+                if binary_path and _os.path.exists(binary_path):
+                    current_mode = _os.stat(binary_path).st_mode
+                    # Add +x for user/group/other
+                    new_mode = current_mode | _stat.S_IXUSR | _stat.S_IXGRP | _stat.S_IXOTH
+                    _os.chmod(binary_path, new_mode)
+                    logger.info(
+                        "Auto-chmod +x binary %s (mode %o → %o) | scan=%s",
+                        binary_path, current_mode & 0o777, new_mode & 0o777,
+                        scan_id if 'scan_id' in dir() else 'unknown',
+                    )
+                    # Retry the subprocess once with the now-executable binary
+                    proc = await asyncio.create_subprocess_exec(
+                        *cmd_list,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        stdin=asyncio.subprocess.DEVNULL,
+                        env=env,
+                        cwd=workdir,
+                    )
+                else:
+                    return ToolResult.error_result(
+                        f"Binary not executable: {cmd_list[0]} ({exc}). "
+                        f"Binary not found on PATH after attempted chmod. "
+                        f"PATH searched: {env.get('PATH', '')}",
+                        cmd_str, target,
+                    )
+            except Exception as chmod_exc:
+                logger.warning(
+                    "Auto-chmod failed for %s: %s — falling back to original error",
+                    binary_path, chmod_exc,
+                )
+                return ToolResult.error_result(
+                    f"Binary not executable: {cmd_list[0]} ({exc}). "
+                    f"Auto-chmod failed: {chmod_exc}. "
+                    f"Manual fix: chmod +x {binary_path} (run in your shell). "
+                    f"PATH searched: {env.get('PATH', '')}",
+                    cmd_str, target,
+                )
         except OSError as exc:
             return ToolResult.error_result(
                 f"Cannot execute {cmd_list[0]}: {type(exc).__name__}: {exc}",
@@ -636,6 +681,43 @@ class SubprocessExecutor:
             target=target,
         )
 
+    def _read_pty_blocking(self, master_fd: int, timeout: int) -> bytes:
+        """Drain a PTY master fd — BLOCKING, must run via asyncio.to_thread().
+
+        Reads until EOF (child closed the slave), the byte cap is reached, or
+        `timeout` seconds elapse. Uses a 1s select() tick so the deadline is
+        re-checked periodically (and a closed fd unblocks promptly instead of
+        waiting out the full window).
+
+        Never call this directly from a coroutine — select()/os.read() block
+        the thread they run on, and on the main thread that is the event loop.
+        """
+        import time as _time
+
+        output_bytes = b""
+        deadline = _time.monotonic() + max(timeout, 0)
+        max_bytes = self.output_max_bytes * 2
+        while True:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                ready, _, _ = select.select([master_fd], [], [], min(remaining, 1.0))
+            except (OSError, ValueError):
+                break
+            if not ready:
+                continue
+            try:
+                chunk = os.read(master_fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            output_bytes += chunk
+            if len(output_bytes) > max_bytes:
+                break
+        return output_bytes
+
     async def _run_with_pty(
         self,
         cmd_list: list[str],
@@ -674,27 +756,30 @@ class SubprocessExecutor:
         finally:
             os.close(slave_fd)  # parent doesn't need slave
 
-        # Read from master with timeout
-        output_bytes = b""
+        # Read from master with timeout.
+        #
+        # CRITICAL (event-loop freeze fix): select()/os.read() below are
+        # BLOCKING syscalls. Running them directly in this coroutine freezes
+        # the single uvicorn event loop for the whole `timeout` window
+        # (msfconsole.yaml uses timeout=3600s!), which starves every other
+        # request — including /api/auth/login — so the UI appears hung and
+        # SSE heartbeats stop. We offload the blocking drain to a worker
+        # thread so the event loop keeps serving traffic.
         try:
-            while True:
-                try:
-                    ready, _, _ = select.select([master_fd], [], [], timeout)
-                    if not ready:
-                        break  # timeout
-                    chunk = os.read(master_fd, 4096)
-                    if not chunk:
-                        break
-                    output_bytes += chunk
-                    # Cap output
-                    if len(output_bytes) > self.output_max_bytes * 2:
-                        break
-                except OSError:
-                    break
+            output_bytes = await asyncio.to_thread(
+                self._read_pty_blocking, master_fd, timeout,
+            )
         finally:
-            os.close(master_fd)
+            # Close master fd first so a still-running reader thread (if the
+            # thread outlives this coroutine on cancellation) unblocks with
+            # OSError instead of hanging.
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
 
-        # Wait for process to finish
+        # Wait for process to finish — bound by remaining time so the total
+        # call cannot exceed ~timeout + 5s. On timeout, kill the group.
         try:
             await asyncio.wait_for(proc.wait(), timeout=5)
         except asyncio.TimeoutError:

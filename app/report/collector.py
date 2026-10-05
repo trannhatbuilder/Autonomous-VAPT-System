@@ -92,9 +92,28 @@ class FindingReportData:
     auditor_verdict: str | None
     confidence_score: float
     evidence: list[EvidenceReportData] = field(default_factory=list)
+    # W19-FIX3 Phase G3: internet verification cross-check fields.
+    # Computed from metadata_json at from_orm() time — no DB column added
+    # (spec G3: "KHÔNG cần thêm column ... store internet verification vào
+    # metadata_json["internet_verification"] (JSONB field đã có sẵn)").
+    internet_verified: bool = False
+    internet_verification: dict[str, Any] | None = None
 
     @classmethod
     def from_orm(cls, f: Finding, evidence: list[Evidence]) -> "FindingReportData":
+        # W19-FIX3 Phase G3: extract internet verification metadata if present.
+        # Stored by scan_pipeline._internet_verify_finding() at audit time.
+        meta = f.metadata_json if isinstance(f.metadata_json, dict) else {}
+        internet_meta = meta.get("internet_verification")
+        internet_verified = False
+        if isinstance(internet_meta, dict):
+            # confirmed=True means ≥2 of 3 search queries hit. Use the
+            # top-level "confirmed" field set by InternetVerificationResult.
+            internet_verified = bool(internet_meta.get("confirmed", False))
+        elif isinstance(meta.get("internet_consensus"), bool):
+            # Fallback: use the consensus flag if the verifier wrote it
+            # but the full dict isn't there (shouldn't happen, but defensive).
+            internet_verified = meta["internet_consensus"]
         return cls(
             id=f.id,
             name=f.name,
@@ -119,6 +138,8 @@ class FindingReportData:
             auditor_verdict=f.auditor_verdict,
             confidence_score=f.confidence_score,
             evidence=[EvidenceReportData.from_orm(ev) for ev in evidence],
+            internet_verified=internet_verified,
+            internet_verification=internet_meta if isinstance(internet_meta, dict) else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -146,6 +167,9 @@ class FindingReportData:
             "auditor_verdict": self.auditor_verdict,
             "confidence_score": self.confidence_score,
             "evidence": [ev.to_dict() for ev in self.evidence],
+            # W19-FIX3 Phase G3: expose internet verification to frontend.
+            "internet_verified": self.internet_verified,
+            "internet_verification": self.internet_verification,
         }
 
 

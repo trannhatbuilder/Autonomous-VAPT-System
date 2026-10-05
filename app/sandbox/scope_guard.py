@@ -9,7 +9,12 @@ shield_engine/_agent_tools.py (288 LOC).
 Layer 1: Destructive command blocklist
     Regex patterns that block dangerous commands regardless of target:
     - rm -rf, DROP TABLE, fork bombs, mkfs, dd if=, shutdown, reboot
-    - High-risk tools: masscan, zmap, hping3 --flood, slowloris, LOIC
+    - High-risk tools: zmap, hping3 --flood, slowloris, LOIC
+
+    NOTE (Option B): masscan is intentionally NOT hard-blocked here. It is a
+    legitimate scanner (safety_class=destructive in app/tools/masscan.yaml),
+    so it is routed through the HITL gate instead — see DESTRUCTIVE_TOOLS in
+    app/hitl/manager.py. This lets an operator approve a masscan sweep.
 
 Layer 2: Binary allowlist
     Only YAML-defined tools can run (CyberStrikeAI parity).
@@ -87,10 +92,16 @@ DESTRUCTIVE_CMD_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bchown\s+-R\s+root\b"),
 ]
 
-# High-risk tools — blocked entirely (too dangerous for automated use)
+# High-risk tools — blocked entirely (too dangerous for automated use).
+#
+# Option B: `masscan` was REMOVED from this set. masscan is a legitimate
+# recon/scanner tool (safety_class=destructive in app/tools/masscan.yaml),
+# so hard-blocking it here conflicted with the HITL design: the HITL gate
+# would approve the call and then this layer would reject it with a
+# misleading "target not in declared scope" message. masscan is now
+# HITL-gated instead — see DESTRUCTIVE_TOOLS in app/hitl/manager.py.
 HIGH_RISK_TOOLS: set[str] = {
-    "masscan",       # can saturate network
-    "zmap",          # can saturate network
+    "zmap",          # can saturate network (no HITL route — keep blocked)
     "hping3",        # if used with --flood
     "slowloris",     # DoS tool
     "LOIC",          # DoS tool

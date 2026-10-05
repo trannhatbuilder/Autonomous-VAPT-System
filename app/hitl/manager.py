@@ -81,12 +81,26 @@ DESTRUCTIVE_TOOLS = {
     "custom_rce",
     "payload_gen",
     "webshell_deploy",
+    # W19-FIX2: 6 missing destructive tools (per DIAG-W19-2 audit)
+    "mimikatz",       # credential extraction
+    "hydra",           # password brute force
+    "impacket",        # lateral movement (smbexec, wmiexec, ...)
+    "netexec",         # network execution (successor to CrackMapExec)
+    "responder",       # LLMNR/NBT-NS poisoner — MITM
+    "hashcat",         # offline password cracking (when fed captured hashes)
+    "john",            # offline password cracking
+    # Option B: masscan is a high-rate network scanner (can saturate the
+    # network) — removed from the scope-guard hard-block list and gated
+    # here instead so an operator must approve it via HITL before it runs.
+    "masscan",         # ultra-fast port scanner (can saturate network)
 }
 
 SAFE_TOOLS = {
     "nmap", "nuclei", "subfinder", "httpx", "whatweb",
     "nikto", "gobuster", "feroxbuster", "dalfox",
-    "sqlmap",
+    "sqlmap",  # base sqlmap is safe — destructive only when --os-shell/--dump args present
+    "katana", "gau", "waybackurls", "wpscan", "amass", "dnsenum",
+    "fierce", "theharvester", "fscan", "ffuf",
 }
 
 HITL_REQUIRED_C2_LEVELS = {3, 4, 5}

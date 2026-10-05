@@ -40,10 +40,14 @@ parameters:
 
   - name: wordlist
     type: string
-    description: 'Path to wordlist file (default: built-in)'
+    description: |
+      Path to wordlist file. W19-FIX3-F3: default medium wordlist (NOT large)
+      — balances coverage vs scan time. Override with directory-list-2.3-big
+      or directory-list-2.3-large for deeper enumeration when explicitly needed.
+      Empty string → use feroxbuster's built-in wordlist (still medium-sized).
     required: false
     flag: "-w"
-    default: ""
+    default: "/usr/share/wordlists/dirb/directory-list-2.3-medium.txt"
 
   - name: extensions
     type: string

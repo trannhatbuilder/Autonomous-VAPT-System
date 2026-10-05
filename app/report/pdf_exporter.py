@@ -656,10 +656,24 @@ class PDFExporter:
         r, g, b = SEVERITY_COLORS.get(sev, (0.5, 0.5, 0.5))
 
         # Title bar (Evvo: "N. Finding Name")
-        block.append(Paragraph(
-            f"<b>{idx}. {self._escape(f.name)}</b>",
-            style_title,
-        ))
+        # W19-FIX3 Phase G3: append an "Internet-Verified" badge inline when
+        # the verifier confirmed the finding via public web search. Uses
+        # inline <font color=...> so it renders in the same Paragraph.
+        title_html = f"<b>{idx}. {self._escape(f.name)}</b>"
+        if getattr(f, "internet_verified", False):
+            # Green badge for confirmed cross-check.
+            title_html += (
+                ' <font color="#15803D" size="9">'
+                '<b>[Internet-Verified]</b></font>'
+            )
+        elif getattr(f, "internet_verification", None):
+            # Grey badge when verifier ran but did NOT confirm — transparency
+            # for the reader that internet cross-check was attempted.
+            title_html += (
+                ' <font color="#64748B" size="9">'
+                '<b>[Internet: No Consensus]</b></font>'
+            )
+        block.append(Paragraph(title_html, style_title))
 
         # ── Finding meta header table (Severity / Affected Target / CWE / CVSS)
         header_data = [
@@ -781,6 +795,33 @@ class PDFExporter:
             "<i>__________________________________________________________________</i>",
             style_body,
         ))
+
+        # ── W19-FIX3 Phase G3: Internet Cross-Check section ─────────────
+        # Show the references + summary from the internet verifier so the
+        # reader can independently verify the finding via the listed URLs.
+        # Only rendered when internet_verification metadata exists (the
+        # verifier was attempted — whether confirmed or not).
+        iv = getattr(f, "internet_verification", None)
+        if isinstance(iv, dict) and iv:
+            block.append(Spacer(1, 6))
+            block.append(Paragraph("<b>Internet Cross-Check</b>", style_body))
+            summary = iv.get("summary") or ""
+            if summary:
+                block.append(Paragraph(self._escape(summary), style_body))
+            refs = iv.get("references") or []
+            if refs:
+                refs_text = " | ".join(self._escape(str(r)) for r in refs[:3])
+                block.append(Paragraph(
+                    f"<i>References: {refs_text}</i>",
+                    style_body,
+                ))
+            confidence = iv.get("confidence")
+            if confidence is not None:
+                block.append(Paragraph(
+                    f"<i>Internet confidence: {float(confidence):.2f} "
+                    f"(confirmed={iv.get('confirmed', False)})</i>",
+                    style_body,
+                ))
 
         block.append(Spacer(1, 16))
         return block

@@ -75,7 +75,10 @@ parameters:
 
   - name: level
     type: integer
-    description: Test level (1-5, higher = more tests but slower)
+    description: |
+      Test level (1-5, higher = more tests but slower).
+      W19-FIX3-F3: default 1 (safe + fast) — NOT --level 5. Use higher levels
+      only when explicitly requested for targeted deep testing.
     required: false
     flag: "--level"
     default: 1
@@ -83,7 +86,10 @@ parameters:
 
   - name: risk
     type: integer
-    description: Risk of tests (1-3, higher = more aggressive — risk of data modification)
+    description: |
+      Risk of tests (1-3, higher = more aggressive — risk of data modification).
+      W19-FIX3-F3: default 1 (safe). Risk 2-3 can modify DB rows — use only with
+      explicit user opt-in via additional_args.
     required: false
     flag: "--risk"
     default: 1
@@ -98,7 +104,10 @@ parameters:
 
   - name: batch
     type: bool
-    description: Never ask for user input (use defaults)
+    description: |
+      Never ask for user input (use defaults). W19-FIX3-F3: MUST stay true
+      for agent-driven scans — sqlmap's interactive prompts would block the
+      agent loop indefinitely.
     required: false
     flag: "--batch"
     default: true

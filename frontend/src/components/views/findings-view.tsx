@@ -7,9 +7,17 @@ import { Badge } from "../ui/badge";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
-import { Loader2, Bug, Filter, ShieldAlert, Download } from "lucide-react";
+import { Loader2, Bug, Filter, ShieldAlert, Download, Globe, CheckCircle2, XCircle } from "lucide-react";
 import { getFindings, exportVulnerabilities, downloadTextFile } from "../../lib/api";
 import { useToast } from "../../hooks/use-toast";
+
+interface InternetVerification {
+  confirmed: boolean;
+  confidence: number;
+  references: string[];
+  summary: string;
+  consensus?: boolean;
+}
 
 interface Finding {
   id: string;
@@ -24,6 +32,12 @@ interface Finding {
   remediation: string;
   poc_status: string;
   verified: boolean;
+  // W19-FIX3 Phase E4: internet-verified badge — backend populates these
+  // from Finding.metadata_json["internet_verification"] (Phase G). When
+  // internet_verified=true, the finding has been cross-checked against
+  // web sources (CVE databases, security advisories, PoC writeups).
+  internet_verified?: boolean;
+  internet_verification?: InternetVerification | null;
   created_at: string;
 }
 
@@ -217,8 +231,24 @@ export function FindingsView() {
                     <div className="text-xs text-zinc-500 font-mono truncate">
                       {f.vuln_type} @ {f.location}
                     </div>
-                    <div className="text-xs text-zinc-600">
-                      CVSS {f.cvss_score} | {f.verified ? "✓ verified" : "unverified"} | {f.poc_status}
+                    <div className="text-xs text-zinc-600 flex items-center gap-1 flex-wrap">
+                      <span>CVSS {f.cvss_score}</span>
+                      <span>·</span>
+                      <span className={f.verified ? "text-emerald-500" : "text-zinc-500"}>
+                        {f.verified ? "✓ verified" : "unverified"}
+                      </span>
+                      <span>·</span>
+                      <span>{f.poc_status}</span>
+                      {/* W19-FIX3 Phase E4: Internet-Verified badge in list item */}
+                      {f.internet_verified && (
+                        <>
+                          <span>·</span>
+                          <span className="text-emerald-500 flex items-center gap-1">
+                            <Globe className="w-3 h-3" />
+                            internet-checked
+                          </span>
+                        </>
+                      )}
                     </div>
                   </CardContent>
                 </Card>
@@ -266,6 +296,63 @@ export function FindingsView() {
                     <div>
                       <h4 className="text-xs uppercase tracking-wider text-zinc-500 mb-2">Remediation</h4>
                       <p className="text-sm text-zinc-300 whitespace-pre-wrap">{selectedFinding.remediation}</p>
+                    </div>
+                  )}
+
+                  {/* W19-FIX3 Phase E4: Internet Cross-Check sub-section.
+                      Backend (Phase G) populates this via Finding.metadata_json
+                      ["internet_verification"] — uses web-search to cross-check
+                      finding against CVE databases, security advisories, PoC
+                      writeups. Renders summary + confidence + reference URLs. */}
+                  {selectedFinding.internet_verification && (
+                    <div>
+                      <h4 className="text-xs uppercase tracking-wider text-zinc-500 mb-2 flex items-center gap-2">
+                        <Globe className="w-3 h-3" />
+                        Internet Cross-Check
+                      </h4>
+                      <div className={`border rounded p-3 space-y-2 ${
+                        selectedFinding.internet_verified
+                          ? "bg-emerald-950/20 border-emerald-900"
+                          : "bg-zinc-900/40 border-zinc-800"
+                      }`}>
+                        <div className="flex items-center gap-2 text-sm">
+                          {selectedFinding.internet_verified ? (
+                            <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                          ) : (
+                            <XCircle className="w-4 h-4 text-zinc-500" />
+                          )}
+                          <span className={selectedFinding.internet_verified ? "text-emerald-300" : "text-zinc-400"}>
+                            {selectedFinding.internet_verified
+                              ? "Confirmed by internet sources"
+                              : "No consensus / insufficient references"}
+                          </span>
+                          <Badge variant="outline" className="text-xs ml-auto">
+                            confidence: {(selectedFinding.internet_verification.confidence * 100).toFixed(0)}%
+                          </Badge>
+                        </div>
+                        {selectedFinding.internet_verification.summary && (
+                          <p className="text-xs text-zinc-400 italic">
+                            {selectedFinding.internet_verification.summary}
+                          </p>
+                        )}
+                        {selectedFinding.internet_verification.references &&
+                          selectedFinding.internet_verification.references.length > 0 && (
+                            <div className="space-y-1">
+                              <div className="text-xs text-zinc-500">References:</div>
+                              {selectedFinding.internet_verification.references.map((ref, i) => (
+                                <a
+                                  key={i}
+                                  href={ref}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="block text-xs text-blue-400 hover:text-blue-300 truncate font-mono"
+                                >
+                                  → {ref}
+                                </a>
+                              ))}
+                            </div>
+                          )}
+                      </div>
                     </div>
                   )}
                 </CardContent>

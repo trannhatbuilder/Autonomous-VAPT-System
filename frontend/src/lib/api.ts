@@ -232,14 +232,46 @@ export async function getMe(): Promise<{ id: string; email: string; role: string
   return apiFetch("/api/auth/me");
 }
 
-/** POST /api/scans/start — start a scan, returns scan_id immediately. */
-export async function startScan(target: string, userPrompt: string): Promise<{
+/** POST /api/scans/start (or /api/scans/start-mode for non-default modes) — start a scan. */
+/**
+ * Start a scan with optional orchestration mode.
+ *
+ * W19-FIX3 Phase E2: mode selector. Default is "supervisor" (kill-chain
+ * specialist transfer). Other options:
+ *   - "single"      → 1 ReAct agent + all tools, no transfer (eino_single)
+ *   - "deep"        → parallel sub-agents (network range scans)
+ *   - "plan_execute" → planner → executor → replanner (full kill-chain)
+ *
+ * If mode is "supervisor" (default), we hit the legacy /api/scans/start
+ * endpoint (no mode param needed). For other modes, we hit /api/scans/start-mode
+ * which accepts the mode field.
+ */
+export async function startScan(
+  target: string,
+  userPrompt: string,
+  mode: "supervisor" | "single" | "deep" | "plan_execute" = "supervisor",
+): Promise<{
   scan_id: string;
   target: string;
   user_prompt: string;
   status: string;
   message: string;
 }> {
+  // For non-default modes, use /api/scans/start-mode endpoint which accepts
+  // mode + scope_size + has_post_exploitation params.
+  if (mode !== "supervisor") {
+    return apiFetch("/api/scans/start-mode", {
+      method: "POST",
+      body: JSON.stringify({
+        target,
+        user_prompt: userPrompt,
+        mode,
+        scope_size: 1,
+        has_post_exploitation: false,
+      }),
+    });
+  }
+  // Default supervisor mode — legacy endpoint (no mode field needed).
   return apiFetch("/api/scans/start", {
     method: "POST",
     body: JSON.stringify({ target, user_prompt: userPrompt }),

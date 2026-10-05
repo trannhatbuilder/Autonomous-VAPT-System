@@ -69,30 +69,37 @@ parameters:
     # requires root privileges" because nmap sees the -sS flag.
     # Using position makes the loader append JUST the value as-is.
     position: 2  # appended after target (position 1)
-    default: "-sT"  # TCP connect scan — no root needed
+    default: "-sT"  # TCP connect scan — no root needed (W19-FIX3-F3: fast mode default)
     options:
       - "-sT"  # TCP connect scan (no root) ← DEFAULT, safe under systemd
       - "-sS"  # SYN scan (stealth) — requires root/CAP_NET_RAW
       - "-sU"  # UDP scan — requires root
       - "-sA"  # ACK scan (firewall detection) — requires root
 
+  # W19-FIX3-F3: version_detection + os_detection default = true (fast profile
+  # needs both for accurate service fingerprinting). aggressive stays false —
+  # -A is too deep for default pentest web-app scans (slow + noisy).
   - name: version_detection
     type: bool
-    description: Enable service version detection (-sV)
+    description: Enable service version detection (-sV). Default true (fast mode).
     required: false
     flag: "-sV"
-    default: false
+    default: true
 
   - name: os_detection
     type: bool
-    description: Enable OS detection (-O)
+    description: Enable OS detection (-O). Default true (fast mode).
     required: false
     flag: "-O"
-    default: false
+    default: true
 
   - name: aggressive
     type: bool
-    description: Enable aggressive scan (-A = OS + version + script + traceroute)
+    description: |
+      Enable aggressive scan (-A = OS + version + script + traceroute).
+      Default FALSE — too deep + slow for default pentest web-app scans.
+      For full aggressive scan, set aggressive=true AND override
+      additional_args="-p-" to scan all 65535 ports (per W19-FIX3-F3 nmap_full).
     required: false
     flag: "-A"
     default: false
@@ -137,9 +144,12 @@ parameters:
 
   - name: additional_args
     type: string
-    description: Additional nmap arguments (e.g. "--top-ports 100 -v")
+    description: |
+      Additional nmap arguments. Default under fast profile: "--top-ports 1000
+      --version-intensity 5" (per W19-FIX3-F3). Override with "-p-" for full
+      range or any other nmap flags.
     required: false
-    default: ""
+    default: "--top-ports 1000 --version-intensity 5"  # W19-FIX3-F3 fast-mode default
 
 # Output handling
 output:
