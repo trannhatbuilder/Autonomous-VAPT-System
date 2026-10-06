@@ -4,6 +4,11 @@ enabled: true
 description: |
   RustScan — fast modern port scanner. Scans all 65535 ports in seconds.
   Combines with nmap for service detection. Safer than masscan.
+
+  W19-FIX4: changed `target` from `position: 1` (positional) to `flag: "-a"`
+  because rustscan expects `-a <target>` (or `--addresses`). The previous
+  positional passing was causing rustscan to error with "no addresses
+  provided" because rustscan doesn't accept a bare positional arg.
 short_description: RustScan — fast port scanner (all 65535 ports in seconds)
 category: network_scanner
 wstg_ids:
@@ -14,9 +19,9 @@ safety_class: active
 parameters:
   - name: target
     type: string
-    description: Target IP or hostname
+    description: Target IP or hostname (rustscan -a flag)
     required: true
-    position: 1
+    flag: "-a"  # W19-FIX4: was `position: 1` — wrong, rustscan needs -a
   - name: ports
     type: string
     description: Ports (e.g. 1-65535 or top1000)
