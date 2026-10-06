@@ -2,13 +2,48 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 0 0% 3.9%;
+    --background: 210 20% 98%;
+    --foreground: 222 30% 12%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 30% 12%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 30% 12%;
+    --primary: 158 64% 34%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 18% 93%;
+    --secondary-foreground: 222 30% 18%;
+    --muted: 210 18% 93%;
+    --muted-foreground: 215 16% 42%;
+    --accent: 158 42% 93%;
+    --accent-foreground: 158 64% 24%;
+    --destructive: 0 72% 48%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 214 20% 86%;
+    --input: 214 20% 82%;
+    --ring: 158 64% 34%;
+    --radius: 0.5rem;
   }
 
   .dark {
-    --background: 240 10% 3.9%;
+    --background: 222 24% 7%;
     --foreground: 0 0% 98%;
+    --card: 222 22% 10%;
+    --card-foreground: 0 0% 98%;
+    --popover: 222 22% 10%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 158 64% 42%;
+    --primary-foreground: 222 30% 8%;
+    --secondary: 222 18% 16%;
+    --secondary-foreground: 0 0% 96%;
+    --muted: 222 18% 16%;
+    --muted-foreground: 215 14% 65%;
+    --accent: 158 32% 18%;
+    --accent-foreground: 158 70% 78%;
+    --destructive: 0 62% 42%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 222 16% 20%;
+    --input: 222 16% 24%;
+    --ring: 158 64% 42%;
   }
 }
 
@@ -19,19 +54,55 @@
 }
 
 ::-webkit-scrollbar-track {
-  background: rgb(24 24 27);  /* zinc-900 */
+  background: hsl(var(--background));
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgb(63 63 70);  /* zinc-700 */
+  background: hsl(var(--border));
   border-radius: 5px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgb(82 82 91);  /* zinc-600 */
+  background: hsl(var(--muted-foreground));
 }
 
 body {
-  background: rgb(9 9 11);  /* zinc-950 */
-  color: rgb(244 244 245);  /* zinc-100 */
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  transition: background-color 180ms ease, color 180ms ease;
 }
+
+/* The scan console contains dense terminal-style surfaces. Keep its visual
+   hierarchy in both themes while retaining the existing event colors. */
+.scan-console {
+  --console-deep: 210 20% 96%;
+  --console-panel: 0 0% 100%;
+  --console-panel-muted: 210 18% 94%;
+  --console-border: 214 20% 86%;
+  --console-text: 222 30% 16%;
+  --console-muted: 215 16% 45%;
+}
+
+.dark .scan-console {
+  --console-deep: 222 24% 7%;
+  --console-panel: 222 22% 10%;
+  --console-panel-muted: 222 18% 13%;
+  --console-border: 222 16% 20%;
+  --console-text: 0 0% 94%;
+  --console-muted: 215 14% 62%;
+}
+
+.scan-console .bg-zinc-950 { background-color: hsl(var(--console-deep)) !important; }
+.scan-console .bg-zinc-900\/40,
+.scan-console .bg-zinc-900\/60 { background-color: hsl(var(--console-panel-muted) / 0.92) !important; }
+.scan-console .bg-zinc-800\/60 { background-color: hsl(var(--accent) / 0.65) !important; }
+.scan-console .border-zinc-800,
+.scan-console .border-zinc-900\/50,
+.scan-console .border-zinc-900 { border-color: hsl(var(--console-border)) !important; }
+.scan-console .text-zinc-100,
+.scan-console .text-zinc-200,
+.scan-console .text-zinc-300 { color: hsl(var(--console-text)) !important; }
+.scan-console .text-zinc-400,
+.scan-console .text-zinc-500,
+.scan-console .text-zinc-600,
+.scan-console .text-zinc-700 { color: hsl(var(--console-muted)) !important; }

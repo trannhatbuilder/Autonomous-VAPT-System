@@ -17,9 +17,13 @@ safety_class: destructive
 parameters:
   - name: command
     type: string
-    description: msfconsole command (e.g. "use exploit/multi/handler; set RHOSTS 10.0.0.5; run")
+    description: |
+      msfconsole command string (e.g. "use exploit/multi/handler; set RHOSTS 10.0.0.5; run").
+      The wrapper runs it non-interactively: `msfconsole -q -x "<command>; exit"`.
+      Do NOT append "exit" yourself — it is added automatically.
     required: true
-    position: 1
+    flag: "-x"
+    suffix: "; exit"
   - name: quiet
     type: bool
     description: Quiet mode (no banner)
@@ -34,5 +38,9 @@ parameters:
 output:
   max_bytes: 50000
   format: text
-timeout: 3600
+# msfconsole takes ~10-40s just to boot Ruby; a single auxiliary module run is
+# usually seconds. 180s allows that comfortably while cutting off a module that
+# blocks (e.g. an exploit waiting for a session) instead of holding the scan for
+# 10 minutes. After a timeout the stall circuit-breaker forces a tool switch.
+timeout: 180
 allowed_exit_codes: [0, 1]

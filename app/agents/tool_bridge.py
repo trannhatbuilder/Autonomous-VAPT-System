@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from app.tools.loader import load_all_tools, ToolDef, _build_scope_for_target
@@ -27,6 +28,31 @@ from app.sandbox.executor import SubprocessExecutor, ToolResult
 from app.sandbox.scope_guard import ScopeGuard
 
 logger = logging.getLogger(__name__)
+
+# ANSI/VT100 control sequences (CSI colour codes, cursor moves, OSC titles).
+# Security tools (sqlmap, feroxbuster, nuclei, nmap NSE) emit these even when
+# not attached to a TTY. They waste the LLM's context budget and made the model
+# report "output is truncated at the first ANSI colour escape" and burn whole
+# turns trying to "disable colour" instead of reading results.
+_ANSI_ESCAPE_RE = re.compile(
+    r"""
+    \x1b\[[0-?]*[ -/]*[@-~]      # CSI ... final byte
+    | \x1b\][^\x07\x1b]*(?:\x07|\x1b\\)  # OSC ... BEL or ST
+    | \x1b[@-Z\\-_]              # 2-char escape
+    | \r(?=[^\n])                # bare CR (progress bars) — not CRLF
+    """,
+    re.VERBOSE,
+)
+
+# Max characters of tool output forwarded to the LLM (head + tail kept).
+MAX_LLM_OUTPUT_CHARS = 8000
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from tool output."""
+    if not text:
+        return text
+    return _ANSI_ESCAPE_RE.sub("", text)
 
 
 # ---------- Schema cache (per-agent-toolset) ----------
@@ -340,7 +366,47 @@ async def execute_tool_call(
     # Handle special tools (these don't go through ExecutionService — they
     # don't run subprocesses; they're agent-control tools)
     if tool_name == "exit":
-        return json.dumps({"status": "scan_complete", "summary": tool_args.get("summary", "")})
+        # ── W19-FIX5 Phase I: pentest_complete gate (EVVO parity) ──────
+        # Per EVVO routes/pentest/tool_handlers.py:40-57.
+        # Reject `exit` if agent hasn't done enough work — prevents
+        # premature wrap-up at turn ~10 having only run curl.
+        # Min conditions: turn >= MIN_AGENT_TURNS (20) AND
+        # commands_run >= MIN_COMMANDS_FOR_COMPLETE (25).
+        summary = tool_args.get("summary", "Pentest complete.")
+        try:
+            from app.agents.react_agent import MIN_AGENT_TURNS, MIN_COMMANDS_FOR_COMPLETE
+            from app.agents.tool_call_caps import get_tool_call_stats
+            stats = get_tool_call_stats(scan_id) if hasattr(get_tool_call_stats, "__call__") else {}
+            commands_run = sum(stats.values()) if stats else 0
+            # Get turn count from scan_registry (best-effort)
+            turn = 0
+            try:
+                from app.pentest.scan_registry import scan_registry
+                state = scan_registry.get_state(scan_id)
+                if state and hasattr(state, "decisions_count"):
+                    turn = state.decisions_count or 0
+            except Exception:
+                pass
+            if turn < MIN_AGENT_TURNS or commands_run < MIN_COMMANDS_FOR_COMPLETE:
+                logger.info(
+                    "exit tool rejected | scan=%s | turn=%d/%d | commands=%d/%d",
+                    scan_id, turn, MIN_AGENT_TURNS, commands_run, MIN_COMMANDS_FOR_COMPLETE,
+                )
+                return (
+                    f"REJECTED: Pentest is NOT complete. You have only run "
+                    f"{commands_run}/{MIN_COMMANDS_FOR_COMPLETE} commands and "
+                    f"{turn}/{MIN_AGENT_TURNS} turns. A thorough pentest requires: "
+                    f"header check (curl -sI), port scan (nmap), directory brute (ffuf/gobuster), "
+                    f"nuclei scan, SQLi testing (sqlmap), XSS testing (dalfox), "
+                    f"and parameter discovery (arjun). Continue testing."
+                )
+        except ImportError:
+            # MIN_AGENT_TURNS not available (older react_agent) — fall through
+            pass
+        except Exception as exc:
+            logger.debug("pentest_complete gate check failed (non-fatal): %s", exc)
+
+        return json.dumps({"status": "scan_complete", "summary": summary})
 
     if tool_name == "record_vulnerability":
         return await _record_vulnerability(tool_args, scan_id)
@@ -367,6 +433,20 @@ async def execute_tool_call(
     # — if the LLM calls the same (tool, args) 3+ times, we prepend a
     # warning to the cached output so the LLM understands it's stuck.
     call_count = increment_call_count(scan_id, tool_name, tool_args)
+
+    # ── Stall circuit-breaker (checked BEFORE any cache lookup) ──────────
+    # If this tool was already killed by its hard timeout (or cancelled) too
+    # many times in this scan, refuse to run it again and tell the agent to
+    # switch tools. Checked first so a cached timeout from an identical retry
+    # does not mask the stronger "switch required" instruction.
+    from app.agents.tool_call_caps import is_tool_stalled
+    stalled, stall_reason = is_tool_stalled(scan_id, tool_name)
+    if stalled:
+        logger.warning(
+            "Tool call blocked by stall circuit-breaker | scan=%s | tool=%s",
+            scan_id, tool_name,
+        )
+        return stall_reason
 
     # Layer 1: tool availability (binary missing/blocked)
     cached_unavail = get_cached_unavailable(scan_id, tool_name)
@@ -529,17 +609,8 @@ async def execute_tool_call(
 
     if execution.status == ExecutionStatus.COMPLETED and execution.result:
         result_dict = execution.result
-        scope_violation = bool(result_dict.get("scope_violation"))
-        if scope_violation:
-            # The scope guard blocks for several distinct reasons: out-of-scope
-            # target, high-risk tool (zmap/hydra/...), binary not in the
-            # allowlist, or a destructive command pattern. Report the ACTUAL
-            # reason — previously this hardcoded "target not in declared scope",
-            # which was wrong and misleading whenever the real cause differed.
-            reason = result_dict.get("error") or "blocked by scope guard"
-            output_parts.append(
-                f"SCOPE VIOLATION: {reason.removeprefix('Scope violation: ')}"
-            )
+        if result_dict.get("scope_violation"):
+            output_parts.append("SCOPE VIOLATION: target not in declared scope. Tool blocked.")
         stdout = result_dict.get("stdout") or ""
         if stdout:
             output_parts.append(stdout)
@@ -548,23 +619,36 @@ async def execute_tool_call(
         if stderr and exit_code not in (0, None):
             output_parts.append(f"[stderr] {stderr[:500]}")
         error = result_dict.get("error")
-        if error and not scope_violation:
-            # Already surfaced above as the SCOPE VIOLATION reason — don't
-            # repeat it on a second line.
+        if error:
             output_parts.append(f"[error] {error}")
     elif execution.status == ExecutionStatus.HARD_TIMEOUT:
+        # Record the stall so the circuit-breaker can force a tool switch if
+        # the agent tries this tool again in this scan.
+        from app.agents.tool_call_caps import mark_tool_stalled, TOOL_ALTERNATIVES
+        stalls = mark_tool_stalled(scan_id, tool_name, reason="hard_timeout")
+        alt = TOOL_ALTERNATIVES.get(tool_name, "a different tool from your allowlist")
         output_parts.append(
-            f"[error] Hard timeout after {tool_def.timeout}s. "
-            f"The tool was running too long. Consider:"
+            f"[error] TIMEOUT: '{tool_name}' was killed after {tool_def.timeout}s "
+            f"without producing a result (stall #{stalls})."
         )
-        output_parts.append(f"  - reducing scan scope (fewer ports, smaller CIDR)")
-        output_parts.append(f"  - using a faster tool (e.g. masscan instead of nmap for full-range port scan)")
-        output_parts.append(f"  - increasing timeout in the tool YAML")
-    elif execution.status == ExecutionStatus.CANCELLED:
         output_parts.append(
-            f"[error] Tool execution was cancelled. "
-            f"This may have been triggered by the panic button or by the scan "
-            f"being aborted. Do NOT retry this tool — wait for user input."
+            f"DO NOT retry '{tool_name}' with the same settings. Choose ONE:\n"
+            f"  1. Switch to: {alt}.\n"
+            f"  2. Re-run '{tool_name}' with a much narrower scope "
+            f"(single port / single parameter / shorter module run).\n"
+            f"  3. If you already have enough evidence, call "
+            f"record_vulnerability and then `exit` — an engagement that "
+            f"finishes with an unconfirmed finding beats one that hangs."
+        )
+    elif execution.status == ExecutionStatus.CANCELLED:
+        # The operator pressed the panic button (or the scan was aborted).
+        # Count it as a stall too: retrying would just hit the same state.
+        from app.agents.tool_call_caps import mark_tool_stalled
+        mark_tool_stalled(scan_id, tool_name, reason="cancelled")
+        output_parts.append(
+            f"[error] Tool execution was cancelled by the operator mid-run. "
+            f"Do NOT retry this tool — wait for user input, switch to a "
+            f"different tool, or summarise what you have and exit."
         )
     elif execution.status == ExecutionStatus.FAILED:
         output_parts.append(f"[error] Tool execution failed: {execution.error}")
@@ -594,12 +678,17 @@ async def execute_tool_call(
     # across calls.
     body = "\n".join(output_parts) if output_parts else "(no output)"
 
-    # Truncate for LLM context (keep first + last 2000 chars).
+    # Strip ANSI colour/control sequences first — otherwise they eat the
+    # context budget and the LLM reads "\x1b[0m" instead of the finding.
+    body = _strip_ansi(body)
+
+    # Truncate for LLM context (keep first + last half).
     # NOTE: truncation must happen on `body` BEFORE caching — otherwise
     # the cached value is the un-truncated version, which won't match
     # the truncated version returned to the LLM on the next call.
-    if len(body) > 4000:
-        body = body[:2000] + "\n... [truncated] ...\n" + body[-2000:]
+    if len(body) > MAX_LLM_OUTPUT_CHARS:
+        half = MAX_LLM_OUTPUT_CHARS // 2
+        body = body[:half] + "\n... [truncated] ...\n" + body[-half:]
 
     # ── Phase F5: populate caches AFTER subprocess returns ──────────
     # Detect patterns in the output and mark the appropriate cache so

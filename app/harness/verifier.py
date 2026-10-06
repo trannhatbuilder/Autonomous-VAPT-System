@@ -37,7 +37,15 @@ from collections import defaultdict
 from typing import Any, Callable
 
 from app.harness.types import VerificationResult, VerificationStatus, VulnClaim
-from app.harness.verifier_strategies import DEFAULT_STRATEGIES
+from app.harness.verifier_strategies import (
+    DEFAULT_STRATEGIES,
+    verify_cookie_security,
+    verify_info_disclosure,
+    verify_security_header_missing,
+    verify_server_disclosure,
+    verify_sqli,
+    verify_xss_reflected,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +55,19 @@ logger = logging.getLogger(__name__)
 class VulnerabilityVerifier:
     """Multi-strategy vulnerability claim verifier.
 
-    Runs 5 verification strategies (DEFAULT_STRATEGIES) in priority order.
+    Runs verification strategies (DEFAULT_STRATEGIES) in priority order.
     Returns the most definitive result.
+
+    Priority order (per EVVO `DEFAULT_STRATEGIES`):
+        1. verify_sqli                (EVVO-port — highest-severity finding type)
+        2. verify_security_header_missing  (EVVO-port — enhanced with ≥2 core check)
+        3. verify_server_disclosure   (EVVO-port — enhanced with X-Powered-By)
+        4. verify_cookie_security    (EVVO-port — multi-cookie + SameSite=None detection)
+        5. verify_xss_reflected       (EVVO-port — full XSS pattern set)
+        6. verify_info_disclosure     (legacy W12 strategy)
+
+    csp_weak_directives / wp_user_enum / stack_trace / version_disclosure are
+    deferred to W13+ (they benefit from live HTTP re-probing).
 
     Configuration:
         - strategies: list of callables (VulnClaim → VerificationResult | None)
@@ -56,9 +75,21 @@ class VulnerabilityVerifier:
         - require_verification: if True, findings without VERIFIED status are rejected
     """
 
-    DEFAULT_STRATEGIES: list[Callable[[VulnClaim], VerificationResult | None]] = (
-        DEFAULT_STRATEGIES.copy()
-    )
+    # DEFAULT_STRATEGIES: priority-ordered union of EVVO-port + legacy.
+    # The 4 EVVO-port strategies (verify_security_header_missing,
+    # verify_server_disclosure, verify_cookie_security, verify_xss_reflected)
+    # OVERRIDE their legacy counterparts in `verifier_strategies.py` because
+    # the EVVO versions carry additional enhancements (X-Powered-By check,
+    # SameSite=None detection, etc.). verify_info_disclosure remains legacy
+    # because the EVVO version requires live HTTP — it's deferred to W13+.
+    DEFAULT_STRATEGIES: list[Callable[[VulnClaim], VerificationResult | None]] = [
+        verify_sqli,
+        verify_security_header_missing,
+        verify_server_disclosure,
+        verify_cookie_security,
+        verify_xss_reflected,
+        verify_info_disclosure,
+    ]
 
     def __init__(
         self,

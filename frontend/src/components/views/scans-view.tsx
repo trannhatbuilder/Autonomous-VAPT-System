@@ -286,7 +286,7 @@ export function ScansView() {
   const isLive = liveScanId === selectedScanId && (liveStatus === "running" || liveStatus === "starting");
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] -mx-6 -my-6">
+    <div className="scan-console flex h-[calc(100vh-4rem)] -mx-6 -my-6">
       {/* Left sidebar: Start form + scan history list */}
       <aside className="w-96 border-r border-zinc-800 bg-zinc-900/40 flex flex-col overflow-hidden">
         {/* Start new scan form */}
@@ -518,6 +518,29 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
   // useToast inside ScanTimeline so we can fire finding-detected toast
   const { toast } = useToast();
 
+  // ── W19-FIX4 Phase H1+H2: stable refs to avoid SSE reconnect loop ──
+  // The previous implementation had `onLiveComplete` in the SSE useEffect
+  // deps array. Since parent passed an inline arrow function, it had a
+  // new identity every render → useEffect re-ran → SSE disconnected +
+  // reconnected every 1-2s → buffered `hitl_approval_required` events
+  // were re-delivered → HITL modal popped up repeatedly (stuck).
+  //
+  // Fix: store onLiveComplete in a ref. The ref identity is stable, so
+  // the useEffect deps `[scanId, isLive]` don't change on parent renders.
+  const onLiveCompleteRef = useRef(onLiveComplete);
+  useEffect(() => {
+    onLiveCompleteRef.current = onLiveComplete;
+  }, [onLiveComplete]);
+
+  // ── W19-FIX4 Phase H3: dedup processed SSE events ──
+  // Backend keeps up to 100 buffered events. On reconnect, the frontend
+  // receives ALL of them again — including stale `hitl_approval_required`
+  // events for HITL approvals already decided. This caused the modal to
+  // re-pop. Fix: track processed event IDs + timestamps. Skip events
+  // older than 30s OR already seen.
+  const processedEventsRef = useRef<Set<string>>(new Set());
+  const scanConnectedAtRef = useRef<number>(0);
+
   // ── Load scan detail (always) ─────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
@@ -536,6 +559,8 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
   }, [scanId]);
 
   // ── Live mode: SSE stream ────────────────────────────────────────
+  // W19-FIX4 Phase H2: deps are now `[scanId, isLive]` only — onLiveComplete
+  // is read via ref, so parent re-renders don't trigger SSE reconnect.
   useEffect(() => {
     if (!isLive) {
       // Cleanup SSE if switching from live to non-live
@@ -549,6 +574,7 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
     console.log("[VAPT-SSE] Connecting to:", url);
     const es = new EventSource(url);
     eventSourceRef.current = es;
+    scanConnectedAtRef.current = Date.now();
 
     es.onopen = () => console.log("[VAPT-SSE] Connection opened");
     es.onmessage = (e) => {
@@ -556,6 +582,37 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
         const raw: ScanEvent = JSON.parse(e.data);
         const evtName = (raw as any).event || (raw as any).type || "unknown";
         if (evtName === "heartbeat") return;
+
+        // W19-FIX4 Phase H3: dedup — skip events we've already processed.
+        // Each event should have a unique ID (event_id) or timestamp+seq.
+        // We use event_id OR timestamp+type as the dedup key.
+        const eventId = (raw as any).event_id
+          || (raw as any).id
+          || `${(raw as any).timestamp || ''}-${evtName}-${(raw as any).tool_name || ''}`;
+        if (processedEventsRef.current.has(eventId)) {
+          // Already processed — skip (avoid re-popping HITL modal, etc.)
+          return;
+        }
+        processedEventsRef.current.add(eventId);
+
+        // W19-FIX4 Phase H3: skip stale buffered events older than 30s on
+        // initial connect. Backend buffers up to 100 events; we don't want
+        // to re-process old `hitl_approval_required` for decisions already
+        // made (the audit_agent likely already decided + emitted
+        // `hitl_decision_made` which we may have missed during disconnect).
+        const evtTimestamp = (raw as any).timestamp
+          ? new Date((raw as any).timestamp).getTime()
+          : (raw as any).created_at
+            ? new Date((raw as any).created_at).getTime()
+            : Date.now();
+        const evtAgeMs = Date.now() - evtTimestamp;
+        const isInitialConnectBuffer = evtAgeMs > 30000 && evtAgeMs < 600000;
+        if (isInitialConnectBuffer) {
+          // Skip stale events > 30s old but < 10min (older = likely replay from DB)
+          console.debug("[VAPT-SSE] Skipping stale buffered event:", evtName, "age=", Math.round(evtAgeMs / 1000) + "s");
+          return;
+        }
+
         const data: ScanEvent = { ...raw, type: evtName as EventType };
         setEvents((prev) => [...prev, data]);
         if (data.progress !== undefined && data.progress !== null) setProgress(data.progress);
@@ -579,19 +636,39 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
             expires_at: (raw as any).expires_at || null,
             created_at: (raw as any).created_at || new Date().toISOString(),
           };
-          setPendingHITL(approval);
-          // Toast also fires so user notices even if modal is missed
-          toast({
-            title: `HITL Approval Required: ${approval.tool_name}`,
-            description: approval.predicted_impact || "Destructive operation pending",
-            variant: "destructive",
+          // W19-FIX4 Phase H: only set pendingHITL if no modal already open
+          // (avoid clobbering an in-progress decision with a stale re-delivery)
+          setPendingHITL((prev) => {
+            if (prev && prev.id === approval.id) {
+              // Same approval already shown — don't re-set state (avoid re-render)
+              return prev;
+            }
+            // Toast also fires so user notices even if modal is missed
+            toast({
+              title: `HITL Approval Required: ${approval.tool_name}`,
+              description: approval.predicted_impact || "Destructive operation pending",
+              variant: "destructive",
+            });
+            return approval;
           });
         }
 
-        // W19-FIX3 Phase E1: when HITL decision made (approved/aborted),
-        // close the modal.
+        // W19-FIX3 Phase E1 + W19-FIX4 H7: when HITL decision made
+        // (approved/aborted/timeout), close the modal + toast the decision.
         if (evtName === "hitl_decision_made") {
+          const decision = (raw as any).decision || "unknown";
+          const decidedBy = (raw as any).decided_by || "unknown";
+          const toolName = (raw as any).tool_name || "unknown";
+          const comment = (raw as any).comment || "";
           setPendingHITL(null);
+          // W19-FIX4 Phase H7: toast the audit decision so user knows
+          // what the LLM critic decided (especially in audit_agent mode
+          // where user didn't click anything).
+          toast({
+            title: `HITL ${decision.toUpperCase()}: ${toolName}`,
+            description: `decided_by=${decidedBy}${comment ? ` — ${comment.slice(0, 100)}` : ""}`,
+            variant: decision === "approve" ? "default" : "destructive",
+          });
         }
 
         // W19-FIX3 Phase E3: finding warning toast — when a finding is
@@ -610,15 +687,16 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
           });
         }
 
-        if (data.type === "scan_complete") { es.close(); onLiveComplete(); }
-        else if (data.type === "scan_error") { es.close(); onLiveComplete(); }
+        if (data.type === "scan_complete") { es.close(); onLiveCompleteRef.current(); }
+        else if (data.type === "scan_error") { es.close(); onLiveCompleteRef.current(); }
       } catch (err) { console.warn("[VAPT-SSE] Failed to parse SSE event:", e.data); }
     };
     es.onerror = () => {
       if (es.readyState === 2) console.warn("[VAPT-SSE] Connection closed (state=2)");
     };
     return () => { es.close(); eventSourceRef.current = null; };
-  }, [scanId, isLive, onLiveComplete]);
+    // W19-FIX4 Phase H2: deps = [scanId, isLive] only — onLiveComplete via ref
+  }, [scanId, isLive]);
 
   // ── DB replay mode: fetch process_details ────────────────────────
   useEffect(() => {

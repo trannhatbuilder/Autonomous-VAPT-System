@@ -107,6 +107,16 @@ MAX_DECISIONS_PER_AGENT = 30  # D18 cap
 MAX_TOKENS_PER_SCAN = 2_000_000
 MAX_SCAN_DURATION_SECONDS = 4 * 60 * 60  # 4 hours
 
+# Per-specialist wall-clock budget.
+#
+# D18's 4-hour budget is per SCAN and was only checked once before the loop
+# started, so a single specialist could run (and appear frozen) for the whole
+# window — e.g. the penetration agent sat on one metasploit call for 9 minutes
+# with the UI showing nothing but heartbeats. When a specialist exceeds this
+# budget it stops, keeps whatever it found, and hands control back to the
+# supervisor, which can transfer to a different specialist or exit.
+MAX_AGENT_DURATION_SECONDS = 20 * 60  # 20 minutes
+
 # Context-window budget for the per-agent ReAct loop. When the running message
 # list exceeds MAX_MESSAGES we drop the middle, keeping the system/user head and
 # the most recent tail (see _cap_message_history).
@@ -672,6 +682,32 @@ class BaseAgent:
         # ---------- ReAct loop ----------
         for iteration in range(self.max_iterations):
             turn = len(self.decisions)
+
+            # ── Per-agent wall-clock budget (checked EVERY iteration) ──
+            # Prevents a single specialist from stalling the whole scan. The
+            # D18 time budget was only evaluated once, before this loop.
+            elapsed_agent = time.time() - self.start_time
+            if elapsed_agent > MAX_AGENT_DURATION_SECONDS:
+                logger.warning(
+                    "Agent %s exceeded wall-clock budget | scan=%s | iter=%d "
+                    "| elapsed=%.0fs > %ds",
+                    self.AGENT_NAME, self.scan_id, iteration + 1,
+                    elapsed_agent, MAX_AGENT_DURATION_SECONDS,
+                )
+                deadline_msg = (
+                    f"⏱️ Agent {self.AGENT_NAME} dừng sau "
+                    f"{elapsed_agent / 60:.1f} phút (budget "
+                    f"{MAX_AGENT_DURATION_SECONDS / 60:.0f} phút). "
+                    f"Trả kết quả đã thu thập để orchestrator chuyển hướng."
+                )
+                await emit_assistant_message(
+                    scan_id=self.scan_id, content=deadline_msg,
+                    agent_name=self.AGENT_NAME, iteration=iteration + 1,
+                )
+                return self._finalize(
+                    "timeout",
+                    error=f"agent wall-clock budget exceeded ({elapsed_agent:.0f}s)",
+                )
 
             # ── Phase D: abort check ──────────────────────────────────
             # If the user clicked the panic button (POST /api/scans/{id}/abort),

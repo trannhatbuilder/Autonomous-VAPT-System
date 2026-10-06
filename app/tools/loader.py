@@ -69,6 +69,9 @@ class ParameterSpec:
     position: int | None = None  # positional arg position (1-indexed)
     default: Any = None
     options: list[Any] | None = None  # enum options
+    # Literal text appended to the arg VALUE (e.g. "; exit" for a shell/REPL
+    # command). Lets a wrapper guarantee non-interactive execution.
+    suffix: str = ""
 
     def to_json_schema(self) -> dict[str, Any]:
         """Convert to JSON Schema property for MCP input schema."""
@@ -178,7 +181,9 @@ class ToolDef:
                     args.append(str(val))
             else:
                 args.append(p.flag)
-                args.append(str(val))
+                # `suffix` appends literal text to the value — e.g. msfconsole's
+                # `-x` command gets "; exit" so the REPL never blocks.
+                args.append(str(val) + p.suffix)
 
         # Append additional_args last
         if additional:
@@ -210,6 +215,7 @@ def _parse_yaml(data: dict[str, Any]) -> ToolDef:
             position=p.get("position"),
             default=p.get("default"),
             options=p.get("options"),
+            suffix=p.get("suffix", ""),
         ))
 
     output_data = data.get("output", {})

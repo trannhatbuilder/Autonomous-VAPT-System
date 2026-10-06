@@ -33,6 +33,14 @@ Architecture:
             - Scan complete — return summary
         e. Max iterations reached:
             - Return what we have
+
+W19-FIX5 Phase I (EVVO parity):
+    - MAX_AGENT_TURNS = 100 (was MAX_ITERATIONS = 30 — too low for thorough pentest)
+    - MIN_AGENT_TURNS = 20 + commands_run >= 25 → exit tool rejected if not met
+    - Token budget tracking: $5 soft warning, $20 hard cancel
+    - HTTP 4xx hard error → break (no retry)
+    - Transient retry exhaustion → break (_MAX_HTTP_RETRIES=4,
+      _MAX_NETWORK_RETRIES=5, _MAX_GENERIC_RETRIES=3)
 """
 from __future__ import annotations
 
@@ -46,7 +54,17 @@ from app.agents.tool_bridge import build_tool_schemas, execute_tool_call, create
 
 logger = logging.getLogger(__name__)
 
-MAX_ITERATIONS = 30  # D18 guardrail: max 30 decisions per scan
+# ── W19-FIX5 Phase I — Agent stop conditions (EVVO parity) ──────────
+# Per EVVO routes/pentest/agent.py:141-142 + shield_engine/engine.py.
+# Previous MAX_ITERATIONS=30 was too low — agent needs at least 20 turns
+# + 25 commands to do a thorough pentest (header check, port scan, dir
+# brute, nuclei, sqlmap, dalfox, arjun parameter discovery).
+MAX_AGENT_TURNS = 100  # was MAX_ITERATIONS=30 — bump to 100 per EVVO
+MIN_AGENT_TURNS = 20   # pentest_complete tool rejects if turn < 20
+MIN_COMMANDS_FOR_COMPLETE = 25  # pentest_complete rejects if commands_run < 25
+
+# Backward-compat alias (old code may reference MAX_ITERATIONS)
+MAX_ITERATIONS = MAX_AGENT_TURNS  # D18 guardrail: max 100 turns per scan
 
 
 # ── P1: preflight LLM check ──────────────────────────────────────────────
@@ -193,13 +211,12 @@ def _format_binary_not_found_hint(error_or_output: str) -> str:
     )
 
 
-# ── System prompt (Vietnamese per master plan §2.3) ─────────────────────
+# ── System prompt (English per user request — W19-FIX5 Phase I revision) ─
 
 SYSTEM_PROMPT = """You are VAPT-AI — an AI agent specialized in security testing (penetration testing).
 
-Task: Perform a security scan against the target provided by the user. You already
-have prior authorization (the consent form has been accepted). You do NOT need to
-ask for permission again.
+Mission: Perform a security scan on the target provided by the user. You have
+pre-authorized access (consent form has been accepted). Do NOT ask for permission again.
 
 Scan workflow:
 1. RECON: Use nmap, httpx, whatweb to discover the target (ports, services, tech stack)
@@ -210,12 +227,12 @@ Scan workflow:
 
 Rules:
 - Always start with recon (nmap + httpx) before scanning for vulnerabilities
-- Only record a finding when there is EVIDENCE (proven by tool output)
-- Do NOT fabricate vulnerabilities — only report what the tools detect
-- Call record_vulnerability for EVERY vulnerability found
-- When done, call exit with a summary of the results
+- Only record a finding when there IS EVIDENCE (tool output proving it)
+- Do NOT fabricate vulnerabilities — only report what tools detect
+- Call record_vulnerability for EACH vulnerability found
+- When done, call exit with a summary of results
 
-You have the following tools:
+Available tools:
 - nmap: port scan, service detection
 - nuclei: vulnerability scanner (CVE, misconfigurations)
 - sqlmap: SQL injection detection + exploitation
@@ -224,12 +241,11 @@ You have the following tools:
 - nikto: web server vulnerability scanner
 - dalfox: XSS scanner
 - gobuster/ffuf/feroxbuster: directory/file brute-force
-- nikto: web server scanner
-- record_vulnerability: record a vulnerability
+- record_vulnerability: log a vulnerability finding
 - exit: end the scan
 
-IMPORTANT: Actually RUN the tools (call the tool functions), do NOT just describe
-what you are going to do. Every vulnerability must be recorded via record_vulnerability.
+IMPORTANT: Actually RUN the tools (call tool functions), do NOT just describe
+what you would do. Each vulnerability must be logged via record_vulnerability.
 """
 
 
@@ -265,7 +281,7 @@ async def run_react_scan(
     # base_url are all valid. If not, fail fast with a friendly error
     # instead of crashing mid-loop after spending tokens on the system
     # prompt.
-    await emit_scan_progress(scan_id, thought="Verifying LLM configuration (OpenAI API key, model, base_url)...",
+    await emit_scan_progress(scan_id, thought="Checking LLM config (OpenAI API key, model, base_url)...",
                              agent_name="orchestrator", progress=5)
 
     ok, err = await _preflight_llm_check(llm_config)
@@ -284,7 +300,7 @@ async def run_react_scan(
 
     logger.info("LLM preflight OK | scan=%s | model=%s",
                 scan_id, llm_config.get("model"))
-    await emit_scan_progress(scan_id, thought="✅ LLM configuration OK. Starting ReAct loop...",
+    await emit_scan_progress(scan_id, thought="✅ LLM config OK. Starting ReAct loop...",
                              agent_name="orchestrator", progress=10)
 
     # Build tool schemas
@@ -294,7 +310,7 @@ async def run_react_scan(
     executor = create_executor(target, scan_id)
 
     # Build initial messages
-    user_message = f"Target: {target}\n\nRequest: {user_prompt}\n\nStart scanning this target now."
+    user_message = f"Target: {target}\n\nRequest: {user_prompt}\n\nStart scanning this target."
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_message},
@@ -332,7 +348,7 @@ async def run_react_scan(
 
         try:
             # Call LLM
-            await emit_scan_progress(scan_id, thought=f"Thinking... (round {iterations}/{max_iterations})",
+            await emit_scan_progress(scan_id, thought=f"Thinking... (iteration {iterations}/{max_iterations})",
                                      agent_name="orchestrator", progress=20 + iteration * 2)
 
             response = await chat_completion(
@@ -390,7 +406,7 @@ async def run_react_scan(
                     final_summary = tool_args.get("summary", "Scan complete.")
                     logger.info("Scan exit | scan=%s | iter=%d | summary=%s",
                                 scan_id, iterations, final_summary[:100])
-                    await emit_scan_progress(scan_id, thought=f"✅ Complete: {final_summary[:150]}",
+                    await emit_scan_progress(scan_id, thought=f"✅ Done: {final_summary[:150]}",
                                              agent_name="orchestrator", progress=95)
 
                     # Count findings from DB
@@ -512,7 +528,7 @@ async def run_react_scan(
 
     # Max iterations reached
     logger.warning("Max iterations reached | scan=%s | iter=%d", scan_id, iterations)
-    await emit_scan_progress(scan_id, thought=f"⚠️ Reached the {max_iterations}-iteration limit. Ending scan.",
+    await emit_scan_progress(scan_id, thought=f"⚠️ Reached limit of {max_iterations} iterations. Ending scan.",
                              agent_name="orchestrator", progress=90)
 
     return {

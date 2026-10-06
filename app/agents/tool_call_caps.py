@@ -114,10 +114,35 @@ MAX_TOOL_CALLS_PER_SCAN: dict[str, int] = {
 DEFAULT_TOOL_CALL_CAP: int = 5
 
 
+# ── Per-tool STALL limits ──────────────────────────────────────────────────
+# A "stall" = the tool was killed by its hard timeout, or cancelled mid-run.
+# Retrying a stalling tool is the fastest way to burn a whole scan: a
+# metasploit module that waited for a session burned 542s before the operator
+# hit the panic button. After this many stalls the tool is BLOCKED for the rest
+# of the scan and the agent is told to switch to a different tool.
+#
+# Exploitation tools get a limit of 1: a second attempt with different args is
+# unlikely to be cheaper than switching (sqlmap <-> metasploit), and it protects
+# the scan's wall-clock budget.
+MAX_TOOL_STALLS_PER_SCAN: dict[str, int] = {
+    "metasploit": 1,
+    "sqlmap": 1,
+    "hydra": 1,
+    "impacket": 1,
+    "responder": 1,
+    "hashcat": 1,
+    "john": 1,
+    "mimikatz": 1,
+}
+DEFAULT_TOOL_STALL_LIMIT: int = 2
+
+
 # ── Per-scan cap state ─────────────────────────────────────────────────────
 # Keyed by scan_id so each scan has its own isolated counter dict.
 # Each scan's state is a single dict: { tool_name -> call_count }.
 _SCAN_CAPS: dict[str, dict[str, int]] = {}
+# Per-scan stall counters: { scan_id -> { tool_name -> stall_count } }
+_SCAN_STALLS: dict[str, dict[str, int]] = {}
 
 
 def _get_scan_state(scan_id: str) -> dict[str, int]:
@@ -125,6 +150,99 @@ def _get_scan_state(scan_id: str) -> dict[str, int]:
     if scan_id not in _SCAN_CAPS:
         _SCAN_CAPS[scan_id] = {}
     return _SCAN_CAPS[scan_id]
+
+
+def _get_stall_state(scan_id: str) -> dict[str, int]:
+    """Get or create the per-scan tool stall counter dict."""
+    if scan_id not in _SCAN_STALLS:
+        _SCAN_STALLS[scan_id] = {}
+    return _SCAN_STALLS[scan_id]
+
+
+def _resolve_stall_limit(tool_name: str) -> int:
+    """Resolve the stall limit for a tool name."""
+    return MAX_TOOL_STALLS_PER_SCAN.get(tool_name, DEFAULT_TOOL_STALL_LIMIT)
+
+
+# Human/LLM-readable alternatives so the agent knows WHICH tool to switch to
+# instead of re-trying the stalling one.
+TOOL_ALTERNATIVES: dict[str, str] = {
+    "metasploit": "sqlmap (if an injectable parameter exists), or report the "
+                  "finding with the evidence already gathered",
+    "sqlmap": "metasploit (a known-CVE module), or report the finding as "
+              "unconfirmed with the evidence already gathered",
+    "hydra": "netexec for credentialed checks, or report a weak-auth finding "
+             "without brute-forcing",
+    "impacket": "netexec, or switch to a read-only verification tool",
+    "responder": "netexec for SMB/relay checks, or drop the poisoning attempt "
+                 "and report the credential-exposure finding without capture",
+    "hashcat": "john (same wordlist/rule set), or report the weak-hash finding "
+               "without cracking it",
+    "john": "hashcat (GPU cracking), or report the weak-hash finding without "
+            "cracking it",
+    "mimikatz": "it only works on a Windows host you already control — on any "
+                "other target stop calling it and record the finding without "
+                "credential dumping",
+    "nmap": "rustscan / masscan for a faster sweep",
+    "nuclei": "nikto / dalfox / wpscan for template-independent checks",
+    "nikto": "nuclei with a focused tag set",
+    "feroxbuster": "ffuf / gobuster with the bundled wordlist",
+    "gobuster": "ffuf / feroxbuster",
+    "ffuf": "gobuster / feroxbuster",
+}
+
+
+def mark_tool_stalled(scan_id: str, tool_name: str, reason: str = "") -> int:
+    """Record that a tool was killed by its timeout / cancelled mid-run.
+
+    Args:
+        scan_id: scan ID
+        tool_name: tool that stalled
+        reason: short cause (for logging) — e.g. "hard_timeout", "cancelled"
+
+    Returns:
+        The updated stall count for (scan_id, tool_name).
+    """
+    state = _get_stall_state(scan_id)
+    state[tool_name] = state.get(tool_name, 0) + 1
+    limit = _resolve_stall_limit(tool_name)
+    logger.warning(
+        "TOOL_STALLED | scan=%s | tool=%s | stalls=%d/%d | reason=%s",
+        scan_id, tool_name, state[tool_name], limit, reason or "?",
+    )
+    return state[tool_name]
+
+
+def get_tool_stall_count(scan_id: str, tool_name: str) -> int:
+    """Return how many times this tool has stalled in this scan."""
+    return _SCAN_STALLS.get(scan_id, {}).get(tool_name, 0)
+
+
+def is_tool_stalled(scan_id: str, tool_name: str) -> tuple[bool, str]:
+    """Whether a tool has stalled too many times and must not be retried.
+
+    Returns:
+        (blocked, reason). reason is empty when blocked=False.
+    """
+    count = get_tool_stall_count(scan_id, tool_name)
+    limit = _resolve_stall_limit(tool_name)
+    if count == 0 or count < limit:
+        return (False, "")
+
+    alt = TOOL_ALTERNATIVES.get(tool_name, "another tool from your allowlist")
+    reason = (
+        f"TOOL_STALLED_SWITCH_REQUIRED: '{tool_name}' đã bị kill bởi timeout "
+        f"{count} lần trong scan này (limit={limit}) — nó đang tiêu tốn "
+        f"wall-clock mà không trả về kết quả. DỪNG gọi '{tool_name}'. "
+        f"Chuyển sang: {alt}. Nếu đã có đủ evidence, hãy record_vulnerability "
+        f"với những gì đã thu thập được rồi gọi `exit` — một engagement hoàn "
+        f"thành với finding chưa xác nhận vẫn tốt hơn một scan treo vô hạn."
+    )
+    logger.warning(
+        "TOOL_STALLED_SWITCH_REQUIRED | scan=%s | tool=%s | stalls=%d/%d",
+        scan_id, tool_name, count, limit,
+    )
+    return (True, reason)
 
 
 def _resolve_cap(tool_name: str) -> int:
@@ -209,7 +327,7 @@ def get_tool_call_stats(scan_id: str) -> dict[str, int]:
 
 
 def clear_scan_caps(scan_id: str) -> None:
-    """Drop the per-scan cap state. Called at scan end (cleanup phase).
+    """Drop the per-scan cap + stall state. Called at scan end (cleanup phase).
 
     Mirrors `tool_call_cache.clear_scan_cache(scan_id)`. Safe to call
     multiple times — no-op if scan_id not in registry.
@@ -222,12 +340,25 @@ def clear_scan_caps(scan_id: str) -> None:
             scan_id, len(state), total_calls,
         )
         del _SCAN_CAPS[scan_id]
+    _SCAN_STALLS.pop(scan_id, None)
+
+
+def get_tool_stall_stats(scan_id: str) -> dict[str, int]:
+    """Return per-tool stall counts for a scan (copy)."""
+    return dict(_SCAN_STALLS.get(scan_id, {}))
 
 
 __all__ = [
     "MAX_TOOL_CALLS_PER_SCAN",
     "DEFAULT_TOOL_CALL_CAP",
+    "MAX_TOOL_STALLS_PER_SCAN",
+    "DEFAULT_TOOL_STALL_LIMIT",
+    "TOOL_ALTERNATIVES",
     "check_tool_call_cap",
+    "mark_tool_stalled",
+    "get_tool_stall_count",
+    "is_tool_stalled",
     "get_tool_call_stats",
+    "get_tool_stall_stats",
     "clear_scan_caps",
 ]

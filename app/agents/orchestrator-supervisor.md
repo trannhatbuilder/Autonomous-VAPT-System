@@ -209,3 +209,24 @@ VAPT-AI enforces a **per-tool call cap** (`app/agents/tool_call_caps.py`) per sc
 - **"Re-verify with same tool"**: nuclei finds XSS → re-run nuclei on the same endpoint to "double-check". Wrong — nuclei's first call already verified via template match. Use a different tool (curl/dalfox) to demonstrate PoC.
 - **"Burn budget waiting for different result"**: calling gobuster with the same args 3 times because "the previous result didn't feel right". The cache returns the same output on the 3rd call + a `DUPLICATE_TOOL_CALL_WARNING` — switch strategy immediately.
 - **"Skip exploitation"**: nuclei finds SQLi but you call `exit` without running sqlmap. Always attempt at least one exploitation tool per finding class — that's how PoC evidence is produced for the audit phase.
+
+## VERIFICATION CHEAT SHEET — what to paste into `verification_output`
+
+The deterministic verifier (5 EVVO-port strategies in `app/harness/verifier_strategies_evvo.py`) scans your `verification_output` / `evidence_provided` text for proof patterns. If you paste the RIGHT evidence, your finding is auto-verified at ≥80% confidence. If you paste a summary or "see above", it stays unverified (D17 anti-hallucination).
+
+**Workflow every time:**
+1. `execute_command` → discover candidate bug
+2. `execute_command` AGAIN with a slightly different probe / time / payload to confirm
+3. `record_vulnerability` with BOTH the original `poc` AND the new `verification_command` + full `verification_output` from step 2
+
+**Banned placeholders** (auto-rejected): `n/a`, `none`, `see above`, `same as poc`, `see poc`.
+
+| Vuln class | Verification command | What to paste in `verification_output` |
+|---|---|---|
+| **SQLi** | `sqlmap -u <url> --batch --level=3 --risk=2` (re-run with `--current-db`) | Full sqlmap stdout including `[INFO] back-end DBMS`, `is vulnerable`, `injectable`, OR the DBMS error string (e.g. `You have an error in your SQL syntax`), OR a measurable delay line (`took 5.2s`) |
+| **XSS** | `dalfox url <url> --blind` OR re-run with a different payload | The reflected payload in HTTP body (raw `<script>` tag, `onerror=`, `javascript:` URI, etc.) |
+| **Missing header** | `curl -sI <url>` (re-run, headers only) | Full HTTP response headers section so the verifier can confirm absence (≥2 of CSP/HSTS/X-Frame/X-Content-Type missing) |
+| **Cookie security** | `curl -sI <url>` | All `Set-Cookie:` lines (so missing HttpOnly/Secure/SameSite is visible — supports multiple cookies) |
+| **Server header version** | `curl -sI <url>` | The `Server:` header value containing a digit (e.g. `nginx/1.24.0`) — also `X-Powered-By: PHP/8.1.2` if present |
+
+**Anti-pattern that wastes turns:** running `curl` to verify SQLi. Use `sqlmap` — the verifier specifically looks for sqlmap proof patterns (`is vulnerable`, `back-end DBMS`, `Payload:`, `Type: boolean-blind`, `available databases`) and will mark curl-only SQLi as unverified. The verifier also accepts DBMS error strings (MySQL, PostgreSQL, SQLite, MSSQL, Oracle), time-based payload+delay evidence (`SLEEP(5)`, `BENCHMARK(...)`, `pg_sleep()`, `WAITFOR DELAY`), UNION data-exfil banners (`5.7.32-MariaDB`, `information_schema.tables`), and boolean diff (`TRUE`/`FALSE` response length differs).

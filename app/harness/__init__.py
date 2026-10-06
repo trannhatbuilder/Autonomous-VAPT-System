@@ -62,6 +62,7 @@ from app.harness.verifier_strategies import (
     verify_info_disclosure,
     verify_security_header_missing,
     verify_server_disclosure,
+    verify_sqli,
     verify_xss_reflected,
 )
 from app.harness.verifier import VulnerabilityVerifier, get_verifier
@@ -76,7 +77,8 @@ __all__ = [
     "Severity",
     "VerificationResult",
     "VulnClaim",
-    # Strategies
+    # Strategies (merged EVVO-port + legacy in single file)
+    "verify_sqli",
     "verify_security_header_missing",
     "verify_server_disclosure",
     "verify_cookie_security",
