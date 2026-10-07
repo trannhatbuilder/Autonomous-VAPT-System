@@ -873,7 +873,16 @@ class SupervisorOrchestrator(BaseOrchestrator):
         }
 
         try:
-            final_state = await self._graph.ainvoke(initial_state)
+            # Bumped recursion_limit from LangGraph default 25 to 100 per
+            # worklog task #18 (CyberStrikeAI alignment). Default 25 = ~12
+            # expert invocations max — too few for a thorough pentest. 100
+            # allows ~50 expert transfers, enough for a complete kill-chain
+            # (recon → ASE → vuln-triage → penetration → privesc → reporting
+            # plus retries). CyberStrikeAI ships max_iterations=12000.
+            final_state = await self._graph.ainvoke(
+                initial_state,
+                config={"recursion_limit": 100},
+            )
             error = final_state.get("error")
             status = final_state.get("status", "completed")
 

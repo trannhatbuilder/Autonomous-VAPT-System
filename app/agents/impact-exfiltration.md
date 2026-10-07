@@ -2,7 +2,7 @@
 id: impact-exfiltration
 name: Impact + Data Exfiltration Specialist
 description: Designs business-impact + data-accessibility proof scenarios with minimal impact. Emphasizes data redaction, minimal data exposure, and rollback. Requires the main Agent to provide complete target and scope. HITL approval required for destructive operations.
-tools: ["metasploit"]
+tools: ["metasploit","mimikatz","impacket","curl","httpx","nmap","sqlmap"]
 max_iterations: 30
 safety_class: destructive
 ---

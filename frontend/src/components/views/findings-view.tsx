@@ -46,7 +46,7 @@ const SEVERITY_COLORS: Record<string, string> = {
   high: "bg-orange-700 text-orange-50",
   medium: "bg-amber-700 text-amber-50",
   low: "bg-blue-700 text-blue-50",
-  info: "bg-zinc-700 text-zinc-100",
+  info: "bg-zinc-700 text-zinc-900 dark:text-zinc-100",
 };
 
 export function FindingsView() {
@@ -113,11 +113,11 @@ export function FindingsView() {
     <div className="max-w-6xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-semibold text-zinc-50 flex items-center gap-2">
-            <Bug className="w-6 h-6 text-amber-400" />
+          <h2 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-50 flex items-center gap-2">
+            <Bug className="w-6 h-6 text-amber-500 dark:text-amber-400" />
           Findings
         </h2>
-        <p className="text-sm text-zinc-400 mt-1">
+        <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
           All vulnerability findings across scans. {total} total.
         </p>
         </div>
@@ -126,7 +126,7 @@ export function FindingsView() {
           onClick={handleExportMarkdown}
           disabled={exporting || total === 0}
           variant="outline"
-          className="border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+          className="border-zinc-300 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
         >
           {exporting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Download className="w-4 h-4 mr-2" />}
           Export Markdown
@@ -134,31 +134,31 @@ export function FindingsView() {
       </div>
 
       {/* Filters */}
-      <Card className="bg-zinc-900/60 border-zinc-800">
+      <Card className="bg-white dark:bg-zinc-900/60 border-zinc-200 dark:border-zinc-800">
         <CardHeader>
-          <CardTitle className="text-zinc-50 text-base flex items-center gap-2">
-            <Filter className="w-4 h-4 text-zinc-400" />
+          <CardTitle className="text-zinc-900 dark:text-zinc-50 text-base flex items-center gap-2">
+            <Filter className="w-4 h-4 text-zinc-600 dark:text-zinc-400" />
             Filters
           </CardTitle>
         </CardHeader>
         <CardContent className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
           <div className="space-y-2">
-            <Label htmlFor="scan_id" className="text-zinc-200">Scan ID</Label>
+            <Label htmlFor="scan_id" className="text-zinc-800 dark:text-zinc-200">Scan ID</Label>
             <Input
               id="scan_id"
               placeholder="(all scans)"
               value={scanIdFilter}
               onChange={(e) => setScanIdFilter(e.target.value)}
-              className="bg-zinc-950 border-zinc-800 text-zinc-50 placeholder-zinc-600 font-mono text-xs"
+              className="bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-50 placeholder-zinc-400 dark:placeholder-zinc-600 font-mono text-xs"
             />
           </div>
           <div className="space-y-2">
-            <Label className="text-zinc-200">Severity</Label>
+            <Label className="text-zinc-800 dark:text-zinc-200">Severity</Label>
             <Select value={severityFilter} onValueChange={setSeverityFilter}>
-              <SelectTrigger className="bg-zinc-950 border-zinc-800 text-zinc-50">
+              <SelectTrigger className="bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-50">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent className="bg-zinc-900 border-zinc-800">
+              <SelectContent className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800">
                 <SelectItem value="all">All severities</SelectItem>
                 <SelectItem value="critical">Critical</SelectItem>
                 <SelectItem value="high">High</SelectItem>
@@ -171,7 +171,7 @@ export function FindingsView() {
           <Button
             onClick={handleFilterApply}
             disabled={loading}
-            className="bg-emerald-600 hover:bg-emerald-500 text-zinc-50"
+            className="bg-emerald-600 hover:bg-emerald-500 text-zinc-900 dark:text-zinc-50"
           >
             {loading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Filter className="w-4 h-4 mr-2" />}
             Apply
@@ -181,8 +181,8 @@ export function FindingsView() {
 
       {/* Error */}
       {error && (
-        <Card className="bg-red-950/40 border-red-900">
-          <CardContent className="pt-6 text-red-200">
+        <Card className="bg-red-50 dark:bg-red-950/40 border-red-300 dark:border-red-900">
+          <CardContent className="pt-6 text-red-600 dark:text-red-200">
             <div className="flex items-center gap-2">
               <ShieldAlert className="w-4 h-4 shrink-0" />
               {error}
@@ -204,7 +204,7 @@ export function FindingsView() {
           {/* List */}
           <div className="lg:col-span-1 space-y-2">
             {findings.length === 0 ? (
-              <Card className="bg-zinc-900/40 border-zinc-800">
+              <Card className="bg-white dark:bg-zinc-900/40 border-zinc-200 dark:border-zinc-800">
                 <CardContent className="pt-6 text-center text-zinc-500">
                   No findings yet. Start a scan to see results.
                 </CardContent>
@@ -214,13 +214,13 @@ export function FindingsView() {
                 <Card
                   key={f.id}
                   className={`cursor-pointer hover:border-zinc-700 transition-colors ${
-                    selectedFinding?.id === f.id ? "border-emerald-600 bg-zinc-900" : "bg-zinc-900/40 border-zinc-800"
+                    selectedFinding?.id === f.id ? "border-emerald-600 bg-white dark:bg-zinc-900" : "bg-white dark:bg-zinc-900/40 border-zinc-200 dark:border-zinc-800"
                   }`}
                   onClick={() => setSelectedFinding(f)}
                 >
                   <CardContent className="p-4 space-y-2">
                     <div className="flex items-start justify-between gap-2">
-                      <h3 className="text-sm font-medium text-zinc-100 leading-tight">{f.name}</h3>
+                      <h3 className="text-sm font-medium text-zinc-900 dark:text-zinc-100 leading-tight">{f.name}</h3>
                       <Badge
                         variant="secondary"
                         className={`shrink-0 ${SEVERITY_COLORS[(f.severity || "info").toLowerCase()] || SEVERITY_COLORS.info}`}
@@ -259,12 +259,12 @@ export function FindingsView() {
           {/* Detail */}
           <div className="lg:col-span-2">
             {selectedFinding ? (
-              <Card className="bg-zinc-900/60 border-zinc-800 sticky top-4">
+              <Card className="bg-white dark:bg-zinc-900/60 border-zinc-200 dark:border-zinc-800 sticky top-4">
                 <CardHeader>
                   <div className="flex items-start justify-between gap-4">
                     <div>
-                      <CardTitle className="text-zinc-50 text-lg">{selectedFinding.name}</CardTitle>
-                      <CardDescription className="text-zinc-400 mt-1 font-mono text-xs">
+                      <CardTitle className="text-zinc-900 dark:text-zinc-50 text-lg">{selectedFinding.name}</CardTitle>
+                      <CardDescription className="text-zinc-600 dark:text-zinc-400 mt-1 font-mono text-xs">
                         {selectedFinding.id}
                       </CardDescription>
                     </div>
@@ -289,13 +289,13 @@ export function FindingsView() {
 
                   <div>
                     <h4 className="text-xs uppercase tracking-wider text-zinc-500 mb-2">Description</h4>
-                    <p className="text-sm text-zinc-300 whitespace-pre-wrap">{selectedFinding.description}</p>
+                    <p className="text-sm text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap">{selectedFinding.description}</p>
                   </div>
 
                   {selectedFinding.remediation && (
                     <div>
                       <h4 className="text-xs uppercase tracking-wider text-zinc-500 mb-2">Remediation</h4>
-                      <p className="text-sm text-zinc-300 whitespace-pre-wrap">{selectedFinding.remediation}</p>
+                      <p className="text-sm text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap">{selectedFinding.remediation}</p>
                     </div>
                   )}
 
@@ -312,16 +312,16 @@ export function FindingsView() {
                       </h4>
                       <div className={`border rounded p-3 space-y-2 ${
                         selectedFinding.internet_verified
-                          ? "bg-emerald-950/20 border-emerald-900"
-                          : "bg-zinc-900/40 border-zinc-800"
+                          ? "bg-emerald-50 dark:bg-emerald-950/20 border-emerald-300 dark:border-emerald-900"
+                          : "bg-white dark:bg-zinc-900/40 border-zinc-200 dark:border-zinc-800"
                       }`}>
                         <div className="flex items-center gap-2 text-sm">
                           {selectedFinding.internet_verified ? (
-                            <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                            <CheckCircle2 className="w-4 h-4 text-emerald-500 dark:text-emerald-400" />
                           ) : (
                             <XCircle className="w-4 h-4 text-zinc-500" />
                           )}
-                          <span className={selectedFinding.internet_verified ? "text-emerald-300" : "text-zinc-400"}>
+                          <span className={selectedFinding.internet_verified ? "text-emerald-600 dark:text-emerald-300" : "text-zinc-600 dark:text-zinc-400"}>
                             {selectedFinding.internet_verified
                               ? "Confirmed by internet sources"
                               : "No consensus / insufficient references"}
@@ -331,7 +331,7 @@ export function FindingsView() {
                           </Badge>
                         </div>
                         {selectedFinding.internet_verification.summary && (
-                          <p className="text-xs text-zinc-400 italic">
+                          <p className="text-xs text-zinc-600 dark:text-zinc-400 italic">
                             {selectedFinding.internet_verification.summary}
                           </p>
                         )}
@@ -345,7 +345,7 @@ export function FindingsView() {
                                   href={ref}
                                   target="_blank"
                                   rel="noopener noreferrer"
-                                  className="block text-xs text-blue-400 hover:text-blue-300 truncate font-mono"
+                                  className="block text-xs text-blue-500 dark:text-blue-400 hover:text-blue-600 dark:hover:text-blue-300 truncate font-mono"
                                 >
                                   → {ref}
                                 </a>
@@ -358,7 +358,7 @@ export function FindingsView() {
                 </CardContent>
               </Card>
             ) : (
-              <Card className="bg-zinc-900/40 border-zinc-800">
+              <Card className="bg-white dark:bg-zinc-900/40 border-zinc-200 dark:border-zinc-800">
                 <CardContent className="pt-6 text-center text-zinc-500">
                   Select a finding to see details.
                 </CardContent>
@@ -375,7 +375,7 @@ function Field({ label, value, mono, small }: { label: string; value: string; mo
   return (
     <div>
       <div className="text-xs text-zinc-500 uppercase tracking-wider">{label}</div>
-      <div className={`text-zinc-200 ${mono ? "font-mono" : ""} ${small ? "text-xs" : "text-sm"} break-all`}>
+      <div className={`text-zinc-800 dark:text-zinc-200 ${mono ? "font-mono" : ""} ${small ? "text-xs" : "text-sm"} break-all`}>
         {value}
       </div>
     </div>

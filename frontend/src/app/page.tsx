@@ -9,7 +9,6 @@ import { DashboardView } from "../components/views/dashboard-view";
 import { ScansView } from "../components/views/scans-view";
 import { FindingsView } from "../components/views/findings-view";
 import { SettingsView } from "../components/views/settings-view";
-import { ToolsView } from "../components/views/tools-view";
 import { ReportHistoryView } from "../components/views/report-history-view";
 import { FindingDetailView } from "../components/views/finding-detail-view";
 import { Button } from "../components/ui/button";
@@ -18,7 +17,6 @@ import {
   LayoutDashboard,
   Radar,
   Bug,
-  Wrench,
   Settings as SettingsIcon,
   LogOut,
   ShieldCheck,
@@ -32,7 +30,7 @@ import {
 import { getExecutions, abortScan as cancelScan, type ToolExecution } from "../lib/api";
 import { useToast } from "../hooks/use-toast";
 
-type ViewName = "dashboard" | "scans" | "findings" | "tools" | "settings" | "reports";
+type ViewName = "dashboard" | "scans" | "findings" | "settings" | "reports";
 
 interface SelectedFinding {
   id: string;
@@ -47,7 +45,6 @@ const NAV_ITEMS: { name: ViewName; label: string; icon: React.ReactNode }[] = [
   { name: "scans", label: "Scans", icon: <Radar className="w-4 h-4" /> },
   { name: "reports", label: "Reports", icon: <History className="w-4 h-4" /> },
   { name: "findings", label: "Findings", icon: <Bug className="w-4 h-4" /> },
-  { name: "tools", label: "Tools", icon: <Wrench className="w-4 h-4" /> },
   { name: "settings", label: "Settings", icon: <SettingsIcon className="w-4 h-4" /> },
 ];
 
@@ -119,7 +116,7 @@ function AppShell() {
             </div>
             <div className="flex items-center gap-2">
               <ThemeToggle />
-              <Button variant="ghost" size="sm" onClick={logout} className="text-zinc-400 hover:text-zinc-100">
+              <Button variant="ghost" size="sm" onClick={logout} className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-100">
                 <LogOut className="w-4 h-4" />
               </Button>
             </div>
@@ -185,13 +182,13 @@ function AppShell() {
       {/* Body: sidebar + content */}
       <div className="flex flex-1">
         {/* Sidebar */}
-        <aside className="w-56 border-r border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900/40 p-3">
+        <aside className="w-44 border-r border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900/40 p-2">
           <nav className="space-y-1">
             {NAV_ITEMS.map((item) => (
               <button
                 key={item.name}
                 onClick={() => setView(item.name)}
-                className={`w-full flex items-center gap-2 px-3 py-2 rounded text-sm transition-colors ${
+                className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded text-[15px] transition-colors ${
                   view === item.name
                     ? "bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-800"
                     : "text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100"
@@ -203,10 +200,6 @@ function AppShell() {
             ))}
           </nav>
 
-          <div className="mt-8 p-3 bg-zinc-50 dark:bg-zinc-950 rounded border border-zinc-200 dark:border-zinc-800">
-            <div className="text-xs text-zinc-500 dark:text-zinc-500 uppercase tracking-wider mb-2">Active scan</div>
-            <ActiveScanWidget />
-          </div>
         </aside>
 
         {/* Main content */}
@@ -219,7 +212,6 @@ function AppShell() {
             />
           )}
           {view === "findings" && <FindingsView />}
-          {view === "tools" && <ToolsView />}
           {view === "settings" && <SettingsView />}
         </main>
       </div>
@@ -232,88 +224,6 @@ function AppShell() {
           onRefresh={setRunningExecutions}
         />
       )}
-    </div>
-  );
-}
-
-/** Sidebar widget: shows active scan + tool execution count.
- *
- * Polling strategy (Phase D fix):
- *   - Always poll `/api/scans/active` every 15s — it's a cheap index lookup.
- *   - Only poll `/api/mcp/executions` when there IS an active scan (saves
- *     backend traffic + log spam when idle).
- *   - When an active scan is present, tighten the interval to 5s so the
- *     sidebar updates live during scans.
- *   - When the scan completes (no more active scans), back off to 15s.
- */
-function ActiveScanWidget() {
-  const [execs, setExecs] = useState<ToolExecution[]>([]);
-  const [scans, setScans] = useState<any[]>([]);
-
-  useEffect(() => {
-    let active = true;
-    let intervalId: ReturnType<typeof setInterval> | null = null;
-
-    const poll = async () => {
-      if (!active) return;
-      try {
-        // Always fetch active scans — cheap lookup, tells us whether to
-        // also fetch executions
-        const scansResp = await import("../lib/api")
-          .then((m) => m.getActiveScans())
-          .catch(() => ({ active_scans: [] }));
-        if (!active) return;
-        const activeScans = scansResp.active_scans || [];
-        setScans(activeScans);
-
-        if (activeScans.length > 0) {
-          // There IS an active scan — also fetch recent tool executions
-          const execsResp = await getExecutions(undefined, 5).catch(() => ({ executions: [] }));
-          if (!active) return;
-          setExecs(execsResp.executions || []);
-          // Tighten interval to 5s during active scans for live updates
-          if (intervalId === null) {
-            intervalId = setInterval(poll, 5000);
-          }
-        } else {
-          // No active scan — clear stale executions + back off to 15s
-          setExecs([]);
-          if (intervalId !== null) {
-            clearInterval(intervalId);
-            intervalId = null;
-          }
-        }
-      } catch {
-        // swallow — network hiccup, will retry on next tick
-      }
-    };
-
-    poll();
-    // Idle interval (15s) — gets tightened to 5s when an active scan appears
-    const idleInterval = setInterval(poll, 15000);
-    return () => {
-      active = false;
-      clearInterval(idleInterval);
-      if (intervalId !== null) clearInterval(intervalId);
-    };
-  }, []);
-
-  if (scans.length === 0) {
-    return (
-      <div className="text-xs text-zinc-600 italic">No active scans</div>
-    );
-  }
-
-  return (
-    <div className="space-y-2">
-      {scans.slice(0, 1).map((s) => (
-        <div key={s.scan_id}>
-          <div className="text-xs font-mono text-zinc-300 truncate">{s.scan_id.slice(0, 12)}...</div>
-          <div className="text-xs text-zinc-500 truncate">{s.target}</div>
-          <div className="text-xs text-emerald-400">{s.progress}% done</div>
-          <div className="text-xs text-zinc-600 mt-1">{execs.length} recent tool executions</div>
-        </div>
-      ))}
     </div>
   );
 }
@@ -382,13 +292,13 @@ function PanicModal({
       onClick={onClose}
     >
       <div
-        className="bg-zinc-900 border border-zinc-800 rounded-lg max-w-2xl w-full max-h-[80vh] overflow-hidden flex flex-col"
+        className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg max-w-2xl w-full max-h-[80vh] overflow-hidden flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="border-b border-zinc-800 p-4 flex items-center justify-between">
+        <div className="border-b border-zinc-200 dark:border-zinc-800 p-4 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <AlertOctagon className="w-5 h-5 text-red-400" />
-            <h2 className="text-lg font-semibold text-zinc-50">Panic button</h2>
+            <AlertOctagon className="w-5 h-5 text-red-500 dark:text-red-400" />
+            <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-50">Panic button</h2>
           </div>
           <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200 text-xl">×</button>
         </div>
@@ -400,15 +310,15 @@ function PanicModal({
             </div>
           ) : (
             <>
-              <p className="text-sm text-zinc-400">
+              <p className="text-sm text-zinc-600 dark:text-zinc-400">
                 {running.length} tool execution(s) currently running. Cancel by scan to stop all tools for that scan.
               </p>
               {Object.entries(byScan).map(([scanId, execs]) => (
-                <div key={scanId} className="border border-zinc-800 rounded p-3 bg-zinc-950">
+                <div key={scanId} className="border border-zinc-200 dark:border-zinc-800 rounded p-3 bg-zinc-50 dark:bg-zinc-950">
                   <div className="flex items-center justify-between mb-2">
                     <div>
                       <div className="text-xs text-zinc-500 uppercase tracking-wider">Scan</div>
-                      <div className="text-sm font-mono text-zinc-300">{scanId}</div>
+                      <div className="text-sm font-mono text-zinc-700 dark:text-zinc-300">{scanId}</div>
                     </div>
                     <Button
                       size="sm"
@@ -438,8 +348,8 @@ function PanicModal({
           )}
         </div>
 
-        <div className="border-t border-zinc-800 p-4 text-right">
-          <Button variant="outline" onClick={onClose} className="border-zinc-700 text-zinc-200">
+        <div className="border-t border-zinc-200 dark:border-zinc-800 p-4 text-right">
+          <Button variant="outline" onClick={onClose} className="border-zinc-300 dark:border-zinc-700 text-zinc-800 dark:text-zinc-200">
             Close
           </Button>
         </div>

@@ -168,9 +168,9 @@ export function SettingsView() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-semibold text-zinc-100">AI Channels</h2>
+          <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">AI Channels</h2>
           <p className="text-xs text-zinc-500 mt-1">
-            Multi-channel config (CyberStrikeAI pattern) — stored in <code className="text-zinc-400">config.yaml</code>
+            Multi-channel config (CyberStrikeAI pattern) — stored in <code className="text-zinc-600 dark:text-zinc-400">config.yaml</code>
           </p>
         </div>
         <Button
@@ -188,10 +188,10 @@ export function SettingsView() {
 
       {/* Channels list — Phase C: pass allChannels to editor so it can render failover picker */}
       {channels.length === 0 ? (
-        <Card className="bg-zinc-900 border-zinc-800">
+        <Card className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800">
           <CardContent className="py-12 text-center">
-            <AlertCircle className="w-8 h-8 text-amber-400 mx-auto mb-3" />
-            <p className="text-sm text-zinc-300 mb-1">No channels configured</p>
+            <AlertCircle className="w-8 h-8 text-amber-500 dark:text-amber-400 mx-auto mb-3" />
+            <p className="text-sm text-zinc-700 dark:text-zinc-300 mb-1">No channels configured</p>
             <p className="text-xs text-zinc-500">
               Click <strong>New channel</strong> to add OpenAI, Anthropic, DeepSeek, GLM, etc.
             </p>
@@ -202,19 +202,19 @@ export function SettingsView() {
           {channels.map((ch) => {
             const isDefault = ch.id === defaultChannelId;
             return (
-              <Card key={ch.id} className="bg-zinc-900 border-zinc-800 hover:border-zinc-700">
+              <Card key={ch.id} className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 hover:border-zinc-700">
                 <CardContent className="p-4">
                   <div className="flex items-start justify-between">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-1">
-                        <span className="font-medium text-zinc-100">{ch.name || ch.id}</span>
+                        <span className="font-medium text-zinc-900 dark:text-zinc-100">{ch.name || ch.id}</span>
                         {isDefault && (
-                          <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800">
+                          <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-300 border border-emerald-800">
                             <Star className="w-2.5 h-2.5" />
                             Default
                           </span>
                         )}
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400">
                           {ch.provider === "claude" ? "Claude" : "OpenAI-compat"}
                         </span>
                       </div>
@@ -231,7 +231,7 @@ export function SettingsView() {
                         variant="ghost"
                         onClick={() => handleTestSaved(ch.id)}
                         title="Test connection"
-                        className="text-zinc-300 hover:text-zinc-100 h-8 px-2"
+                        className="text-zinc-700 dark:text-zinc-300 hover:text-zinc-100 h-8 px-2"
                       >
                         <Plug className="w-3.5 h-3.5 mr-1" />
                         Test
@@ -244,7 +244,7 @@ export function SettingsView() {
                           setMode("edit");
                         }}
                         title="Edit"
-                        className="text-zinc-300 hover:text-zinc-100 h-8 px-2"
+                        className="text-zinc-700 dark:text-zinc-300 hover:text-zinc-100 h-8 px-2"
                       >
                         <Edit3 className="w-3.5 h-3.5 mr-1" />
                         Edit
@@ -255,7 +255,7 @@ export function SettingsView() {
                           variant="ghost"
                           onClick={() => handleSetDefault(ch.id)}
                           title="Set as default"
-                          className="text-zinc-300 hover:text-zinc-100 h-8 px-2"
+                          className="text-zinc-700 dark:text-zinc-300 hover:text-zinc-100 h-8 px-2"
                         >
                           <Star className="w-3.5 h-3.5" />
                         </Button>
@@ -265,7 +265,7 @@ export function SettingsView() {
                         variant="ghost"
                         onClick={() => handleDelete(ch.id)}
                         title="Delete"
-                        className="text-red-400 hover:text-red-300 h-8 px-2"
+                        className="text-red-500 dark:text-red-400 hover:text-red-300 h-8 px-2"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </Button>
@@ -279,11 +279,11 @@ export function SettingsView() {
       )}
 
       {/* Note */}
-      <Alert className="bg-zinc-900/50 border-zinc-800 text-zinc-400">
+      <Alert className="bg-zinc-900/50 border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400">
         <AlertDescription className="text-xs">
-          <strong className="text-zinc-300">Phase B migration:</strong> The old DB-stored per-user LLM settings
+          <strong className="text-zinc-700 dark:text-zinc-300">Phase B migration:</strong> The old DB-stored per-user LLM settings
           ({"<Settings → API Key>"} in Phase A) have been replaced by YAML-based multi-channel config.
-          New conversations use the default channel. Edit <code className="text-zinc-300">config.yaml</code> at the project root
+          New conversations use the default channel. Edit <code className="text-zinc-700 dark:text-zinc-300">config.yaml</code> at the project root
           to view all channels (including those without api_key).
         </AlertDescription>
       </Alert>
@@ -467,21 +467,21 @@ function ChannelEditor({
     <div className="space-y-4 max-w-3xl">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-semibold text-zinc-100">
+          <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
             {isNew ? "New AI channel" : `Edit channel: ${initial?.name}`}
           </h2>
           <p className="text-xs text-zinc-500 mt-1">
             Configure provider, base URL, API key, model. Test before saving.
           </p>
         </div>
-        <Button size="sm" variant="outline" onClick={onClose} className="border-zinc-700 text-zinc-300">
+        <Button size="sm" variant="outline" onClick={onClose} className="border-zinc-300 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300">
           Back to list
         </Button>
       </div>
 
-      <Card className="bg-zinc-900 border-zinc-800">
+      <Card className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800">
         <CardHeader>
-          <CardTitle className="text-zinc-100">Quick presets</CardTitle>
+          <CardTitle className="text-zinc-900 dark:text-zinc-100">Quick presets</CardTitle>
           <CardDescription className="text-zinc-500">
             Click a provider to auto-fill base URL + a default model
           </CardDescription>
@@ -498,8 +498,8 @@ function ChannelEditor({
                   onClick={() => applyPreset(p)}
                   className={`px-2.5 py-1 rounded text-xs border transition-colors flex items-center gap-1.5 ${
                     isActive
-                      ? "bg-emerald-950 text-emerald-200 border-emerald-800"
-                      : "bg-zinc-950 text-zinc-300 border-zinc-800 hover:border-zinc-700"
+                      ? "bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-200 border-emerald-800"
+                      : "bg-zinc-50 dark:bg-zinc-950 text-zinc-700 dark:text-zinc-300 border-zinc-200 dark:border-zinc-800 hover:border-zinc-700"
                   }`}
                 >
                   {p.label}
@@ -507,8 +507,8 @@ function ChannelEditor({
                     <span
                       className={`text-[9px] px-1 rounded ${
                         tierBadge === "free" || tierBadge === "credit"
-                          ? "bg-amber-950 text-amber-300"
-                          : "bg-zinc-800 text-zinc-500"
+                          ? "bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-300"
+                          : "bg-zinc-100 dark:bg-zinc-800 text-zinc-500"
                       }`}
                       title={tierBadge === "free" ? "Truly free models available" : tierBadge === "credit" ? "Free credit-based" : "Paid only"}
                     >
@@ -520,7 +520,7 @@ function ChannelEditor({
             })}
           </div>
           <p className="text-[10px] text-zinc-600 mt-3">
-            <strong className="text-amber-400">Tip for free tier:</strong> OpenRouter models with <code>:free</code> suffix are
+            <strong className="text-amber-500 dark:text-amber-400">Tip for free tier:</strong> OpenRouter models with <code>:free</code> suffix are
             truly free (rate-limited). NVIDIA build.nvidia.com gives 1,000 free credits at sign-up — try
             <code>nvidia/llama-3.1-nemotron-70b-instruct</code> or <code>meta/llama-3.3-70b-instruct</code> (these usually work).
             Set up 2 channels + use the Failover feature so when NVIDIA returns 429, OpenRouter picks up.
@@ -528,42 +528,42 @@ function ChannelEditor({
         </CardContent>
       </Card>
 
-      <Card className="bg-zinc-900 border-zinc-800">
+      <Card className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800">
         <CardHeader>
-          <CardTitle className="text-zinc-100">Channel details</CardTitle>
+          <CardTitle className="text-zinc-900 dark:text-zinc-100">Channel details</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           {/* Channel ID + Name */}
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <Label className="text-zinc-300 text-xs">Channel ID</Label>
+              <Label className="text-zinc-700 dark:text-zinc-300 text-xs">Channel ID</Label>
               <Input
                 value={id}
                 onChange={(e) => { setId(e.target.value); setIdTouched(true); }}
                 disabled={!isNew}
                 placeholder="openai, claude, glm, ..."
-                className="bg-zinc-950 border-zinc-800 text-zinc-100 font-mono text-sm"
+                className="bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-100 font-mono text-sm"
               />
               <p className="text-[10px] text-zinc-600 mt-1">
                 {isNew ? "Unique ID — cannot be changed later" : "Read-only (delete + recreate to rename)"}
               </p>
             </div>
             <div>
-              <Label className="text-zinc-300 text-xs">Display name</Label>
+              <Label className="text-zinc-700 dark:text-zinc-300 text-xs">Display name</Label>
               <Input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="OpenAI (default)"
-                className="bg-zinc-950 border-zinc-800 text-zinc-100"
+                className="bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-100"
               />
             </div>
           </div>
 
           {/* Provider */}
           <div>
-            <Label className="text-zinc-300 text-xs">Provider</Label>
+            <Label className="text-zinc-700 dark:text-zinc-300 text-xs">Provider</Label>
             <Select value={provider} onValueChange={(v: "openai_compatible" | "claude") => setProvider(v)}>
-              <SelectTrigger className="bg-zinc-950 border-zinc-800 text-zinc-100">
+              <SelectTrigger className="bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-100">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -580,12 +580,12 @@ function ChannelEditor({
 
           {/* Base URL */}
           <div>
-            <Label className="text-zinc-300 text-xs">Base URL</Label>
+            <Label className="text-zinc-700 dark:text-zinc-300 text-xs">Base URL</Label>
             <Input
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
               placeholder="https://api.openai.com/v1"
-              className="bg-zinc-950 border-zinc-800 text-zinc-100 font-mono text-sm"
+              className="bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-100 font-mono text-sm"
             />
             <p className="text-[10px] text-zinc-600 mt-1">
               No trailing slash. For OpenAI-compat, the path should usually include <code>/v1</code>.
@@ -594,13 +594,13 @@ function ChannelEditor({
 
           {/* API Key */}
           <div>
-            <Label className="text-zinc-300 text-xs">API Key</Label>
+            <Label className="text-zinc-700 dark:text-zinc-300 text-xs">API Key</Label>
             <Input
               type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               placeholder="sk-..."
-              className="bg-zinc-950 border-zinc-800 text-zinc-100 font-mono text-sm"
+              className="bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-100 font-mono text-sm"
             />
             <p className="text-[10px] text-zinc-600 mt-1">
               {apiKey.startsWith("•")
@@ -611,12 +611,12 @@ function ChannelEditor({
 
           {/* Model */}
           <div>
-            <Label className="text-zinc-300 text-xs">Model</Label>
+            <Label className="text-zinc-700 dark:text-zinc-300 text-xs">Model</Label>
             <Input
               value={model}
               onChange={(e) => setModel(e.target.value)}
               placeholder="gpt-4o-mini"
-              className="bg-zinc-950 border-zinc-800 text-zinc-100 font-mono text-sm"
+              className="bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-100 font-mono text-sm"
             />
             <p className="text-[10px] text-zinc-600 mt-1">
               Use the model ID as documented by the provider (e.g. <code>deepseek-chat</code>, <code>claude-3-5-sonnet-20241022</code>).
@@ -624,8 +624,8 @@ function ChannelEditor({
           </div>
 
           {/* Failover channels (Phase C) */}
-          <div className="pt-3 border-t border-zinc-800">
-            <Label className="text-zinc-300 text-xs">Failover channels (optional)</Label>
+          <div className="pt-3 border-t border-zinc-200 dark:border-zinc-800">
+            <Label className="text-zinc-700 dark:text-zinc-300 text-xs">Failover channels (optional)</Label>
             <p className="text-[10px] text-zinc-600 mt-1 mb-2">
               If this channel returns 429 / 5xx / timeout, try these channels in order.
               Useful when mixing free-tier providers (NVIDIA → OpenRouter as backup).
@@ -648,8 +648,8 @@ function ChannelEditor({
                       }}
                       className={`px-2 py-0.5 rounded text-[11px] border transition-colors ${
                         selected
-                          ? "bg-emerald-950 text-emerald-200 border-emerald-800"
-                          : "bg-zinc-950 text-zinc-400 border-zinc-800 hover:border-zinc-700"
+                          ? "bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-200 border-emerald-800"
+                          : "bg-zinc-50 dark:bg-zinc-950 text-zinc-600 dark:text-zinc-400 border-zinc-200 dark:border-zinc-800 hover:border-zinc-700"
                       }`}
                     >
                       {selected ? "✓ " : ""}{c.id} <span className="opacity-60">· {c.model}</span>
@@ -673,37 +673,37 @@ function ChannelEditor({
           <button
             type="button"
             onClick={() => setShowAdvanced(!showAdvanced)}
-            className="text-xs text-zinc-400 hover:text-zinc-200 mt-2"
+            className="text-xs text-zinc-600 dark:text-zinc-400 hover:text-zinc-200 mt-2"
           >
             {showAdvanced ? "▼ Hide advanced" : "▶ Show advanced (tokens, temperature, reasoning)"}
           </button>
 
           {showAdvanced && (
-            <div className="space-y-4 pt-2 border-t border-zinc-800">
+            <div className="space-y-4 pt-2 border-t border-zinc-200 dark:border-zinc-800">
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <Label className="text-zinc-300 text-xs">Max total tokens (context window)</Label>
+                  <Label className="text-zinc-700 dark:text-zinc-300 text-xs">Max total tokens (context window)</Label>
                   <Input
                     type="number"
                     value={maxTotalTokens}
                     onChange={(e) => setMaxTotalTokens(Number(e.target.value) || 0)}
-                    className="bg-zinc-950 border-zinc-800 text-zinc-100"
+                    className="bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-100"
                   />
                 </div>
                 <div>
-                  <Label className="text-zinc-300 text-xs">Max completion tokens</Label>
+                  <Label className="text-zinc-700 dark:text-zinc-300 text-xs">Max completion tokens</Label>
                   <Input
                     type="number"
                     value={maxCompletionTokens}
                     onChange={(e) => setMaxCompletionTokens(Number(e.target.value) || 0)}
-                    className="bg-zinc-950 border-zinc-800 text-zinc-100"
+                    className="bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-100"
                   />
                 </div>
               </div>
 
               <div>
-                <Label className="text-zinc-300 text-xs">
-                  Temperature: <span className="font-mono text-zinc-100">{temperature.toFixed(2)}</span>
+                <Label className="text-zinc-700 dark:text-zinc-300 text-xs">
+                  Temperature: <span className="font-mono text-zinc-900 dark:text-zinc-100">{temperature.toFixed(2)}</span>
                 </Label>
                 <Slider
                   value={[temperature]}
@@ -716,11 +716,11 @@ function ChannelEditor({
               </div>
 
               {/* Reasoning (Phase C: auto-detect hint shown) */}
-              <div className="grid grid-cols-2 gap-3 pt-2 border-t border-zinc-800">
+              <div className="grid grid-cols-2 gap-3 pt-2 border-t border-zinc-200 dark:border-zinc-800">
                 <div>
-                  <Label className="text-zinc-300 text-xs">Reasoning mode</Label>
+                  <Label className="text-zinc-700 dark:text-zinc-300 text-xs">Reasoning mode</Label>
                   <Select value={reasoningMode} onValueChange={(v: "auto" | "on" | "off") => setReasoningMode(v)}>
-                    <SelectTrigger className="bg-zinc-950 border-zinc-800 text-zinc-100">
+                    <SelectTrigger className="bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-100">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -731,13 +731,13 @@ function ChannelEditor({
                   </Select>
                   <p className="text-[10px] text-zinc-600 mt-1">
                     <strong>auto</strong> (recommended): detects <code>o3/gpt-5</code>, <code>claude-3-7+</code>,
-                    <code>deepseek-r/reasoner</code>, <code>qwq</code> by model name. Current model → <span className="text-emerald-400">{reasoningHint}</span>.
+                    <code>deepseek-r/reasoner</code>, <code>qwq</code> by model name. Current model → <span className="text-emerald-500 dark:text-emerald-400">{reasoningHint}</span>.
                   </p>
                 </div>
                 <div>
-                  <Label className="text-zinc-300 text-xs">Reasoning effort</Label>
+                  <Label className="text-zinc-700 dark:text-zinc-300 text-xs">Reasoning effort</Label>
                   <Select value={reasoningEffort} onValueChange={(v: any) => setReasoningEffort(v)}>
-                    <SelectTrigger className="bg-zinc-950 border-zinc-800 text-zinc-100">
+                    <SelectTrigger className="bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-100">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -757,13 +757,13 @@ function ChannelEditor({
           )}
         </CardContent>
 
-        <CardFooter className="flex flex-col items-stretch gap-2 border-t border-zinc-800 pt-4">
+        <CardFooter className="flex flex-col items-stretch gap-2 border-t border-zinc-200 dark:border-zinc-800 pt-4">
           {testResult && (
             <div
               className={`rounded p-2 text-xs border ${
                 testResult.success
-                  ? "bg-emerald-950/50 border-emerald-900 text-emerald-300"
-                  : "bg-red-950/50 border-red-900 text-red-300"
+                  ? "bg-emerald-950/50 border-emerald-300 dark:border-emerald-900 text-emerald-600 dark:text-emerald-300"
+                  : "bg-red-950/50 border-red-300 dark:border-red-900 text-red-700 dark:text-red-300"
               }`}
             >
               <div className="flex items-center gap-2">
@@ -782,7 +782,7 @@ function ChannelEditor({
                 </span>
               </div>
               {testResult.response_body && !testResult.success && (
-                <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-all text-[10px] bg-zinc-950 p-2 rounded border border-zinc-800 text-red-200">
+                <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-all text-[10px] bg-zinc-50 dark:bg-zinc-950 p-2 rounded border border-zinc-200 dark:border-zinc-800 text-red-600 dark:text-red-200">
 {testResult.response_body}
                 </pre>
               )}
@@ -793,7 +793,7 @@ function ChannelEditor({
               variant="outline"
               onClick={handleTest}
               disabled={testing || saving}
-              className="border-zinc-700 text-zinc-200 hover:bg-zinc-800"
+              className="border-zinc-300 dark:border-zinc-700 text-zinc-800 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800"
             >
               {testing ? (
                 <Loader2 className="w-4 h-4 mr-1 animate-spin" />

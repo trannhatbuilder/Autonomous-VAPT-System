@@ -60,8 +60,12 @@ logger = logging.getLogger(__name__)
 # + 25 commands to do a thorough pentest (header check, port scan, dir
 # brute, nuclei, sqlmap, dalfox, arjun parameter discovery).
 MAX_AGENT_TURNS = 100  # was MAX_ITERATIONS=30 — bump to 100 per EVVO
-MIN_AGENT_TURNS = 20   # pentest_complete tool rejects if turn < 20
-MIN_COMMANDS_FOR_COMPLETE = 25  # pentest_complete rejects if commands_run < 25
+# DISABLED (worklog task #16): exit gate prevented agents from completing
+# scans when they had fewer than 20 turns / 25 commands. The user has
+# authorization to scan and wants agents to exit when they decide work is
+# done. Set both to 0 so the exit tool always succeeds.
+MIN_AGENT_TURNS = 0   # DISABLED — was 20
+MIN_COMMANDS_FOR_COMPLETE = 0  # DISABLED — was 25
 
 # Backward-compat alias (old code may reference MAX_ITERATIONS)
 MAX_ITERATIONS = MAX_AGENT_TURNS  # D18 guardrail: max 100 turns per scan

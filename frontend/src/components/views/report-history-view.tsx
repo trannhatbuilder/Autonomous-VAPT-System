@@ -69,7 +69,7 @@ const SEVERITY_COLORS: Record<string, string> = {
   high: "bg-orange-700 text-orange-50 dark:bg-orange-900 dark:text-orange-100",
   medium: "bg-amber-700 text-amber-50 dark:bg-amber-900 dark:text-amber-100",
   low: "bg-blue-700 text-blue-50 dark:bg-blue-900 dark:text-blue-100",
-  info: "bg-zinc-700 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100",
+  info: "bg-zinc-700 text-zinc-900 dark:text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100",
 };
 
 const SEVERITY_DOT: Record<string, string> = {
@@ -353,7 +353,7 @@ export function ReportHistoryView({ onFindingClick }: ReportHistoryViewProps) {
                                     : scan.status === "running"
                                     ? "bg-blue-700 text-blue-50 dark:bg-blue-900 dark:text-blue-100"
                                     : scan.status === "aborted"
-                                    ? "bg-zinc-700 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100"
+                                    ? "bg-zinc-700 text-zinc-900 dark:text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100"
                                     : "bg-red-700 text-red-50 dark:bg-red-900 dark:text-red-100"
                                 }`}
                               >

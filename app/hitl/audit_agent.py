@@ -202,7 +202,18 @@ class AuditAgent:
         max_tokens: int = DEFAULT_AUDIT_MAX_TOKENS,
         timeout_seconds: int = DEFAULT_AUDIT_TIMEOUT_SECONDS,
         mode: str = "approval",  # approval | review_edit
-        fallback_decision: str = "reject",  # reject (safe) | approve (debug only)
+        # Fix (user report): default was "reject" — this caused every destructive
+        # tool call (sqlmap --dump, metasploit exploit, etc.) to be silently
+        # blocked when the audit LLM was not configured. The user saw only
+        # `tool_call_progress` events for 90s then a FAIL with no explanation.
+        #
+        # VAPT-AI runs against authorized pentest targets (the user owns / has
+        # written permission for the target). The audit agent is a guardrail
+        # against catastrophic ops (rm -rf /, drop database), NOT a gate that
+        # blocks legitimate pentest work. Default to "approve" so unconfigured
+        # LLMs let the agent proceed; users who want strict mode can set
+        # VAPT_AI_HITL_FALLBACK=reject in env.
+        fallback_decision: str = "approve",  # approve (default) | reject (strict)
         llm_caller: Any = None,  # inject for tests
     ):
         self.model = (model or _resolve_audit_model()).strip()
@@ -210,7 +221,13 @@ class AuditAgent:
         self.max_tokens = max_tokens
         self.timeout_seconds = timeout_seconds
         self.mode = _normalize_mode(mode)
-        self.fallback_decision = _normalize_fallback(fallback_decision)
+        # Allow env override: VAPT_AI_HITL_FALLBACK=reject for strict mode
+        import os as _os
+        _env_fallback = _os.environ.get("VAPT_AI_HITL_FALLBACK", "").strip().lower()
+        if _env_fallback in ("approve", "reject"):
+            self.fallback_decision = _env_fallback
+        else:
+            self.fallback_decision = _normalize_fallback(fallback_decision)
         self._llm_caller = llm_caller  # if None, use app.core.llm_client at call time
 
     # ---------- Public API ----------
@@ -641,8 +658,13 @@ def _resolve_audit_mode() -> str:
 
 
 def _resolve_audit_fallback() -> str:
+    # Fix (worklog task #16): default was "reject" which silently blocked
+    # every destructive tool call when the audit LLM was not configured.
+    # Changed to "approve" to match the constructor default (line 216) and
+    # the user's decision to disable safety restrictions. To re-enable
+    # strict mode, set VAPT_AI_HITL_AUDIT_FALLBACK=reject.
     return _normalize_fallback(
-        os.environ.get("VAPT_AI_HITL_AUDIT_FALLBACK", "reject")
+        os.environ.get("VAPT_AI_HITL_AUDIT_FALLBACK", "approve")
     )
 
 

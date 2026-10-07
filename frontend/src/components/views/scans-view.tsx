@@ -27,7 +27,22 @@ import {
   type ScanSummary, type ScanDetail, type ProcessDetailRow, type ProcessDetailFull,
 } from "../../lib/api";
 import { useToast } from "../../hooks/use-toast";
+// HITLApprovalModal is currently disabled (worklog task #14). The import is
+// kept so re-enabling HITL is a one-line uncomment in the JSX below.
+// `void` cast silences ESLint unused-import warning.
 import { HITLApprovalModal, type HITLApproval } from "./hitl-approval-modal";
+void HITLApprovalModal;  // reserved for future HITL re-enable
+
+// ── Client-side ANSI escape stripper (defense-in-depth) ────────────────
+// Security tools (sqlmap, msfconsole, nuclei, nmap NSE) emit ANSI color codes
+// even when stdout is NOT a TTY. The backend strips these at the SSE boundary
+// (app/pentest/events.py), but if any path forgets, we strip again here so
+// the timeline UI never shows raw \x1b[0m / \x1b[1m[33m garbled text.
+const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]|\r(?=[^\n])/g;
+function stripAnsi(s: string | null | undefined): string {
+  if (!s) return "";
+  return s.replace(ANSI_RE, "");
+}
 
 // ── Scan event types (for live SSE) ────────────────────────────────────
 type EventType =
@@ -113,7 +128,7 @@ export function ScansView() {
   const [userPrompt, setUserPrompt] = useState("");
   // W19-FIX3 Phase E2: orchestration mode selector.
   // Default "supervisor" (kill-chain specialist transfer — recommended per
-  // user feedback "nên dùng multi-agent để đạt kết quả tốt hơn"). Other modes:
+  // user feedback "multi-agent mode recommended for better results"). Other modes:
   // "single" (1 agent + all tools, no transfer), "deep", "plan_execute".
   const [mode, setMode] = useState<"supervisor" | "single" | "deep" | "plan_execute">("supervisor");
   const [starting, setStarting] = useState(false);
@@ -210,7 +225,7 @@ export function ScansView() {
         // on its next await point.
         toast({
           title: "Scan aborting",
-          description: `Đã gửi tín hiệu dừng scan ${scanId.slice(0, 16)}... Pipeline sẽ dừng trong vài giây.`,
+          description: `Abort signal sent for scan ${scanId.slice(0, 16)}... Pipeline will stop in a few seconds.`,
         });
         // Optimistically flip UI to "aborted" so the user sees feedback immediately.
         // The SSE stream (if still connected) will receive scan_complete(status=aborted)
@@ -288,13 +303,13 @@ export function ScansView() {
   return (
     <div className="scan-console flex h-[calc(100vh-4rem)] -mx-6 -my-6">
       {/* Left sidebar: Start form + scan history list */}
-      <aside className="w-96 border-r border-zinc-800 bg-zinc-900/40 flex flex-col overflow-hidden">
+      <aside className="w-96 border-r border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900/40 flex flex-col overflow-hidden">
         {/* Start new scan form */}
-        <div className="p-4 border-b border-zinc-800">
-          <h3 className="text-sm font-semibold text-zinc-200 mb-3">Start new scan</h3>
+        <div className="p-4 border-b border-zinc-200 dark:border-zinc-800">
+          <h3 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200 mb-3">Start new scan</h3>
           <div className="space-y-3">
             <div>
-              <Label htmlFor="target" className="text-xs text-zinc-400">Target</Label>
+              <Label htmlFor="target" className="text-xs text-zinc-600 dark:text-zinc-400">Target</Label>
               <Input
                 id="target"
                 type="text"
@@ -302,11 +317,11 @@ export function ScansView() {
                 value={target}
                 onChange={(e) => setTarget(e.target.value)}
                 disabled={starting}
-                className="bg-zinc-950 border-zinc-800 text-zinc-50 placeholder-zinc-600 font-mono text-sm h-9"
+                className="bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-50 placeholder-zinc-400 dark:placeholder-zinc-600 font-mono text-sm h-9"
               />
             </div>
             <div>
-              <Label htmlFor="prompt" className="text-xs text-zinc-400">Prompt (optional)</Label>
+              <Label htmlFor="prompt" className="text-xs text-zinc-600 dark:text-zinc-400">Prompt (optional)</Label>
               <Input
                 id="prompt"
                 type="text"
@@ -314,40 +329,40 @@ export function ScansView() {
                 value={userPrompt}
                 onChange={(e) => setUserPrompt(e.target.value)}
                 disabled={starting}
-                className="bg-zinc-950 border-zinc-800 text-zinc-50 placeholder-zinc-600 text-sm h-9"
+                className="bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-50 placeholder-zinc-400 dark:placeholder-zinc-600 text-sm h-9"
               />
             </div>
             {/* W19-FIX3 Phase E2: orchestration mode selector */}
             <div>
-              <Label htmlFor="mode" className="text-xs text-zinc-400">Orchestration mode</Label>
+              <Label htmlFor="mode" className="text-xs text-zinc-600 dark:text-zinc-400">Orchestration mode</Label>
               <Select
                 value={mode}
                 onValueChange={(v: "supervisor" | "single" | "deep" | "plan_execute") => setMode(v)}
                 disabled={starting}
               >
-                <SelectTrigger id="mode" className="bg-zinc-950 border-zinc-800 text-zinc-50 text-sm h-9">
+                <SelectTrigger id="mode" className="bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-50 text-sm h-9">
                   <SelectValue placeholder="Select mode" />
                 </SelectTrigger>
-                <SelectContent className="bg-zinc-900 border-zinc-800 text-zinc-50">
-                  <SelectItem value="supervisor" className="text-zinc-100 focus:bg-zinc-800">
+                <SelectContent className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-50">
+                  <SelectItem value="supervisor" className="text-zinc-900 dark:text-zinc-100 focus:bg-zinc-800">
                     <div className="flex flex-col">
                       <span className="font-medium">Supervisor (recommended)</span>
                       <span className="text-xs text-zinc-500">Multi-agent kill-chain: recon → triage → penetration → privesc</span>
                     </div>
                   </SelectItem>
-                  <SelectItem value="single" className="text-zinc-100 focus:bg-zinc-800">
+                  <SelectItem value="single" className="text-zinc-900 dark:text-zinc-100 focus:bg-zinc-800">
                     <div className="flex flex-col">
                       <span className="font-medium">Single</span>
                       <span className="text-xs text-zinc-500">1 agent + all 30+ tools, no specialist transfer</span>
                     </div>
                   </SelectItem>
-                  <SelectItem value="deep" className="text-zinc-100 focus:bg-zinc-800">
+                  <SelectItem value="deep" className="text-zinc-900 dark:text-zinc-100 focus:bg-zinc-800">
                     <div className="flex flex-col">
                       <span className="font-medium">Deep</span>
                       <span className="text-xs text-zinc-500">Parallel sub-agents (network range scans)</span>
                     </div>
                   </SelectItem>
-                  <SelectItem value="plan_execute" className="text-zinc-100 focus:bg-zinc-800">
+                  <SelectItem value="plan_execute" className="text-zinc-900 dark:text-zinc-100 focus:bg-zinc-800">
                     <div className="flex flex-col">
                       <span className="font-medium">Plan-Execute</span>
                       <span className="text-xs text-zinc-500">Planner → executor → replanner (full kill-chain)</span>
@@ -357,7 +372,7 @@ export function ScansView() {
               </Select>
             </div>
             {!isLive ? (
-              <Button onClick={handleStartScan} disabled={!target || starting} className="w-full bg-emerald-600 hover:bg-emerald-500 text-zinc-50 h-9" size="sm">
+              <Button onClick={handleStartScan} disabled={!target || starting} className="w-full bg-emerald-600 hover:bg-emerald-500 text-zinc-900 dark:text-zinc-50 h-9" size="sm">
                 {starting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Play className="w-4 h-4 mr-2" />}
                 Start scan
               </Button>
@@ -372,7 +387,7 @@ export function ScansView() {
         </div>
 
         {/* Search + scan history list */}
-        <div className="p-3 border-b border-zinc-800">
+        <div className="p-3 border-b border-zinc-200 dark:border-zinc-800">
           <div className="flex items-center gap-2">
             <Search className="w-4 h-4 text-zinc-500 shrink-0" />
             <Input
@@ -381,9 +396,9 @@ export function ScansView() {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") loadScans(0, searchQuery); }}
-              className="bg-zinc-950 border-zinc-800 text-zinc-50 placeholder-zinc-600 text-sm h-8"
+              className="bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-50 placeholder-zinc-400 dark:placeholder-zinc-600 text-sm h-8"
             />
-            <Button size="sm" variant="ghost" onClick={() => loadScans(0, searchQuery)} className="text-zinc-400 hover:text-zinc-100 h-8 px-2">
+            <Button size="sm" variant="ghost" onClick={() => loadScans(0, searchQuery)} className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-100 h-8 px-2">
               <Search className="w-3 h-3" />
             </Button>
           </div>
@@ -456,14 +471,14 @@ function ScanListItem({ scan, isSelected, onSelect, onDelete }: {
   onDelete: () => void;
 }) {
   const statusColor =
-    scan.status === "completed" ? "text-emerald-400" :
-    scan.status === "running" ? "text-blue-400" :
-    scan.status === "failed" ? "text-red-400" :
-    scan.status === "aborted" ? "text-zinc-400" :
-    "text-zinc-500";
-  const bgClass = isSelected ? "bg-zinc-800/60 border-l-2 border-emerald-600" : "hover:bg-zinc-800/30 border-l-2 border-transparent";
+    scan.status === "completed" ? "text-emerald-600 dark:text-emerald-400" :
+    scan.status === "running" ? "text-blue-600 dark:text-blue-400" :
+    scan.status === "failed" ? "text-red-600 dark:text-red-400" :
+    scan.status === "aborted" ? "text-amber-700 dark:text-amber-400" :
+    "text-zinc-600 dark:text-zinc-400";
+  const bgClass = isSelected ? "bg-zinc-100/60 dark:bg-zinc-800/60 border-l-2 border-emerald-600" : "hover:bg-zinc-800/30 border-l-2 border-transparent";
   return (
-    <div onClick={onSelect} className={`cursor-pointer px-3 py-3 border-b border-zinc-800 ${bgClass} transition-colors`}>
+    <div onClick={onSelect} className={`cursor-pointer px-3 py-3 border-b border-zinc-200 dark:border-zinc-800 ${bgClass} transition-colors`}>
       <div className="flex items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
           <div className={`text-xs font-mono truncate ${statusColor}`}>{scan.target}</div>
@@ -482,7 +497,7 @@ function ScanListItem({ scan, isSelected, onSelect, onDelete }: {
       <div className="flex items-center gap-2 mt-1.5 text-[10px]">
         <span className={statusColor}>{scan.status}</span>
         {scan.findings_count !== null && scan.findings_count > 0 && (
-          <span className="text-amber-400">{scan.findings_count} findings</span>
+          <span className="text-amber-500 dark:text-amber-400">{scan.findings_count} findings</span>
         )}
         {scan.progress !== null && scan.progress < 100 && scan.status === "running" && (
           <span className="text-zinc-500">{scan.progress}%</span>
@@ -512,7 +527,14 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
   // W19-FIX3 Phase E1: HITL approval modal state.
   // When backend emits SSE event "hitl_approval_required", we set
   // pendingHITL → modal pops up → user Approve/Abort → modal closes.
+  //
+  // HITL DISABLED (worklog task #14) — modal no longer rendered, but state
+  // + setter kept so the SSE handler can still absorb events without throwing
+  // (and re-enabling HITL later is a one-line uncomment). The `void` casts
+  // below silence ESLint "unused-var" warnings without actually removing code.
   const [pendingHITL, setPendingHITL] = useState<HITLApproval | null>(null);
+  void pendingHITL;  // reserved for future HITL re-enable
+  void setPendingHITL;  // reserved for future HITL re-enable
   const eventSourceRef = useRef<EventSource | null>(null);
   const timelineEndRef = useRef<HTMLDivElement | null>(null);
   // useToast inside ScanTimeline so we can fire finding-detected toast
@@ -754,15 +776,21 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
           intercepts a destructive op (sqlmap --os-shell, metasploit exploit,
           mimikatz, etc.). User must Approve/Abort within 5 min (auto-abort
           on timeout). */}
+      {/* HITLApprovalModal — DISABLED (user decision, worklog task #14).
+          The user opted to disable HITL entirely to match CyberStrikeAI's
+          pattern (LLM calls tool → subprocess → output → loop, no human gate).
+          The component + state are kept here for future re-enable: just
+          un-comment the JSX below and ensure backend env VAPT_AI_HITL_DISABLED=0.
       <HITLApprovalModal
         approval={pendingHITL}
         onClose={() => setPendingHITL(null)}
       />
+      */}
       {/* Scan header */}
-      <div className="px-6 py-4 border-b border-zinc-800 bg-zinc-900/40">
+      <div className="px-6 py-4 border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900/40">
         <div className="flex items-center justify-between">
           <div className="flex-1 min-w-0">
-            <h2 className="text-lg font-semibold text-zinc-100 truncate">
+            <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100 truncate">
               {scan?.target || "Loading..."}
             </h2>
             <p className="text-xs text-zinc-500 font-mono mt-1">
@@ -773,15 +801,16 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
           </div>
           <div className="flex items-center gap-3">
             <Badge className={
-              scan?.status === "completed" ? "bg-emerald-700 text-zinc-50" :
-              scan?.status === "running" ? "bg-blue-700 text-zinc-50" :
-              scan?.status === "failed" ? "bg-red-700 text-zinc-50" :
-              "bg-zinc-700 text-zinc-200"
+              scan?.status === "completed" ? "bg-emerald-700 text-zinc-900 dark:text-zinc-50" :
+              scan?.status === "running" ? "bg-blue-700 text-zinc-900 dark:text-zinc-50" :
+              scan?.status === "failed" ? "bg-red-700 text-zinc-900 dark:text-zinc-50" :
+              scan?.status === "aborted" ? "bg-amber-700 text-zinc-50 dark:text-zinc-50" :
+              "bg-zinc-700 text-zinc-50 dark:text-zinc-200"
             }>
               {isLive ? "live" : scan?.status || "—"}
             </Badge>
             {scan?.findings_count !== null && scan?.findings_count !== undefined && scan.findings_count > 0 && (
-              <Badge className="bg-amber-700 text-zinc-50">
+              <Badge className="bg-amber-700 text-zinc-900 dark:text-zinc-50">
                 {scan.findings_count} findings
               </Badge>
             )}
@@ -789,13 +818,13 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
         </div>
         {/* Progress bar */}
         <div className="mt-3 flex items-center gap-3">
-          <Progress value={progress} className="h-1.5 bg-zinc-800 flex-1" />
-          <span className="text-xs text-zinc-500 tabular-nums w-10 text-right">{progress}%</span>
+          <Progress value={progress} className="h-2 flex-1" />
+          <span className="text-xs font-medium text-emerald-600 dark:text-emerald-400 tabular-nums w-10 text-right">{progress}%</span>
         </div>
       </div>
 
       {/* Timeline */}
-      <div className="flex-1 overflow-y-auto bg-zinc-950 p-4">
+      <div className="flex-1 overflow-y-auto bg-zinc-50 dark:bg-zinc-950 p-4">
         <div className="max-w-4xl mx-auto space-y-1 font-mono text-xs">
           {timeline.length === 0 ? (
             <div className="text-zinc-600 italic text-center py-12">
@@ -815,7 +844,7 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
         {/* Load more (DB mode only) */}
         {!isLive && dbOffset < dbTotal && (
           <div className="text-center py-4">
-            <Button size="sm" variant="ghost" onClick={loadMoreDb} disabled={loadingDb} className="text-zinc-400">
+            <Button size="sm" variant="ghost" onClick={loadMoreDb} disabled={loadingDb} className="text-zinc-600 dark:text-zinc-400">
               {loadingDb ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <ChevronDown className="w-4 h-4 mr-2" />}
               Load more ({dbTotal - dbOffset} remaining)
             </Button>
@@ -834,10 +863,10 @@ function LiveEventLine({ event }: { event: ScanEvent }) {
 
   if (type === "phase_change") {
     return (
-      <div className="flex items-center gap-2 py-1 mt-2 border-t border-zinc-800">
+      <div className="flex items-center gap-2 py-1 mt-2 border-t border-zinc-200 dark:border-zinc-800">
         <span className="text-zinc-700">{time}</span>
-        <span className="text-purple-400">━━━</span>
-        <span className="text-purple-300 font-semibold">{event.phase}</span>
+        <span className="text-purple-500 dark:text-purple-400">━━━</span>
+        <span className="text-purple-700 dark:text-purple-300 font-semibold">{event.phase}</span>
         {event.message && <span className="text-zinc-500">— {event.message}</span>}
         {event.progress !== undefined && <span className="text-zinc-600 ml-auto">[{event.progress}%]</span>}
       </div>
@@ -863,72 +892,72 @@ function LiveEventLine({ event }: { event: ScanEvent }) {
   }
   if (type === "assistant_message") {
     return (
-      <div className="flex gap-2 leading-relaxed my-1 p-2 bg-blue-950/20 border border-blue-900/50 rounded">
+      <div className="flex gap-2 leading-relaxed my-1 p-2 bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-900/50 rounded">
         <span className="text-zinc-700 shrink-0">{time || "—"}</span>
-        <span className="shrink-0 text-blue-400">{event.agent_name || "assistant"}</span>
-        <span className="text-zinc-200 break-all whitespace-pre-wrap">{event.content}</span>
+        <span className="shrink-0 text-blue-500 dark:text-blue-400">{event.agent_name || "assistant"}</span>
+        <span className="text-zinc-800 dark:text-zinc-200 break-all whitespace-pre-wrap">{stripAnsi(event.content)}</span>
       </div>
     );
   }
   if (type === "finding_detected") {
     return (
-      <div className="flex gap-2 leading-relaxed my-1 p-2 bg-amber-950/30 border border-amber-900 rounded">
+      <div className="flex gap-2 leading-relaxed my-1 p-2 bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-900 rounded">
         <span className="text-zinc-700 shrink-0">{time || "—"}</span>
-        <span className="shrink-0 text-amber-400">FINDING [{event.severity}]</span>
-        <span className="text-amber-200 break-all">{event.vuln_type} @ {event.location}</span>
+        <span className="shrink-0 text-amber-500 dark:text-amber-400">FINDING [{event.severity}]</span>
+        <span className="text-amber-700 dark:text-amber-200 break-all">{event.vuln_type} @ {event.location}</span>
       </div>
     );
   }
   if (type === "scan_started") {
     return (
-      <div className="flex gap-2 leading-relaxed py-1 border-b border-zinc-800 mb-2">
+      <div className="flex gap-2 leading-relaxed py-1 border-b border-zinc-200 dark:border-zinc-800 mb-2">
         <span className="text-zinc-700">{time || "—"}</span>
-        <span className="text-blue-400">SCAN STARTED</span>
-        <span className="text-zinc-300 break-all">target: {event.scan_id || ""}</span>
+        <span className="text-blue-500 dark:text-blue-400">SCAN STARTED</span>
+        <span className="text-zinc-700 dark:text-zinc-300 break-all">target: {event.scan_id || ""}</span>
       </div>
     );
   }
   if (type === "scan_complete") {
     return (
-      <div className="flex gap-2 leading-relaxed my-1 p-2 bg-emerald-950/30 border border-emerald-900 rounded">
+      <div className="flex gap-2 leading-relaxed my-1 p-2 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-900 rounded">
         <span className="text-zinc-700">{time || "—"}</span>
-        <span className="text-emerald-400">SCAN COMPLETE</span>
-        <span className="text-emerald-200">{event.findings_count} findings · {event.duration_seconds?.toFixed(1)}s</span>
+        <span className="text-emerald-500 dark:text-emerald-400">SCAN COMPLETE</span>
+        <span className="text-emerald-700 dark:text-emerald-200">{event.findings_count} findings · {event.duration_seconds?.toFixed(1)}s</span>
       </div>
     );
   }
   if (type === "scan_error") {
     return (
-      <div className="flex gap-2 leading-relaxed my-1 p-2 bg-red-950/30 border border-red-900 rounded">
+      <div className="flex gap-2 leading-relaxed my-1 p-2 bg-red-50 dark:bg-red-950/30 border border-red-300 dark:border-red-900 rounded">
         <span className="text-zinc-700">{time || "—"}</span>
-        <span className="text-red-400">SCAN ERROR</span>
-        <span className="text-red-200 break-all">{event.error}</span>
+        <span className="text-red-500 dark:text-red-400">SCAN ERROR</span>
+        <span className="text-red-600 dark:text-red-200 break-all">{event.error}</span>
       </div>
     );
   }
   if (type === "tool_call_started") {
     return (
-      <div className="flex gap-2 leading-relaxed my-0.5 p-2 bg-amber-950/20 border border-amber-900/50 rounded">
+      <div className="flex gap-2 leading-relaxed my-0.5 p-2 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/50 rounded">
         <span className="text-zinc-700 shrink-0">{time}</span>
-        <span className="shrink-0 text-amber-400">TOOL</span>
-        <span className="text-zinc-200 font-semibold shrink-0">{event.tool_name}</span>
+        <span className="shrink-0 text-amber-500 dark:text-amber-400">TOOL</span>
+        <span className="text-zinc-800 dark:text-zinc-200 font-semibold shrink-0">{event.tool_name}</span>
         {event.agent_name && <span className="text-zinc-500 text-[10px]">[{event.agent_name}]</span>}
         {event.arguments && <span className="text-zinc-500 truncate flex-1">({JSON.stringify(event.arguments).slice(0, 80)})</span>}
-        <span className="text-amber-400 animate-pulse shrink-0">running</span>
+        <span className="text-amber-500 dark:text-amber-400 animate-pulse shrink-0">running</span>
       </div>
     );
   }
   if (type === "tool_call_completed") {
     const success = event.success;
     return (
-      <div className={`flex gap-2 leading-relaxed my-0.5 p-2 border rounded ${success ? "bg-emerald-950/20 border-emerald-900/50" : "bg-red-950/20 border-red-900/50"}`}>
+      <div className={`flex gap-2 leading-relaxed my-0.5 p-2 border rounded ${success ? "bg-emerald-50 dark:bg-emerald-950/20 border-emerald-200 dark:border-emerald-900/50" : "bg-red-50 dark:bg-red-950/20 border-red-200 dark:border-red-900/50"}`}>
         <span className="text-zinc-700 shrink-0">{time}</span>
-        <span className={`shrink-0 ${success ? "text-emerald-400" : "text-red-400"}`}>
+        <span className={`shrink-0 ${success ? "text-emerald-500 dark:text-emerald-400" : "text-red-500 dark:text-red-400"}`}>
           {success ? "OK" : "FAIL"} {event.tool_name}
         </span>
         {event.result_preview && (
-          <span className={`truncate flex-1 ${success ? "text-zinc-400" : "text-red-300"}`}>
-            {event.result_preview}
+          <span className={`truncate flex-1 ${success ? "text-zinc-600 dark:text-zinc-400" : "text-red-700 dark:text-red-300"}`}>
+            {stripAnsi(event.result_preview)}
           </span>
         )}
       </div>
@@ -943,7 +972,7 @@ function LiveEventLine({ event }: { event: ScanEvent }) {
       <div className="flex gap-2 leading-relaxed">
         <span className="text-zinc-700 shrink-0">{time || "—"}</span>
         <span className="shrink-0 text-zinc-500">{prefix}</span>
-        <span className="text-zinc-300 break-all">{content}</span>
+        <span className="text-zinc-700 dark:text-zinc-300 break-all">{content}</span>
       </div>
     );
   }
@@ -974,14 +1003,14 @@ function DbEventLine({ row, scanId, expanded, onToggle }: {
   if (type === "tool_call_started" || type === "tool_call_completed") {
     const isCompleted = type === "tool_call_completed";
     const statusIcon = isCompleted ? (success ? "OK" : "FAIL") : "...";
-    const statusColor = isCompleted ? (success ? "text-emerald-400" : "text-red-400") : "text-amber-400 animate-pulse";
-    const bgClass = isCompleted ? (success ? "bg-emerald-950/20 border-emerald-900/50" : "bg-red-950/20 border-red-900/50") : "bg-amber-950/20 border-amber-900/50";
+    const statusColor = isCompleted ? (success ? "text-emerald-500 dark:text-emerald-400" : "text-red-500 dark:text-red-400") : "text-amber-500 dark:text-amber-400 animate-pulse";
+    const bgClass = isCompleted ? (success ? "bg-emerald-50 dark:bg-emerald-950/20 border-emerald-200 dark:border-emerald-900/50" : "bg-red-50 dark:bg-red-950/20 border-red-200 dark:border-red-900/50") : "bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-900/50";
     return (
       <div className={`my-0.5 p-2 border rounded ${bgClass}`}>
         <div className="flex items-center gap-2 cursor-pointer" onClick={onToggle}>
           <span className="text-zinc-700 shrink-0">{time}</span>
           <span className={`shrink-0 font-semibold ${statusColor}`}>{statusIcon}</span>
-          <span className="text-zinc-200 shrink-0">{toolName}</span>
+          <span className="text-zinc-800 dark:text-zinc-200 shrink-0">{toolName}</span>
           {agentName && <span className="text-zinc-500 text-[10px]">[{agentName}]</span>}
           {argsPreview && <span className="text-zinc-500 truncate flex-1">({argsPreview})</span>}
           {expanded ? <ChevronDown className="w-3 h-3 ml-auto shrink-0" /> : <ChevronRight className="w-3 h-3 ml-auto shrink-0" />}
@@ -997,7 +1026,7 @@ function DbEventLine({ row, scanId, expanded, onToggle }: {
     <div className="flex gap-2 leading-relaxed">
       <span className="text-zinc-700 shrink-0">{time || "—"}</span>
       <span className="shrink-0 text-zinc-500">{type}</span>
-      <span className="text-zinc-300 break-all">{message}</span>
+      <span className="text-zinc-700 dark:text-zinc-300 break-all">{message}</span>
       {resultPreview && <span className="text-zinc-500 break-all">— {String(resultPreview).slice(0, 100)}</span>}
     </div>
   );
@@ -1037,13 +1066,13 @@ function DbToolPayload({ row, scanId }: { row: ProcessDetailRow; scanId: string 
       {argsStr && (
         <div>
           <span className="text-zinc-600">args:</span>
-          <pre className="text-zinc-400 whitespace-pre-wrap break-all mt-1">{argsStr}</pre>
+          <pre className="text-zinc-600 dark:text-zinc-400 whitespace-pre-wrap break-all mt-1">{argsStr}</pre>
         </div>
       )}
       {resultStr && (
         <div>
           <span className="text-zinc-600">result:</span>
-          <pre className={`whitespace-pre-wrap break-all mt-1 ${(data as any).success === false ? "text-red-300" : "text-zinc-300"}`}>
+          <pre className={`whitespace-pre-wrap break-all mt-1 ${(data as any).success === false ? "text-red-700 dark:text-red-300" : "text-zinc-700 dark:text-zinc-300"}`}>
             {String(resultStr).slice(0, 500)}
           </pre>
         </div>
@@ -1051,7 +1080,7 @@ function DbToolPayload({ row, scanId }: { row: ProcessDetailRow; scanId: string 
       {errorStr && (
         <div>
           <span className="text-zinc-600">error:</span>
-          <pre className="text-red-300 whitespace-pre-wrap break-all mt-1">{String(errorStr).slice(0, 300)}</pre>
+          <pre className="text-red-700 dark:text-red-300 whitespace-pre-wrap break-all mt-1">{String(errorStr).slice(0, 300)}</pre>
         </div>
       )}
     </div>

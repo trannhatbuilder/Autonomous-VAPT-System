@@ -55,63 +55,16 @@ logger = logging.getLogger(__name__)
 
 
 # ── Per-tool call caps (default values; tunable per scan via env in future) ──
-MAX_TOOL_CALLS_PER_SCAN: dict[str, int] = {
-    # Network scanners
-    "nmap": 5,           # initial fast scan + up to 4 targeted re-scans
-    "masscan": 2,        # 1 for full-range port sweep + 1 for targeted re-sweep
-    "rustscan": 1,       # fast port discovery — single pass
-    "fscan": 2,          # internal network sweep + targeted re-sweep
-    "netexec": 3,        # SMB/WinRM probe + 2 targeted re-runs
-
-    # Web fingerprinters
-    "httpx": 2,          # initial probe + 1 re-probe (e.g. with -follow-redirects)
-    "whatweb": 1,        # single fingerprint call per host
-    "nikto": 1,          # slow + noisy — single pass
-
-    # Vuln scanners
-    "nuclei": 3,         # severity high+critical, then optionally medium, then tag-specific
-    "dalfox": 2,         # 1 quick scan + 1 with custom payloads
-    "wpscan": 1,         # single pass — WordPress enumeration
-    "fscan": 2,
-
-    # Directory brutes
-    "gobuster": 2,       # medium wordlist first, large second
-    "feroxbuster": 2,    # medium wordlist first, large second
-    "ffuf": 2,           # medium wordlist first, large second
-
-    # Subdomain enum
-    "subfinder": 1,      # passive — single call
-    "amass": 1,          # passive — single call
-    "theharvester": 1,   # passive — single call
-
-    # SQLi
-    "sqlmap": 3,         # per-endpoint calls (different endpoints)
-
-    # Exploitation
-    "metasploit": 5,     # different exploit modules
-    "impacket": 3,       # different lateral-movement modules
-
-    # Creds / privesc
-    "hydra": 2,          # different protocols
-    "hashcat": 1,        # offline — single call (different rule sets handled in 1 call)
-    "john": 1,           # offline — single call
-    "mimikatz": 1,       # LSASS dump — one-shot per host
-    "linpeas": 1,        # single privesc enum
-    "winpeas": 1,        # single privesc enum
-
-    # Misc / recon
-    "gau": 1,            # single fetch from archive APIs
-    "waybackurls": 1,    # single fetch
-    "katana": 2,         # 1 passive + 1 active crawl
-    "dnsenum": 1,        # single DNS enum
-    "fierce": 1,         # single DNS enum
-    "responder": 1,      # LLMNR poisoner — single capture session
-}
+# DISABLED (user decision, worklog task #16): the user has authorization to
+# scan their targets and reported that per-tool caps (sqlmap=3, metasploit=5,
+# etc.) were preventing the agent from completing a thorough pentest. All caps
+# are now effectively unlimited. To re-enable, restore the dict below.
+MAX_TOOL_CALLS_PER_SCAN: dict[str, int] = {}
 
 # Generic fallback cap — used when a tool name isn't in MAX_TOOL_CALLS_PER_SCAN.
-# Set to 5 (moderate) so unknown tools have reasonable headroom but cannot
-# dominate the scan.
-DEFAULT_TOOL_CALL_CAP: int = 5
+# DISABLED (worklog task #16): set to a very high number so unknown tools are
+# effectively unlimited. To re-enable, restore DEFAULT_TOOL_CALL_CAP = 5.
+DEFAULT_TOOL_CALL_CAP: int = 9999
 
 
 # ── Per-tool STALL limits ──────────────────────────────────────────────────
@@ -124,17 +77,9 @@ DEFAULT_TOOL_CALL_CAP: int = 5
 # Exploitation tools get a limit of 1: a second attempt with different args is
 # unlikely to be cheaper than switching (sqlmap <-> metasploit), and it protects
 # the scan's wall-clock budget.
-MAX_TOOL_STALLS_PER_SCAN: dict[str, int] = {
-    "metasploit": 1,
-    "sqlmap": 1,
-    "hydra": 1,
-    "impacket": 1,
-    "responder": 1,
-    "hashcat": 1,
-    "john": 1,
-    "mimikatz": 1,
-}
-DEFAULT_TOOL_STALL_LIMIT: int = 2
+MAX_TOOL_STALLS_PER_SCAN: dict[str, int] = {}
+# DISABLED (worklog task #16): set to a very high number so stalls don't block.
+DEFAULT_TOOL_STALL_LIMIT: int = 9999
 
 
 # ── Per-scan cap state ─────────────────────────────────────────────────────
@@ -231,12 +176,12 @@ def is_tool_stalled(scan_id: str, tool_name: str) -> tuple[bool, str]:
 
     alt = TOOL_ALTERNATIVES.get(tool_name, "another tool from your allowlist")
     reason = (
-        f"TOOL_STALLED_SWITCH_REQUIRED: '{tool_name}' đã bị kill bởi timeout "
-        f"{count} lần trong scan này (limit={limit}) — nó đang tiêu tốn "
-        f"wall-clock mà không trả về kết quả. DỪNG gọi '{tool_name}'. "
-        f"Chuyển sang: {alt}. Nếu đã có đủ evidence, hãy record_vulnerability "
-        f"với những gì đã thu thập được rồi gọi `exit` — một engagement hoàn "
-        f"thành với finding chưa xác nhận vẫn tốt hơn một scan treo vô hạn."
+        f"TOOL_STALLED_SWITCH_REQUIRED: '{tool_name}' was killed by timeout "
+        f"{count} times in this scan (limit={limit}) — it is consuming "
+        f"wall-clock without returning results. STOP calling '{tool_name}'. "
+        f"Switch to: {alt}. If you already have enough evidence, call record_vulnerability "
+        f"with what you have collected and then call `exit` — an engagement "
+        f"completed with an unconfirmed finding is still better than an infinite scan hang."
     )
     logger.warning(
         "TOOL_STALLED_SWITCH_REQUIRED | scan=%s | tool=%s | stalls=%d/%d",
@@ -279,8 +224,8 @@ def check_tool_call_cap(scan_id: str, tool_name: str) -> tuple[bool, str]:
         >>> check_tool_call_cap("scan_1", "nmap")
         (True, "")
         >>> check_tool_call_cap("scan_1", "nmap")  # call 6
-        (False, "Tool 'nmap' đã gọi 6 lần (cap=5). Switch tool hoặc
-                 summarize findings và exit.")
+        (False, "Tool 'nmap' was called 6 times (cap=5). Switch tool or
+                 summarize findings and exit.")
     """
     state = _get_scan_state(scan_id)
     count = state.get(tool_name, 0)
@@ -288,10 +233,10 @@ def check_tool_call_cap(scan_id: str, tool_name: str) -> tuple[bool, str]:
     if count >= cap:
         # Cap exhausted — return denied with a clear, actionable reason.
         reason = (
-            f"TOOL_CALL_CAP_EXHAUSTED: Tool '{tool_name}' đã gọi {count} lần "
-            f"(cap={cap}). Switch sang tool khác hoặc summarize findings "
-            f"và exit. Calling lại '{tool_name}' sẽ không yield thêm thông tin "
-            f"mới — đã đạt giới hạn gọi công cụ cho scan này."
+            f"TOOL_CALL_CAP_EXHAUSTED: Tool '{tool_name}' was called {count} times "
+            f"(cap={cap}). Switch to a different tool or summarize findings "
+            f"and exit. Calling '{tool_name}' again will not yield new "
+            f"information — the tool call limit for this scan has been reached."
         )
         logger.warning(
             "TOOL_CALL_CAP_EXHAUSTED | scan=%s | tool=%s | count=%d | cap=%d",

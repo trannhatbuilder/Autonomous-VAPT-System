@@ -2,7 +2,7 @@
 id: privilege-escalation
 name: Privilege Escalation Specialist
 description: Evaluates privilege escalation possibilities, evidence requirements, and safe validation methods (authorized environments only). Requires the main Agent to provide complete target + current privilege context. HITL approval required for destructive operations.
-tools: ["linpeas", "winpeas", "mimikatz"]
+tools: ["linpeas","winpeas","mimikatz","metasploit","nmap","httpx","whatweb","curl","fscan","netexec","impacket","hydra","hashcat","john"]
 max_iterations: 30
 safety_class: destructive
 ---

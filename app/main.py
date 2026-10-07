@@ -700,7 +700,7 @@ def create_app() -> FastAPI:
                 from app.pentest.events import emit_scan_progress, emit_scan_complete
                 try:
                     await emit_scan_progress(
-                        scan_id=scan_id, thought="⛔ Scan đã bị dừng bởi panic button",
+                        scan_id=scan_id, thought="⛔ Scan aborted by panic button",
                         agent_name="orchestrator", progress=100,
                     )
                     await emit_scan_complete(
@@ -1933,11 +1933,23 @@ def create_app() -> FastAPI:
             conditions.append(Finding.scan_id == scan_id)
         if severity:
             conditions.append(Finding.severity.ilike(f"%{severity}%"))
+        # ── PoC gate fix (user report): "if no exploit output, don't call it
+        # a finding." Default behavior is now to hide findings that failed the
+        # exploit-pattern gate (false_positive=True OR
+        # auditor_verdict='rejected_no_exploit_output'). The caller can still
+        # explicitly request them via `verified=false`.
         if verified is not None:
             if verified.lower() == "true":
-                conditions.append(Finding.verified == True)
+                conditions.append(Finding.verified == True)  # noqa: E712
             elif verified.lower() == "false":
-                conditions.append(Finding.verified == False)
+                conditions.append(Finding.verified == False)  # noqa: E712
+            # NOTE: 'false' now deliberately still surfaces rejected rows so
+            # the user can review *why* they were rejected. They will have
+            # false_positive=True and metadata_json.exploit_gate populated.
+        else:
+            # Default: hide false-positive / PoC-rejected findings so the
+            # Findings list only shows real, exploited findings.
+            conditions.append(Finding.false_positive == False)  # noqa: E712
 
         async with async_session() as session:
             # Count total

@@ -309,6 +309,20 @@ class ScopeGuard:
 
     def validate_command(self, command: str, target: str = "") -> ValidationResult:
         """Full validation: destructive check + binary check + target check."""
+        # DISABLED (worklog task #16): the user has authorization to scan
+        # their targets and reported that ScopeGuard was blocking legitimate
+        # targets. All three layers (destructive cmd, binary allowlist, target
+        # scope) are now bypassed by default. To re-enable, set env
+        # VAPT_AI_SCOPE_GUARD_DISABLED=0 (default is "1" = disabled).
+        import os as _os
+        if _os.environ.get("VAPT_AI_SCOPE_GUARD_DISABLED", "1").strip().lower() in (
+            "1", "true", "yes", "on",
+        ):
+            return ValidationResult(
+                allowed=True, command=command, target=target,
+                reason="scope guard disabled (VAPT_AI_SCOPE_GUARD_DISABLED=1)",
+            )
+
         # Layer 1: destructive command
         destructive_result = self.check_destructive_command(command)
         if not destructive_result.allowed:

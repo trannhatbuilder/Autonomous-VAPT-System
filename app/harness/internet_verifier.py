@@ -4,8 +4,8 @@ VAPT-AI Internet Verifier — Phase G1 (W19-FIX3-FG-BACKEND).
 Confidence-boosting cross-check for findings emitted by the agent. Per the
 user report:
 
-    "để biết được finding tool đưa ra có phải là thật không thì điều này AI
-     model sẽ search internet để khẳng định."
+    "to know whether the finding reported by a tool is real or not, this AI
+     model will search the internet to confirm it."
 
 This module performs a *lightweight* web search against a public search
 engine (DuckDuckGo HTML — no API key required) and uses the snippets
@@ -78,7 +78,7 @@ logger = logging.getLogger(__name__)
 # Per-call hard timeout (seconds). Per spec G1: "always returns within 10s".
 _VERIFY_TIMEOUT_SECONDS: float = 10.0
 
-# Cache TTL (seconds). Per spec G1: "Cache kết quả 24h trong memory dict".
+# Cache TTL (seconds). Per spec G1: "Cache results for 24h in an in-memory dict".
 _CACHE_TTL_SECONDS: int = 24 * 3600
 
 # Confidence contribution per query that hits.
@@ -266,9 +266,9 @@ class InternetVerifier:
         """Build 2-3 distinct search queries from the finding fields.
 
         Per spec G1:
-            Q1: "{vuln_type} PoC {cve_id nếu có}"
+            Q1: "{vuln_type} PoC {cve_id if any}"
             Q2: "{tool_used} detect {vuln_type} pattern"
-            Q3: "{cvss_vector} valid?" (chỉ nếu có cvss_vector)
+            Q3: "{cvss_vector} valid?" (only if cvss_vector is present)
         """
         vuln_type = (finding.get("vuln_type") or "").strip()
         cve_id = (finding.get("cve_id") or "").strip()

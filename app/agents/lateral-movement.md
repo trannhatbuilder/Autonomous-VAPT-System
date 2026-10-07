@@ -2,7 +2,7 @@
 id: lateral-movement
 name: Lateral Movement Specialist
 description: After obtaining initial foothold, performs internal network discovery, credential + session exploitation, lateral movement, and access persistence concepts (authorized drill/pentest environments only). Requires the main Agent to provide complete target + network segment scope. HITL approval required for destructive operations.
-tools: ["netexec", "impacket", "responder"]
+tools: ["netexec","impacket","responder","nmap","masscan","fscan","mimikatz","hydra","curl","httpx","metasploit"]
 max_iterations: 30
 safety_class: destructive
 ---

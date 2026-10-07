@@ -121,39 +121,39 @@ export function HITLApprovalModal({
   const isExploit = ["metasploit", "sqlmap", "mimikatz"].some((t) =>
     approval.tool_name.toLowerCase().includes(t)
   );
-  const accentColor = isExploit ? "text-red-400" : "text-amber-400";
-  const borderColor = isExploit ? "border-red-900" : "border-amber-900";
+  const accentColor = isExploit ? "text-red-500 dark:text-red-400" : "text-amber-500 dark:text-amber-400";
+  const borderColor = isExploit ? "border-red-300 dark:border-red-900" : "border-amber-300 dark:border-amber-900";
 
   return (
     <Dialog open={!!approval} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className={`bg-zinc-950 ${borderColor} border-2 max-w-2xl`}>
+      <DialogContent className={`bg-zinc-50 dark:bg-zinc-950 ${borderColor} border-2 max-w-2xl`}>
         <DialogHeader>
           <DialogTitle className={`flex items-center gap-2 ${accentColor}`}>
             <Shield className="w-5 h-5" />
             HITL Approval Required — Destructive Operation
           </DialogTitle>
-          <DialogDescription className="text-zinc-400">
+          <DialogDescription className="text-zinc-600 dark:text-zinc-400">
             The agent is attempting a destructive operation. The system has
             intercepted it for your approval. Timeout will auto-abort in{" "}
-            <span className="font-mono text-amber-300 font-bold">{timeStr}</span>.
+            <span className="font-mono text-amber-700 dark:text-amber-300 font-bold">{timeStr}</span>.
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 max-h-[60vh] overflow-y-auto">
           {/* Tool + target summary */}
-          <div className="bg-zinc-900/50 border border-zinc-800 rounded p-3">
+          <div className="bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800 rounded p-3">
             <div className="flex items-center gap-2 mb-2">
               <AlertTriangle className={`w-4 h-4 ${accentColor}`} />
-              <span className="font-mono text-sm font-semibold text-zinc-100">
+              <span className="font-mono text-sm font-semibold text-zinc-900 dark:text-zinc-100">
                 {approval.tool_name}
               </span>
-              <Badge variant="outline" className="text-zinc-400 border-zinc-700">
+              <Badge variant="outline" className="text-zinc-600 dark:text-zinc-400 border-zinc-300 dark:border-zinc-700">
                 destructive
               </Badge>
             </div>
-            <div className="text-xs text-zinc-400 font-mono">
+            <div className="text-xs text-zinc-600 dark:text-zinc-400 font-mono">
               <span className="text-zinc-500">target:</span>{" "}
-              <span className="text-zinc-200">{approval.target}</span>
+              <span className="text-zinc-800 dark:text-zinc-200">{approval.target}</span>
             </div>
           </div>
 
@@ -161,7 +161,7 @@ export function HITLApprovalModal({
           {approval.predicted_impact && (
             <div>
               <div className="text-xs text-zinc-500 mb-1">Predicted Impact</div>
-              <div className="text-sm text-amber-200 bg-amber-950/20 border border-amber-900/50 rounded p-2">
+              <div className="text-sm text-amber-700 dark:text-amber-200 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/50 rounded p-2">
                 {approval.predicted_impact}
               </div>
             </div>
@@ -171,7 +171,7 @@ export function HITLApprovalModal({
           {approval.agent_reasoning && (
             <div>
               <div className="text-xs text-zinc-500 mb-1">Agent Reasoning</div>
-              <div className="text-xs text-zinc-300 bg-zinc-900/50 border border-zinc-800 rounded p-2 font-mono whitespace-pre-wrap">
+              <div className="text-xs text-zinc-700 dark:text-zinc-300 bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800 rounded p-2 font-mono whitespace-pre-wrap">
                 {approval.agent_reasoning}
               </div>
             </div>
@@ -184,10 +184,10 @@ export function HITLApprovalModal({
               <Badge
                 className={
                   approval.kg_confidence >= 0.7
-                    ? "bg-emerald-700 text-zinc-50"
+                    ? "bg-emerald-700 text-zinc-900 dark:text-zinc-50"
                     : approval.kg_confidence >= 0.4
-                    ? "bg-amber-700 text-zinc-50"
-                    : "bg-red-700 text-zinc-50"
+                    ? "bg-amber-700 text-zinc-900 dark:text-zinc-50"
+                    : "bg-red-700 text-zinc-900 dark:text-zinc-50"
                 }
               >
                 {(approval.kg_confidence * 100).toFixed(0)}%
@@ -198,18 +198,18 @@ export function HITLApprovalModal({
           {/* Full args (pretty-printed) */}
           <div>
             <div className="text-xs text-zinc-500 mb-1">Tool Args</div>
-            <pre className="text-xs text-zinc-300 bg-zinc-900/70 border border-zinc-800 rounded p-2 font-mono overflow-x-auto">
+            <pre className="text-xs text-zinc-700 dark:text-zinc-300 bg-zinc-900/70 border border-zinc-200 dark:border-zinc-800 rounded p-2 font-mono overflow-x-auto">
               {argsStr}
             </pre>
           </div>
 
           {/* Countdown */}
-          <div className="flex items-center gap-2 text-xs text-zinc-400">
+          <div className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400">
             <Clock className="w-3 h-3" />
             <span>Auto-abort in</span>
             <span
               className={`font-mono font-bold ${
-                remaining < 60 ? "text-red-400 animate-pulse" : "text-amber-300"
+                remaining < 60 ? "text-red-500 dark:text-red-400 animate-pulse" : "text-amber-700 dark:text-amber-300"
               }`}
             >
               {timeStr}
@@ -217,7 +217,7 @@ export function HITLApprovalModal({
           </div>
 
           {error && (
-            <div className="text-xs text-red-400 bg-red-950/30 border border-red-900 rounded p-2">
+            <div className="text-xs text-red-500 dark:text-red-400 bg-red-50 dark:bg-red-950/30 border border-red-300 dark:border-red-900 rounded p-2">
               {error}
             </div>
           )}
@@ -236,7 +236,7 @@ export function HITLApprovalModal({
           <Button
             onClick={handleApprove}
             disabled={acting}
-            className="bg-emerald-600 hover:bg-emerald-500 text-zinc-50"
+            className="bg-emerald-600 hover:bg-emerald-500 text-zinc-900 dark:text-zinc-50"
           >
             {acting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
             Approve

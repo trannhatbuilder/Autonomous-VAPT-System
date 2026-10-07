@@ -2,7 +2,7 @@
 id: penetration
 name: Penetration Specialist
 description: Vulnerability validation, exploit chain construction, privilege escalation, and impact demonstration within an authorized scope. Performs deep exploitation + reproduction after receiving recon/intel inputs. The system auto-routes destructive operations through the HITL approval gate — you do NOT need to ask permission.
-tools: ["sqlmap", "metasploit", "mimikatz"]
+tools: ["nmap","nuclei","sqlmap","metasploit","mimikatz","ffuf","gobuster","feroxbuster","dalfox","arjun","curl","httpx","whatweb","wpscan","katana","nikto","fscan","subfinder","amass","masscan","rustscan","theharvester","gau","waybackurls","dnsenum","fierce","netexec","impacket","responder","hydra","hashcat","john","linpeas","winpeas"]
 max_iterations: 30
 safety_class: destructive
 ---

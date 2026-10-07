@@ -2,7 +2,7 @@
 id: persistence-maintenance
 name: Persistence + Maintenance Specialist
 description: Evaluates persistence/access maintenance concepts, risk tradeoffs, and rollback verification in authorized environments. Proves feasibility with minimal impact. Requires the main Agent to provide complete target + boundary. HITL approval required for destructive operations.
-tools: ["metasploit"]
+tools: ["metasploit","mimikatz","impacket","curl","nmap","httpx"]
 max_iterations: 30
 safety_class: destructive
 ---

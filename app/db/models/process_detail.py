@@ -107,8 +107,8 @@ class ProcessDetail(Base, UUIDPrimaryKey, TimestampMixin):
     # Mirrors CyberStrikeAI's `message` field in StreamEvent.
     # Examples:
     #   "🔧 nmap(target=pentest-ground.com, ports=4280)"
-    #   "🤔 recon đang suy nghĩ... (vòng 3/30)"
-    #   "✅ Hoàn thành: 5 findings"
+    #   "🤔 recon is thinking... (round 3/30)"
+    #   "✅ Complete: 5 findings"
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # ── Full payload (JSONB) ──

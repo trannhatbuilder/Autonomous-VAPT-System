@@ -41,7 +41,7 @@ export function LoginForm() {
       <div className="w-full max-w-md">
         <div className="flex items-center justify-between mb-8">
           <div className="w-12 h-12 rounded-lg bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 flex items-center justify-center shadow-sm">
-            <ShieldCheck className="w-6 h-6 text-emerald-400" />
+            <ShieldCheck className="w-6 h-6 text-emerald-500 dark:text-emerald-400" />
           </div>
           {mounted && (
             <Button

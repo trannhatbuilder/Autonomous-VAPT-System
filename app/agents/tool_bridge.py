@@ -34,25 +34,14 @@ logger = logging.getLogger(__name__)
 # not attached to a TTY. They waste the LLM's context budget and made the model
 # report "output is truncated at the first ANSI colour escape" and burn whole
 # turns trying to "disable colour" instead of reading results.
-_ANSI_ESCAPE_RE = re.compile(
-    r"""
-    \x1b\[[0-?]*[ -/]*[@-~]      # CSI ... final byte
-    | \x1b\][^\x07\x1b]*(?:\x07|\x1b\\)  # OSC ... BEL or ST
-    | \x1b[@-Z\\-_]              # 2-char escape
-    | \r(?=[^\n])                # bare CR (progress bars) — not CRLF
-    """,
-    re.VERBOSE,
-)
+#
+# The canonical implementation now lives in `app.harness.ansi.strip_ansi`.
+# This module keeps a local `_strip_ansi` alias for backward compatibility
+# with existing imports — callers should migrate to `app.harness.ansi`.
+from app.harness.ansi import strip_ansi as _strip_ansi, _ANSI_ESCAPE_RE
 
 # Max characters of tool output forwarded to the LLM (head + tail kept).
 MAX_LLM_OUTPUT_CHARS = 8000
-
-
-def _strip_ansi(text: str) -> str:
-    """Remove ANSI escape sequences from tool output."""
-    if not text:
-        return text
-    return _ANSI_ESCAPE_RE.sub("", text)
 
 
 # ---------- Schema cache (per-agent-toolset) ----------
@@ -209,6 +198,20 @@ async def _maybe_run_hitl_gate(
     Failure mode: if HITLManager raises (e.g. DB not reachable), default
     to reject per master plan §W7-B (VAPT_AI_HITL_AUDIT_FALLBACK=reject).
     """
+    # Fix (worklog task #17): respect VAPT_AI_HITL_DISABLED env flag.
+    # When HITL is globally disabled (default since task #14), this gate
+    # must NOT create any HITLApproval rows or call the audit_agent LLM.
+    # Previously the agent-loop layer (base.py:1036-1048) respected the
+    # env flag, but this gate in tool_bridge.py did NOT — so destructive
+    # tools still triggered HITL INSERTs into vapt_hitl_approvals, causing
+    # VARCHAR(32) overflow on predicted_impact='Metasploit exploit module
+    # execution' (35 chars > 32). Now both layers honor the same flag.
+    import os as _os
+    if _os.environ.get("VAPT_AI_HITL_DISABLED", "1").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        return None  # HITL disabled — proceed with execute, no DB row created
+
     try:
         from app.db.session import async_session
         from app.hitl.manager import HITLManager
@@ -784,7 +787,23 @@ async def _record_vulnerability(args: dict[str, Any], scan_id: str) -> str:
         # PoC metadata
         exploit_method = args.get("exploit_method") or args.get("source_tool") or "agent"
         raw_evidence = args.get("evidence") or ""
-        poc_status = "successful" if raw_evidence else "not_attempted"
+        # PoC definition (worklog task #18, refined):
+        # A PoC is "command + server response" — NOT a regex pattern match.
+        # The LLM is the judge: if it calls record_vulnerability with
+        # evidence (any tool output), the finding is recorded as PoC=successful.
+        # Each target system has different bugs — we cannot assume specific
+        # patterns like uid=root or set-cookie: missing flags. The LLM saw
+        # the tool output and decided it constitutes a vulnerability.
+        #
+        # Previous strict-pattern gate (exploit_patterns.py) was REMOVED
+        # because it rejected legitimate findings that didn't match
+        # hard-coded signatures. The LLM's judgment is the new gate.
+        if raw_evidence:
+            poc_status = "successful"  # any tool output = PoC confirmed
+            exploit_match_reason = "LLM provided tool output as evidence (PoC = command + server response)"
+        else:
+            poc_status = "not_attempted"
+            exploit_match_reason = "no evidence provided — LLM did not attach tool output"
 
         # Pack description + remediation into metadata_json (model has no `description` column)
         description = args.get("description") or ""
@@ -796,6 +815,14 @@ async def _record_vulnerability(args: dict[str, Any], scan_id: str) -> str:
             metadata_payload["remediation"] = remediation
         if raw_evidence:
             metadata_payload["raw_evidence_excerpt"] = raw_evidence[:2000]
+        # Stash the exploit-gate verdict so the auditor + UI can show *why*
+        # a finding was or wasn't promoted to a true PoC. This is what the
+        # user asked for: "if no exploit output, don't call it a finding."
+        metadata_payload["poc"] = {
+            "status": poc_status,
+            "reason": exploit_match_reason,
+            "definition": "PoC = command executed + server response captured. LLM judged this as a vulnerability.",
+        }
 
         async with async_session() as session:
             svc = EvidenceService(session)
@@ -846,10 +873,19 @@ async def _record_vulnerability(args: dict[str, Any], scan_id: str) -> str:
         return json.dumps({
             "status": "recorded",
             "finding_id": finding_id,
-            "verified": False,  # Bug 2 fix — will be flipped by Phase 5 auditor
+            "verified": False,  # will be flipped by Phase 5 auditor
+            "poc_status": poc_status,
+            "poc_reason": exploit_match_reason,
             "message": (
                 f"Vulnerability '{title}' recorded with severity {severity} "
-                f"(cvss_base_score={cvss_base_score}). Pending audit verification."
+                f"(cvss_base_score={cvss_base_score}). "
+                + (
+                    "PoC confirmed: tool output captured as evidence. "
+                    "Pending audit verification."
+                    if poc_status == "successful" else
+                    "No PoC: no evidence attached. Run a tool, capture the "
+                    "server's response, and re-record with that output as evidence."
+                )
             ),
         })
     except Exception as exc:

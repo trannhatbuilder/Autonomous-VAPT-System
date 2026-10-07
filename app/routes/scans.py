@@ -173,8 +173,15 @@ async def list_scan_history(
     # use case this is fine — N+1 queries for N=20 scans is ~20ms total)
     scan_summaries = []
     for scan in scans:
+        # Fix (worklog task #16): count only VERIFIED findings (not false
+        # positives rejected by the PoC gate). Previously this counted ALL
+        # Finding rows including rejected ones, causing the sidebar to show
+        # "4 findings" while the Findings page (which filters
+        # false_positive=False) showed 0.
         findings_count = await session.scalar(
-            select(func.count(Finding.id)).where(Finding.scan_id == scan.id)
+            select(func.count(Finding.id))
+            .where(Finding.scan_id == scan.id)
+            .where(Finding.false_positive == False)  # noqa: E712
         ) or 0
         process_details_count = await session.scalar(
             select(func.count(ProcessDetail.id)).where(ProcessDetail.scan_id == scan.id)
@@ -218,7 +225,9 @@ async def get_scan_detail(
 
     # Counts
     findings_count = await session.scalar(
-        select(func.count(Finding.id)).where(Finding.scan_id == scan_id)
+        select(func.count(Finding.id))
+        .where(Finding.scan_id == scan_id)
+        .where(Finding.false_positive == False)  # noqa: E712 — verified only
     ) or 0
     process_details_count = await session.scalar(
         select(func.count(ProcessDetail.id)).where(ProcessDetail.scan_id == scan_id)
@@ -226,6 +235,7 @@ async def get_scan_detail(
     findings_by_severity_rows = (await session.execute(
         select(Finding.severity, func.count(Finding.id))
         .where(Finding.scan_id == scan_id)
+        .where(Finding.false_positive == False)  # noqa: E712 — verified only
         .group_by(Finding.severity)
     )).all()
     findings_by_severity = {row[0]: row[1] for row in findings_by_severity_rows}
@@ -481,7 +491,9 @@ async def delete_scan(
 
     # Capture counts before delete for the response
     findings_count = await session.scalar(
-        select(func.count(Finding.id)).where(Finding.scan_id == scan_id)
+        select(func.count(Finding.id))
+        .where(Finding.scan_id == scan_id)
+        .where(Finding.false_positive == False)  # noqa: E712 — verified only
     ) or 0
     process_details_count = await session.scalar(
         select(func.count(ProcessDetail.id)).where(ProcessDetail.scan_id == scan_id)

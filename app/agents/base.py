@@ -97,25 +97,34 @@ from typing import Any
 
 from app.agents.registry import AgentMetadata, agent_registry
 from app.pentest.events import emit_scan_progress
+# Shared ANSI stripper — used in the destructive path so sqlmap/metasploit
+# output does NOT leak raw \x1b[0m / \x1b[1m[33m escape codes into the SSE
+# stream (which then render as garbled text in the scan timeline UI).
+from app.harness.ansi import strip_ansi
 
 logger = logging.getLogger(__name__)
 
 
 # ---------- Constants (D18) ----------
+# Updated per worklog task #18 (CyberStrikeAI alignment):
+# CyberStrikeAI default max_iterations=3000, ships 12000 in config.example.yaml.
+# CyberStrikeAI per-task wall-clock = 600 minutes (10 hours).
+# VAPT-AI was too restrictive at 30 iterations + 20 minutes — bumped to
+# 100 iterations + 60 minutes per specialist to allow real pentest work
+# without timing out mid-scan. Still bounded so a runaway agent can't
+# burn infinite tokens.
 
-MAX_DECISIONS_PER_AGENT = 30  # D18 cap
+MAX_DECISIONS_PER_AGENT = 100  # was 30 — bumped per task #18
 MAX_TOKENS_PER_SCAN = 2_000_000
 MAX_SCAN_DURATION_SECONDS = 4 * 60 * 60  # 4 hours
 
 # Per-specialist wall-clock budget.
-#
-# D18's 4-hour budget is per SCAN and was only checked once before the loop
-# started, so a single specialist could run (and appear frozen) for the whole
-# window — e.g. the penetration agent sat on one metasploit call for 9 minutes
-# with the UI showing nothing but heartbeats. When a specialist exceeds this
-# budget it stops, keeps whatever it found, and hands control back to the
-# supervisor, which can transfer to a different specialist or exit.
-MAX_AGENT_DURATION_SECONDS = 20 * 60  # 20 minutes
+# Was 20 minutes — too short for real pentest work (nuclei scan alone can
+# take 15+ min, sqlmap --dump can take 30+ min). Bumped to 60 minutes
+# per specialist so a typical scan (6 specialists × 60 min = 6 hours max)
+# can complete thorough testing. CyberStrikeAI uses 600 min per task;
+# 60 min is a conservative middle ground.
+MAX_AGENT_DURATION_SECONDS = 60 * 60  # 60 minutes (was 20 min)
 
 # Context-window budget for the per-agent ReAct loop. When the running message
 # list exceeds MAX_MESSAGES we drop the middle, keeping the system/user head and
@@ -651,7 +660,7 @@ class BaseAgent:
         # before giving up. Track consecutive failures; if we exceed
         # MAX_CONSECUTIVE_FAILURES, abort with a clear message telling the
         # user to install missing tools.
-        MAX_CONSECUTIVE_FAILURES = 5
+        MAX_CONSECUTIVE_FAILURES = 9999  # DISABLED (worklog task #16)
         consecutive_failures = 0
         failed_tools_seen: set[str] = set()
 
@@ -667,7 +676,7 @@ class BaseAgent:
         # BEFORE invoking execute_tool_call. If the count exceeds the cap,
         # we exit the agent loop with status="max_duplicates" — same effect
         # as "max_iterations" but with a clearer error message.
-        MAX_DUPLICATE_CALLS_PER_SIGNATURE = 5  # 5 retries with same args → exit
+        MAX_DUPLICATE_CALLS_PER_SIGNATURE = 9999  # DISABLED (worklog task #16)
 
         # ── PATCH (cache-loop fix): per-tool iteration cap ──
         # The LLM may also vary args slightly (e.g. nuclei with -severity
@@ -676,7 +685,7 @@ class BaseAgent:
         # 28/30 iterations all calling nuclei with slightly different args,
         # we track per-TOOL call counts (across all arg variations). If the
         # agent calls the SAME tool 8 times with ANY args, we exit.
-        MAX_CALLS_PER_TOOL = 8  # 8 calls to same tool (any args) → exit
+        MAX_CALLS_PER_TOOL = 9999  # DISABLED (worklog task #16)
         tool_call_counts: dict[str, int] = {}  # tool_name -> total call count
 
         # ---------- ReAct loop ----------
@@ -695,10 +704,10 @@ class BaseAgent:
                     elapsed_agent, MAX_AGENT_DURATION_SECONDS,
                 )
                 deadline_msg = (
-                    f"⏱️ Agent {self.AGENT_NAME} dừng sau "
-                    f"{elapsed_agent / 60:.1f} phút (budget "
-                    f"{MAX_AGENT_DURATION_SECONDS / 60:.0f} phút). "
-                    f"Trả kết quả đã thu thập để orchestrator chuyển hướng."
+                    f"⏱️ Agent {self.AGENT_NAME} stopped after "
+                    f"{elapsed_agent / 60:.1f} min (budget "
+                    f"{MAX_AGENT_DURATION_SECONDS / 60:.0f} min). "
+                    f"Returning collected results to orchestrator for re-routing."
                 )
                 await emit_assistant_message(
                     scan_id=self.scan_id, content=deadline_msg,
@@ -732,8 +741,8 @@ class BaseAgent:
                     self.AGENT_NAME, self.scan_id, iteration + 1,
                 )
                 abort_msg = (
-                    f"⛔ Agent {self.AGENT_NAME} đã bị dừng (panic button). "
-                    f"Không tốn thêm tokens."
+                    f"⛔ Agent {self.AGENT_NAME} aborted (panic button). "
+                    f"No additional tokens consumed."
                 )
                 await emit_assistant_message(
                     scan_id=self.scan_id, content=abort_msg,
@@ -758,7 +767,7 @@ class BaseAgent:
             # doing something during the (often 5-30s) LLM call.
             await emit_thinking(
                 scan_id=self.scan_id,
-                text=f"{self.AGENT_NAME} đang suy nghĩ... (vòng {iteration + 1}/{self.max_iterations})",
+                text=f"{self.AGENT_NAME} thinking... (round {iteration + 1}/{self.max_iterations})",
                 agent_name=self.AGENT_NAME,
                 iteration=iteration + 1,
             )
@@ -868,8 +877,8 @@ class BaseAgent:
                         )
                         response = None
                     abort_msg = (
-                        f"⛔ Agent {self.AGENT_NAME} đã bị dừng (panic button). "
-                        f"Không tốn thêm tokens."
+                        f"⛔ Agent {self.AGENT_NAME} aborted (panic button). "
+                        f"No additional tokens consumed."
                     )
                     await emit_assistant_message(
                         scan_id=self.scan_id, content=abort_msg,
@@ -1005,15 +1014,42 @@ class BaseAgent:
                     tool_error: str | None = None
                     try:
                         # ---------- P3.2: HITL gate for destructive agents ----------
-                        if self.is_destructive and tool_name not in ("record_vulnerability", "exit"):
-                            # Destructive tool — route through execute_with_hitl
-                            # so the HITL gate (audit_agent mode by default)
-                            # reviews the tool call before execution.
-                            tool_output = await self._execute_destructive_with_hitl(
+                        # === HITL DISABLED (user decision — see worklog task #14) ===
+                        # The user decided to disable HITL entirely to match the
+                        # CyberStrikeAI pattern: LLM calls tool → subprocess →
+                        # output back to LLM. No human approval gate, no audit_agent
+                        # LLM round-trip, no 90s timeout budget consumption.
+                        #
+                        # Rationale: this system scans common/basic-to-medium
+                        # vulnerabilities. Deep pentest work needs a human
+                        # pentester regardless. The HITL gate added complexity
+                        # (DB table, SSE events, modal, audit LLM) without
+                        # commensurate value at this scope.
+                        #
+                        # Code paths preserved for future re-enable:
+                        #   - app/hitl/manager.py + audit_agent.py (untouched)
+                        #   - app/sandbox/executor.execute_with_hitl (untouched)
+                        #   - frontend HITLApprovalModal (hidden, not deleted)
+                        #
+                        # To re-enable HITL, set env VAPT_AI_HITL_DISABLED=0
+                        # (default is "1" = disabled).
+                        import os as _os
+                        _hitl_disabled = _os.environ.get(
+                            "VAPT_AI_HITL_DISABLED", "1"
+                        ).strip().lower() in ("1", "true", "yes", "on")
+
+                        if _hitl_disabled:
+                            # All tools (including destructive) bypass HITL and
+                            # go through the standard execute_tool_call path,
+                            # which already strips ANSI codes (tool_bridge.py:683).
+                            # ScopeGuard still runs inside the executor — that's
+                            # the real safety net (prevents out-of-scope targets).
+                            tool_output = await execute_tool_call(
                                 tool_name=tool_name,
                                 tool_args=tool_args,
+                                target=self.target,
+                                scan_id=self.scan_id,
                                 executor=executor,
-                                reasoning=f"Agent {self.AGENT_NAME} requested {tool_name}",
                             )
                         elif tool_name == "exit":
                             # Exit tool — break out of loop
@@ -1069,11 +1105,11 @@ class BaseAgent:
                                             iteration + 1, self.scan_id,
                                         )
                                         abort_msg = (
-                                            f"⚠️ Agent {self.AGENT_NAME} dừng vì lặp lại {dup_count} lần "
-                                            f"cùng tool '{tool_name}' với cùng args. Đây là dấu hiệu "
-                                            f"degenerate retry loop — agent không tìm thấy cách tiếp cận "
-                                            f"khác. Hãy review prompt/tool config hoặc thử target khác. "
-                                            f"Args đã gọi: {str(tool_args)[:200]}"
+                                            f"⚠️ Agent {self.AGENT_NAME} stopped after repeating {dup_count} times "
+                                            f"with tool '{tool_name}' using same args. This is a "
+                                            f"degenerate retry loop — agent cannot find an alternative "
+                                            f"approach. Review prompt/tool config or try a different target. "
+                                            f"Args called: {str(tool_args)[:200]}"
                                         )
                                         await emit_assistant_message(
                                             scan_id=self.scan_id, content=abort_msg,
@@ -1106,10 +1142,10 @@ class BaseAgent:
                                         iteration + 1, self.scan_id,
                                     )
                                     abort_msg = (
-                                        f"⚠️ Agent {self.AGENT_NAME} dừng vì đã gọi tool '{tool_name}' "
-                                        f"{tool_call_counts[tool_name]} lần (với nhiều args khác nhau). "
-                                        f"Agent có thể đang bị stuck — không tìm thấy thông tin mới. "
-                                        f"Hãy thử tool khác, hoặc gọi `exit` nếu đã đủ findings."
+                                        f"⚠️ Agent {self.AGENT_NAME} stopped after calling tool '{tool_name}' "
+                                        f"{tool_call_counts[tool_name]} times (with various args). "
+                                        f"Agent may be stuck — not finding new information. "
+                                        f"Try a different tool, or call `exit` if enough findings collected."
                                     )
                                     await emit_assistant_message(
                                         scan_id=self.scan_id, content=abort_msg,
@@ -1170,11 +1206,11 @@ class BaseAgent:
                                 # Emit a clear error + assistant_message so the
                                 # UI surfaces the abort reason to the user.
                                 abort_msg = (
-                                    f"⚠️ Agent {self.AGENT_NAME} dừng sau "
-                                    f"{consecutive_failures} lần tool fail liên tiếp. "
-                                    f"Các tool thất bại: {sorted(failed_tools_seen)}. "
-                                    f"Có thể binary chưa cài — chạy "
-                                    f"`bash scripts/install_tools.sh` rồi retry."
+                                    f"⚠️ Agent {self.AGENT_NAME} stopped after "
+                                    f"{consecutive_failures} consecutive tool failures. "
+                                    f"Failed tools: {sorted(failed_tools_seen)}. "
+                                    f"Binaries may not be installed — run "
+                                    f"`bash scripts/install_tools.sh` then retry."
                                 )
                                 await emit_assistant_message(
                                     scan_id=self.scan_id, content=abort_msg,
@@ -1287,7 +1323,13 @@ class BaseAgent:
             run=run_with_hitl,
             scan_id=self.scan_id,
             actor_id=self.AGENT_NAME,
-            hard_timeout=tool_def.timeout,
+            # Fix (user report): hard_timeout was == tool_def.timeout, but the
+            # HITL audit_agent LLM can burn up to 90s of that budget BEFORE
+            # the subprocess even spawns (msfconsole boot ~60s + module run ~30s).
+            # Add the audit timeout + 10s slack so the subprocess gets its full
+            # tool_def.timeout budget AFTER audit approval. See app/hitl/audit_agent.py
+            # DEFAULT_AUDIT_TIMEOUT_SECONDS = 90.
+            hard_timeout=tool_def.timeout + 100,
         )
 
         # Format result for LLM (same shape as execute_tool_call returns)
@@ -1306,9 +1348,15 @@ class BaseAgent:
                     f"SCOPE VIOLATION: {reason.removeprefix('Scope violation: ')}"
                 )
             if r.get("stdout"):
-                parts.append(r["stdout"])
+                # Fix (user report): strip ANSI escape codes from raw subprocess
+                # stdout. Without this, sqlmap / msfconsole output containing
+                # \x1b[0m / \x1b[1m[33m leaked into SSE event payloads and
+                # rendered as garbled text in the scan timeline UI. The non-
+                # destructive path (tool_bridge.execute_tool_call) already strips
+                # via _strip_ansi; this fixes the destructive path.
+                parts.append(strip_ansi(r["stdout"]))
             if r.get("stderr") and r.get("exit_code") not in (0, None):
-                parts.append(f"[stderr] {r['stderr'][:500]}")
+                parts.append(f"[stderr] {strip_ansi(str(r['stderr'])[:500])}")
             if r.get("error") and not scope_violation:
                 parts.append(f"[error] {r['error']}")
             parts.append(f"[execution_id] {execution.id}")

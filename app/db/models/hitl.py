@@ -60,7 +60,11 @@ class HITLApproval(Base, UUIDPrimaryKey, TimestampMixin):
     args_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
     # Predicted impact (agent's assessment)
-    predicted_impact: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Fix (worklog task #17): was String(32) — too short for values like
+    # "Metasploit exploit module execution" (35 chars) which caused
+    # asyncpg StringDataRightTruncationError. Changed to Text so any
+    # human-readable impact description fits.
+    predicted_impact: Mapped[str] = mapped_column(Text, nullable=False)
     # destructive / data_modification / data_exfiltration / persistence / lateral / priv_esc
 
     # Agent reasoning (why it wants to do this)
@@ -70,12 +74,16 @@ class HITLApproval(Base, UUIDPrimaryKey, TimestampMixin):
     kg_confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
 
     # Status lifecycle
+    # Fix (worklog task #17): was String(16) — too short for values like
+    # "approved_with_time_limit" (24 chars). Widened to String(64).
     status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="pending", server_default="pending", index=True
+        String(64), nullable=False, default="pending", server_default="pending", index=True
     )  # pending / approved / approved_with_time_limit / aborted / timeout / edited
 
     # User decision
-    user_decision: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Fix (worklog task #17): was String(16) — too short for values like
+    # "approve_with_time_limit" (23 chars). Widened to String(64).
+    user_decision: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # approve / approve_with_time_limit / abort / edit_args
 
     # Edited args (if user clicked Edit-args then approve)
