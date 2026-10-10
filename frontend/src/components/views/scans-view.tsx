@@ -10,13 +10,6 @@ import { Badge } from "../ui/badge";
 import { Progress } from "../ui/progress";
 import { Alert, AlertDescription } from "../ui/alert";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../ui/select";
-import {
   Loader2, Play, Square, RefreshCw, Activity, Terminal,
   ChevronDown, ChevronRight, Search, History, Trash2, Download,
 } from "lucide-react";
@@ -126,11 +119,10 @@ export function ScansView() {
   // Start new scan form state
   const [target, setTarget] = useState("");
   const [userPrompt, setUserPrompt] = useState("");
-  // W19-FIX3 Phase E2: orchestration mode selector.
-  // Default "supervisor" (kill-chain specialist transfer — recommended per
-  // user feedback "multi-agent mode recommended for better results"). Other modes:
-  // "single" (1 agent + all tools, no transfer), "deep", "plan_execute".
-  const [mode, setMode] = useState<"supervisor" | "single" | "deep" | "plan_execute">("supervisor");
+  // Phase 2: orchestration mode dropdown removed — system uses a single
+  // ReAct agent for all scans (see app/orchestration/mode_selector.py).
+  // The `mode` state is no longer needed; startScan() always hits
+  // /api/scans/start (default endpoint).
   const [starting, setStarting] = useState(false);
 
   const { toast } = useToast();
@@ -171,7 +163,7 @@ export function ScansView() {
     setStarting(true);
     setLiveStatus("starting");
     try {
-      const result = await startScan(target, userPrompt, mode);
+      const result = await startScan(target, userPrompt);
       if (result.status === "preflight_failed" || !result.scan_id) {
         setLiveStatus("error");
         toast({ title: "Cannot start scan", description: result.message || "Tools missing.", variant: "destructive" });
@@ -283,12 +275,17 @@ export function ScansView() {
   };
 
   const handleDeleteScan = async (scanId: string) => {
-    if (!confirm(`Delete scan ${scanId.slice(0, 16)}...? Findings will be preserved (with scan_tag snapshot).`)) return;
+    // Phase 2: cascade_findings=true is the default — findings + evidence
+    // are deleted with the scan. Matches user requirement: "if a target's
+    // report is deleted, its findings must also be deleted."
+    if (!confirm(
+      `Delete scan ${scanId.slice(0, 16)}...? This will ALSO delete all findings, evidence, and PoC results for this scan.`
+    )) return;
     try {
-      const result = await deleteScan(scanId);
+      const result = await deleteScan(scanId);  // cascade_findings=true (default)
       toast({
         title: "Scan deleted",
-        description: `Findings preserved: ${result.findings_preserved}, process_details deleted: ${result.process_details_deleted}`,
+        description: `Findings deleted: ${result.findings_count}, process_details deleted: ${result.process_details_deleted}`,
       });
       // Reload the list
       loadScans(scansPage, searchQuery);
@@ -332,45 +329,8 @@ export function ScansView() {
                 className="bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-50 placeholder-zinc-400 dark:placeholder-zinc-600 text-sm h-9"
               />
             </div>
-            {/* W19-FIX3 Phase E2: orchestration mode selector */}
-            <div>
-              <Label htmlFor="mode" className="text-xs text-zinc-600 dark:text-zinc-400">Orchestration mode</Label>
-              <Select
-                value={mode}
-                onValueChange={(v: "supervisor" | "single" | "deep" | "plan_execute") => setMode(v)}
-                disabled={starting}
-              >
-                <SelectTrigger id="mode" className="bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-50 text-sm h-9">
-                  <SelectValue placeholder="Select mode" />
-                </SelectTrigger>
-                <SelectContent className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-50">
-                  <SelectItem value="supervisor" className="text-zinc-900 dark:text-zinc-100 focus:bg-zinc-800">
-                    <div className="flex flex-col">
-                      <span className="font-medium">Supervisor (recommended)</span>
-                      <span className="text-xs text-zinc-500">Multi-agent kill-chain: recon → triage → penetration → privesc</span>
-                    </div>
-                  </SelectItem>
-                  <SelectItem value="single" className="text-zinc-900 dark:text-zinc-100 focus:bg-zinc-800">
-                    <div className="flex flex-col">
-                      <span className="font-medium">Single</span>
-                      <span className="text-xs text-zinc-500">1 agent + all 30+ tools, no specialist transfer</span>
-                    </div>
-                  </SelectItem>
-                  <SelectItem value="deep" className="text-zinc-900 dark:text-zinc-100 focus:bg-zinc-800">
-                    <div className="flex flex-col">
-                      <span className="font-medium">Deep</span>
-                      <span className="text-xs text-zinc-500">Parallel sub-agents (network range scans)</span>
-                    </div>
-                  </SelectItem>
-                  <SelectItem value="plan_execute" className="text-zinc-900 dark:text-zinc-100 focus:bg-zinc-800">
-                    <div className="flex flex-col">
-                      <span className="font-medium">Plan-Execute</span>
-                      <span className="text-xs text-zinc-500">Planner → executor → replanner (full kill-chain)</span>
-                    </div>
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+            {/* Phase 2: orchestration mode selector removed.
+                System uses a single ReAct agent for all scans. */}
             {!isLive ? (
               <Button onClick={handleStartScan} disabled={!target || starting} className="w-full bg-emerald-600 hover:bg-emerald-500 text-zinc-900 dark:text-zinc-50 h-9" size="sm">
                 {starting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Play className="w-4 h-4 mr-2" />}
@@ -489,7 +449,7 @@ function ScanListItem({ scan, isSelected, onSelect, onDelete }: {
         <button
           onClick={(e) => { e.stopPropagation(); onDelete(); }}
           className="text-zinc-700 hover:text-red-400 shrink-0"
-          title="Delete scan (findings preserved)"
+          title="Delete scan + findings (cascade)"
         >
           <Trash2 className="w-3 h-3" />
         </button>
@@ -826,16 +786,16 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
           </div>
           <div className="flex items-center gap-3">
             <Badge className={
-              scan?.status === "completed" ? "bg-emerald-700 text-zinc-900 dark:text-zinc-50" :
-              scan?.status === "running" ? "bg-blue-700 text-zinc-900 dark:text-zinc-50" :
-              scan?.status === "failed" ? "bg-red-700 text-zinc-900 dark:text-zinc-50" :
-              scan?.status === "aborted" ? "bg-amber-700 text-zinc-50 dark:text-zinc-50" :
-              "bg-zinc-700 text-zinc-50 dark:text-zinc-200"
+              scan?.status === "completed" ? "bg-emerald-700 text-white! dark:bg-emerald-900" :
+              scan?.status === "running" ? "bg-blue-700 text-white! dark:bg-blue-900" :
+              scan?.status === "failed" ? "bg-red-700 text-white! dark:bg-red-900" :
+              scan?.status === "aborted" ? "bg-amber-700 text-white! dark:bg-amber-900" :
+              "bg-zinc-700 text-white! dark:bg-zinc-800"
             }>
               {isLive ? "live" : scan?.status || "—"}
             </Badge>
             {scan?.findings_count !== null && scan?.findings_count !== undefined && scan.findings_count > 0 && (
-              <Badge className="bg-amber-700 text-zinc-900 dark:text-zinc-50">
+              <Badge className="bg-amber-700 text-white! dark:bg-amber-900">
                 {scan.findings_count} findings
               </Badge>
             )}

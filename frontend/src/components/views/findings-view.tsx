@@ -7,9 +7,19 @@ import { Badge } from "../ui/badge";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
-import { Loader2, Bug, Filter, ShieldAlert, Download, Globe, CheckCircle2, XCircle } from "lucide-react";
-import { getFindings, exportVulnerabilities, downloadTextFile } from "../../lib/api";
+import { Loader2, Bug, Filter, ShieldAlert, Download, Globe, CheckCircle2, XCircle, Trash2, AlertTriangle } from "lucide-react";
+import { getFindings, exportVulnerabilities, downloadTextFile, deleteFinding } from "../../lib/api";
 import { useToast } from "../../hooks/use-toast";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "../ui/alert-dialog";
 
 interface InternetVerification {
   confirmed: boolean;
@@ -42,11 +52,11 @@ interface Finding {
 }
 
 const SEVERITY_COLORS: Record<string, string> = {
-  critical: "bg-red-700 text-red-50",
-  high: "bg-orange-700 text-orange-50",
-  medium: "bg-amber-700 text-amber-50",
-  low: "bg-blue-700 text-blue-50",
-  info: "bg-zinc-700 text-zinc-900 dark:text-zinc-100",
+  critical: "bg-red-700 text-white!",
+  high: "bg-orange-700 text-white!",
+  medium: "bg-amber-700 text-white!",
+  low: "bg-blue-700 text-white!",
+  info: "bg-zinc-700 text-white!",
 };
 
 export function FindingsView() {
@@ -58,6 +68,12 @@ export function FindingsView() {
   const [severityFilter, setSeverityFilter] = useState<string>("all");
   const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
   const [exporting, setExporting] = useState(false);
+  // Phase 2: bulk-select findings for batch delete.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
   const { toast } = useToast();
 
   const loadFindings = async () => {
@@ -70,6 +86,8 @@ export function FindingsView() {
       const data = await getFindings(params);
       setFindings(data.findings || []);
       setTotal(data.total || 0);
+      // Reset bulk selection when findings list reloads
+      setSelectedIds(new Set());
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -81,6 +99,80 @@ export function FindingsView() {
 
   const handleFilterApply = () => {
     loadFindings();
+  };
+
+  // ── Phase 2: single-finding delete ──
+  // Mirrors CyberStrikeAI's DELETE /api/vulnerabilities/{id} — also cascades
+  // to vapt_evidence + vapt_poc_results via backend FK.
+  const handleDeleteFinding = async (findingId: string) => {
+    setDeletingId(findingId);
+    try {
+      const result = await deleteFinding(findingId);
+      toast({
+        title: "Finding deleted",
+        description: `"${result.snapshot.name}" removed (${result.evidence_deleted} evidence, ${result.poc_results_deleted} PoC).`,
+      });
+      // If the deleted finding was the selected one, clear selection
+      if (selectedFinding?.id === findingId) setSelectedFinding(null);
+      // Reload list
+      await loadFindings();
+    } catch (err: any) {
+      toast({ title: "Delete failed", description: err.message, variant: "destructive" });
+    } finally {
+      setDeletingId(null);
+      setConfirmDeleteId(null);
+    }
+  };
+
+  // ── Phase 2: bulk-delete multiple findings ──
+  const handleBulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+    setBulkDeleting(true);
+    let successCount = 0;
+    let failureCount = 0;
+    // Sequential delete — backend has no bulk endpoint yet. Could be
+    // parallelized with Promise.allSettled but sequential avoids overwhelming
+    // the DB with concurrent SAVEPOINT transactions.
+    for (const id of selectedIds) {
+      try {
+        await deleteFinding(id);
+        successCount++;
+      } catch {
+        failureCount++;
+      }
+    }
+    setBulkDeleting(false);
+    setConfirmBulkDelete(false);
+    if (successCount > 0) {
+      toast({
+        title: "Bulk delete complete",
+        description: `${successCount} finding(s) deleted${failureCount > 0 ? `, ${failureCount} failed` : ""}.`,
+      });
+    } else if (failureCount > 0) {
+      toast({
+        title: "Bulk delete failed",
+        description: `All ${failureCount} finding(s) failed to delete.`,
+        variant: "destructive",
+      });
+    }
+    await loadFindings();
+  };
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size === findings.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(findings.map((f) => f.id)));
+    }
   };
 
   // Phase F6/F7: Markdown export (CyberStrikeAI pattern — on-demand,
@@ -111,6 +203,7 @@ export function FindingsView() {
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
+      {/* Header + actions */}
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-50 flex items-center gap-2">
@@ -119,18 +212,37 @@ export function FindingsView() {
         </h2>
         <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
           All vulnerability findings across scans. {total} total.
+          {selectedIds.size > 0 && (
+            <span className="ml-2 text-amber-600 dark:text-amber-400 font-medium">
+              · {selectedIds.size} selected
+            </span>
+          )}
         </p>
         </div>
-        {/* Phase F7: Export Markdown button (CyberStrikeAI pattern — on-demand) */}
-        <Button
-          onClick={handleExportMarkdown}
-          disabled={exporting || total === 0}
-          variant="outline"
-          className="border-zinc-300 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
-        >
-          {exporting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Download className="w-4 h-4 mr-2" />}
-          Export Markdown
-        </Button>
+        <div className="flex items-center gap-2">
+          {/* Phase 2: Bulk delete button — appears only when rows are selected */}
+          {selectedIds.size > 0 && (
+            <Button
+              onClick={() => setConfirmBulkDelete(true)}
+              disabled={bulkDeleting}
+              variant="destructive"
+              className="bg-red-700 hover:bg-red-600"
+            >
+              {bulkDeleting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Trash2 className="w-4 h-4 mr-2" />}
+              Delete {selectedIds.size} selected
+            </Button>
+          )}
+          {/* Export Markdown button (CyberStrikeAI pattern — on-demand) */}
+          <Button
+            onClick={handleExportMarkdown}
+            disabled={exporting || total === 0}
+            variant="outline"
+            className="border-zinc-300 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+          >
+            {exporting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Download className="w-4 h-4 mr-2" />}
+            Export Markdown
+          </Button>
+        </div>
       </div>
 
       {/* Filters */}
@@ -203,6 +315,19 @@ export function FindingsView() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           {/* List */}
           <div className="lg:col-span-1 space-y-2">
+            {/* Select-all bar (only shown when findings exist) */}
+            {findings.length > 0 && (
+              <div className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400 px-2 pb-1 border-b border-zinc-200 dark:border-zinc-800">
+                <button
+                  onClick={toggleSelectAll}
+                  className="hover:text-zinc-700 dark:hover:text-zinc-200"
+                >
+                  {selectedIds.size === findings.length && findings.length > 0
+                    ? "Unselect all"
+                    : `Select all (${findings.length})`}
+                </button>
+              </div>
+            )}
             {findings.length === 0 ? (
               <Card className="bg-white dark:bg-zinc-900/40 border-zinc-200 dark:border-zinc-800">
                 <CardContent className="pt-6 text-center text-zinc-500">
@@ -210,49 +335,78 @@ export function FindingsView() {
                 </CardContent>
               </Card>
             ) : (
-              findings.map((f) => (
-                <Card
-                  key={f.id}
-                  className={`cursor-pointer hover:border-zinc-700 transition-colors ${
-                    selectedFinding?.id === f.id ? "border-emerald-600 bg-white dark:bg-zinc-900" : "bg-white dark:bg-zinc-900/40 border-zinc-200 dark:border-zinc-800"
-                  }`}
-                  onClick={() => setSelectedFinding(f)}
-                >
-                  <CardContent className="p-4 space-y-2">
-                    <div className="flex items-start justify-between gap-2">
-                      <h3 className="text-sm font-medium text-zinc-900 dark:text-zinc-100 leading-tight">{f.name}</h3>
-                      <Badge
-                        variant="secondary"
-                        className={`shrink-0 ${SEVERITY_COLORS[(f.severity || "info").toLowerCase()] || SEVERITY_COLORS.info}`}
-                      >
-                        {f.severity}
-                      </Badge>
-                    </div>
-                    <div className="text-xs text-zinc-500 font-mono truncate">
-                      {f.vuln_type} @ {f.location}
-                    </div>
-                    <div className="text-xs text-zinc-600 flex items-center gap-1 flex-wrap">
-                      <span>CVSS {f.cvss_score}</span>
-                      <span>·</span>
-                      <span className={f.verified ? "text-emerald-500" : "text-zinc-500"}>
-                        {f.verified ? "✓ verified" : "unverified"}
-                      </span>
-                      <span>·</span>
-                      <span>{f.poc_status}</span>
-                      {/* W19-FIX3 Phase E4: Internet-Verified badge in list item */}
-                      {f.internet_verified && (
-                        <>
-                          <span>·</span>
-                          <span className="text-emerald-500 flex items-center gap-1">
-                            <Globe className="w-3 h-3" />
-                            internet-checked
-                          </span>
-                        </>
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-              ))
+              findings.map((f) => {
+                const isSelected = selectedFinding?.id === f.id;
+                const isChecked = selectedIds.has(f.id);
+                return (
+                  <Card
+                    key={f.id}
+                    className={`cursor-pointer hover:border-zinc-700 transition-colors relative ${
+                      isSelected ? "border-emerald-600 bg-white dark:bg-zinc-900" : "bg-white dark:bg-zinc-900/40 border-zinc-200 dark:border-zinc-800"
+                    }`}
+                    onClick={() => setSelectedFinding(f)}
+                  >
+                    <CardContent className="p-4 space-y-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-start gap-2 flex-1 min-w-0">
+                          {/* Bulk-select checkbox — stops propagation so it doesn't open the detail */}
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={(e) => { e.stopPropagation(); toggleSelect(f.id); }}
+                            onClick={(e) => e.stopPropagation()}
+                            className="mt-1 shrink-0 cursor-pointer"
+                          />
+                          <h3 className="text-sm font-medium text-zinc-900 dark:text-zinc-100 leading-tight">{f.name}</h3>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <Badge
+                            variant="secondary"
+                            className={`${SEVERITY_COLORS[(f.severity || "info").toLowerCase()] || SEVERITY_COLORS.info}`}
+                          >
+                            {f.severity}
+                          </Badge>
+                          {/* Phase 2: per-finding delete button */}
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(f.id); }}
+                            disabled={deletingId === f.id}
+                            className="text-zinc-500 hover:text-red-500 dark:text-zinc-400 dark:hover:text-red-400 p-1 rounded transition-colors"
+                            title="Delete finding + evidence"
+                          >
+                            {deletingId === f.id ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Trash2 className="w-3 h-3" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="text-xs text-zinc-500 font-mono truncate">
+                        {f.vuln_type} @ {f.location}
+                      </div>
+                      <div className="text-xs text-zinc-600 flex items-center gap-1 flex-wrap">
+                        <span>CVSS {f.cvss_score}</span>
+                        <span>·</span>
+                        <span className={f.verified ? "text-emerald-500" : "text-zinc-500"}>
+                          {f.verified ? "✓ verified" : "unverified"}
+                        </span>
+                        <span>·</span>
+                        <span>{f.poc_status}</span>
+                        {/* W19-FIX3 Phase E4: Internet-Verified badge in list item */}
+                        {f.internet_verified && (
+                          <>
+                            <span>·</span>
+                            <span className="text-emerald-500 flex items-center gap-1">
+                              <Globe className="w-3 h-3" />
+                              internet-checked
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
+                );
+              })
             )}
           </div>
 
@@ -367,6 +521,63 @@ export function FindingsView() {
           </div>
         </div>
       )}
+
+      {/* ── Single-finding delete confirmation ── */}
+      <AlertDialog open={confirmDeleteId !== null} onOpenChange={(o) => !o && setConfirmDeleteId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-red-500" />
+              Delete this finding?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              The finding, its evidence chain, and all PoC results will be permanently
+              deleted. This cannot be undone. The custody chain (HMAC seals) will be
+              broken for any rows referencing this finding — run a custody-verify
+              afterwards to confirm integrity.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => confirmDeleteId && handleDeleteFinding(confirmDeleteId)}
+              className="bg-red-700 hover:bg-red-600 text-white"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* ── Bulk-delete confirmation ── */}
+      <AlertDialog open={confirmBulkDelete} onOpenChange={setConfirmBulkDelete}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-red-500" />
+              Delete {selectedIds.size} selected findings?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              All {selectedIds.size} findings will be permanently deleted, including
+              their evidence chains and PoC results. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleBulkDelete}
+              disabled={bulkDeleting}
+              className="bg-red-700 hover:bg-red-600 text-white"
+            >
+              {bulkDeleting ? (
+                <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Deleting...</>
+              ) : (
+                `Delete ${selectedIds.size} findings`
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

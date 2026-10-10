@@ -232,24 +232,22 @@ export async function getMe(): Promise<{ id: string; email: string; role: string
   return apiFetch("/api/auth/me");
 }
 
-/** POST /api/scans/start (or /api/scans/start-mode for non-default modes) — start a scan. */
 /**
- * Start a scan with optional orchestration mode.
+ * POST /api/scans/start — start a new scan.
  *
- * W19-FIX3 Phase E2: mode selector. Default is "supervisor" (kill-chain
- * specialist transfer). Other options:
- *   - "single"      → 1 ReAct agent + all tools, no transfer (eino_single)
- *   - "deep"        → parallel sub-agents (network range scans)
- *   - "plan_execute" → planner → executor → replanner (full kill-chain)
+ * Phase 2 simplification: VAPT-AI uses a single ReAct agent for all scans
+ * (the orchestrator supervisor / deep / plan_execute modes were collapsed
+ * to SINGLE in the Phase 2 overhaul — see app/orchestration/mode_selector.py).
+ * The `mode` parameter is no longer accepted; this function always hits
+ * the default `/api/scans/start` endpoint.
  *
- * If mode is "supervisor" (default), we hit the legacy /api/scans/start
- * endpoint (no mode param needed). For other modes, we hit /api/scans/start-mode
- * which accepts the mode field.
+ * If you need to re-introduce multi-agent modes later, restore the
+ * `mode: "supervisor" | "single" | "deep" | "plan_execute"` parameter
+ * and the conditional /api/scans/start-mode branch.
  */
 export async function startScan(
   target: string,
   userPrompt: string,
-  mode: "supervisor" | "single" | "deep" | "plan_execute" = "supervisor",
 ): Promise<{
   scan_id: string;
   target: string;
@@ -257,21 +255,6 @@ export async function startScan(
   status: string;
   message: string;
 }> {
-  // For non-default modes, use /api/scans/start-mode endpoint which accepts
-  // mode + scope_size + has_post_exploitation params.
-  if (mode !== "supervisor") {
-    return apiFetch("/api/scans/start-mode", {
-      method: "POST",
-      body: JSON.stringify({
-        target,
-        user_prompt: userPrompt,
-        mode,
-        scope_size: 1,
-        has_post_exploitation: false,
-      }),
-    });
-  }
-  // Default supervisor mode — legacy endpoint (no mode field needed).
   return apiFetch("/api/scans/start", {
     method: "POST",
     body: JSON.stringify({ target, user_prompt: userPrompt }),
@@ -810,16 +793,44 @@ export async function getProcessDetail(
   return apiFetch(`/api/scans/${scanId}/process-details/${detailId}`);
 }
 
-/** DELETE /api/scans/{scan_id} — hard delete scan (findings survive). */
+/** DELETE /api/scans/{scan_id} — hard delete scan + cascade findings (Phase 2). */
 export async function deleteScan(
-  scanId: string
+  scanId: string,
+  options?: { cascade_findings?: boolean }
 ): Promise<{
   scan_id: string;
   deleted: boolean;
-  findings_preserved: number;
+  cascade_findings: boolean;
+  findings_count: number;
+  findings_action: "deleted" | "preserved";
   process_details_deleted: number;
+  cleanup_steps: Array<[string, string]>;
 }> {
-  return apiFetch(`/api/scans/${scanId}`, { method: "DELETE" });
+  const qs = options?.cascade_findings === false ? "?cascade_findings=false" : "";
+  return apiFetch(`/api/scans/${scanId}${qs}`, { method: "DELETE" });
+}
+
+/** DELETE /api/findings/{finding_id} — hard delete finding + evidence + PoC. */
+export async function deleteFinding(
+  findingId: string
+): Promise<{
+  finding_id: string;
+  deleted: boolean;
+  evidence_deleted: number;
+  poc_results_deleted: number;
+  snapshot: {
+    id: string;
+    scan_id: string | null;
+    scan_tag: string | null;
+    name: string;
+    vuln_type: string;
+    severity: string;
+    location: string;
+    cvss_base_score: number | null;
+    verified: boolean;
+  };
+}> {
+  return apiFetch(`/api/findings/${findingId}`, { method: "DELETE" });
 }
 
 /**
@@ -840,6 +851,89 @@ export function downloadTextFile(filename: string, content: string, mimeType: st
   document.body.removeChild(a);
   // Revoke the URL after a short delay to ensure the download starts
   setTimeout(() => URL.revokeObjectURL(url), 100);
+}
+
+/**
+ * Download a binary file (PDF / SARIF JSON) from an authenticated endpoint.
+ *
+ * The backend endpoints `GET /api/orchestration/scans/{id}/report.pdf` and
+ * `GET /api/orchestration/scans/{id}/report.sarif` both require a Bearer
+ * token — but they return binary streams, not JSON. We can't use apiFetch
+ * (which assumes JSON). Instead, fetch with the Authorization header
+ * manually, read the response as a Blob, then trigger a browser download
+ * via URL.createObjectURL + a synthetic <a download> click.
+ *
+ * If the access token is expired (401), we try refreshAccessToken() once
+ * and retry — mirrors the apiFetch pattern.
+ */
+export async function downloadAuthenticatedBlob(
+  path: string,
+  fallbackFilename: string,
+): Promise<{ filename: string; bytes: number }> {
+  const buildHeaders = () => {
+    const headers: Record<string, string> = {};
+    const token = tokenStorage.getAccessToken();
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    return headers;
+  };
+
+  let res = await fetch(apiUrl(path), { headers: buildHeaders() });
+
+  // 401 → refresh + retry once
+  if (res.status === 401) {
+    try {
+      await refreshAccessToken();
+      res = await fetch(apiUrl(path), { headers: buildHeaders() });
+    } catch (refreshErr) {
+      tokenStorage.clearTokens();
+      throw new ApiError("Session expired. Please log in again.", 401);
+    }
+  }
+
+  if (!res.ok) {
+    const text = await res.text();
+    let detail: any;
+    try { detail = JSON.parse(text); } catch { detail = text; }
+    const message = (detail && (detail.detail || detail.message)) || `HTTP ${res.status}: ${res.statusText}`;
+    throw new ApiError(message, res.status, detail);
+  }
+
+  // Parse filename from Content-Disposition (fallback to provided name)
+  const cd = res.headers.get("Content-Disposition") || "";
+  const fnameMatch = cd.match(/filename="?([^";]+)"?/);
+  const filename = fnameMatch ? fnameMatch[1] : fallbackFilename;
+
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 200);
+
+  return { filename, bytes: blob.size };
+}
+
+/** GET /api/orchestration/scans/{scan_id}/report.pdf — download PDF report. */
+export async function downloadScanPdf(
+  scanId: string
+): Promise<{ filename: string; bytes: number }> {
+  return downloadAuthenticatedBlob(
+    `/api/orchestration/scans/${scanId}/report.pdf`,
+    `vapt-ai_${scanId}.pdf`,
+  );
+}
+
+/** GET /api/orchestration/scans/{scan_id}/report.sarif — download SARIF report. */
+export async function downloadScanSarif(
+  scanId: string
+): Promise<{ filename: string; bytes: number }> {
+  return downloadAuthenticatedBlob(
+    `/api/orchestration/scans/${scanId}/report.sarif`,
+    `vapt-ai_${scanId}.sarif.json`,
+  );
 }
 export async function getActiveScans(): Promise<{
   active_scans: Array<{

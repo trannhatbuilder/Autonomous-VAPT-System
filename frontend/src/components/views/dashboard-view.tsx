@@ -4,21 +4,23 @@ import { useEffect, useState } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { Loader2, Bug, Zap, RefreshCw } from "lucide-react";
-import { getFindings, getExecutions } from "../../lib/api";
+import { Loader2, Bug, Zap, RefreshCw, Radar } from "lucide-react";
+import { getFindings, getExecutions, getScanHistory } from "../../lib/api";
 
 export function DashboardView({ onNavigate }: { onNavigate: (view: string) => void }) {
   const [loading, setLoading] = useState(true);
   const [findingsCount, setFindingsCount] = useState(0);
   const [findingsBySeverity, setFindingsBySeverity] = useState<Record<string, number>>({});
   const [recentExecutions, setRecentExecutions] = useState<any[]>([]);
+  const [scansCount, setScansCount] = useState(0);
 
   const loadDashboard = async () => {
     setLoading(true);
     try {
-      const [findingsResp, execsResp] = await Promise.all([
+      const [findingsResp, execsResp, scansResp] = await Promise.all([
         getFindings({ limit: 500 }).catch(() => ({ findings: [], total: 0 })),
         getExecutions(undefined, 10).catch(() => ({ executions: [] })),
+        getScanHistory({ limit: 1 }).catch(() => ({ scans: [], total: 0 })),
       ]);
 
       const allFindings = (findingsResp.findings || []) as any[];
@@ -31,6 +33,7 @@ export function DashboardView({ onNavigate }: { onNavigate: (view: string) => vo
       setFindingsBySeverity(bySev);
 
       setRecentExecutions(execsResp.executions || []);
+      setScansCount(scansResp.total || 0);
     } finally {
       setLoading(false);
     }
@@ -63,7 +66,13 @@ export function DashboardView({ onNavigate }: { onNavigate: (view: string) => vo
       ) : (
         <>
           {/* Stat cards */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <StatCard
+              label="Total scans"
+              value={scansCount}
+              icon={<Radar className="w-5 h-5 text-emerald-500 dark:text-emerald-400" />}
+              onClick={() => onNavigate("scans")}
+            />
             <StatCard
               label="Total findings"
               value={findingsCount}

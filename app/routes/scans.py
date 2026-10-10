@@ -439,9 +439,33 @@ async def get_process_detail(
 @router.delete("/{scan_id}")
 async def delete_scan(
     scan_id: str,
+    cascade_findings: bool = Query(
+        True,
+        description=(
+            "If true (default), also hard-delete all findings + evidence + "
+            "PoC rows that belong to this scan. If false, findings survive "
+            "with scan_id SET NULL and scan_tag preserved (legacy Phase F1)."
+        ),
+    ),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
     """Hard delete a scan with explicit child-row cleanup + savepoint isolation.
+
+    ── Cascade behavior (Phase 2 — flexible) ──
+    By default (`cascade_findings=true`), this endpoint deletes:
+      - All Evidence rows for findings of this scan (HMAC custody chain orphan-safe)
+      - All PoCResult rows for findings of this scan
+      - All Finding rows of this scan
+      - All ProcessDetail / PentestFact / AuditLog / etc. rows
+      - The scan row itself
+    This matches the user requirement: "if a target's report is deleted, its
+    findings must also be deleted."
+
+    If `cascade_findings=false` is explicitly passed, falls back to the
+    legacy Phase F1 behavior:
+      - vapt_findings.scan_id  → SET NULL (findings SURVIVE w/ scan_tag)
+      - vapt_chat_messages.scan_id → SET NULL (chat history survives)
+      - Hard DELETE everything else.
 
     ── Why this is not just `session.delete(scan)` ──
     Many child tables FK to vapt_scans WITHOUT any `ondelete` clause
@@ -464,26 +488,13 @@ async def delete_scan(
     `InFailedSQLTransactionError: current transaction is aborted, commands
     ignored until end of transaction block`.
 
-    Symptom (the bug this fixes):
-        DELETE /api/scans/{id} returns 500 even though scan status is
-        already "aborted" and all visible data looks clean. Server log shows
-        `InFailedSQLTransactionError` cascading from a missing table or
-        missing column on a child-table DELETE.
-
     Fix:
         1. Pre-check `information_schema.tables` + `information_schema.columns`
-           to find which child tables ACTUALLY exist on this DB (skips
-           tables from newer migrations not yet applied).
+           to find which child tables ACTUALLY exist on this DB.
         2. Wrap each child-table DELETE in a SAVEPOINT
            (`session.begin_nested()`). If the DELETE fails, ROLLBACK TO
            SAVEPOINT — only that sub-transaction is undone, the main
            transaction stays clean.
-
-    Cascade behavior (Phase F1, preserved):
-        - vapt_findings.scan_id       → SET NULL (findings SURVIVE w/ scan_tag)
-        - vapt_chat_messages.scan_id  → SET NULL (chat history survives)
-        - vapt_process_details        → hard DELETE (scan-scoped timeline)
-        - All other child tables      → hard DELETE (scan-scoped artifacts)
     """
     scan = await session.get(Scan, scan_id)
     if scan is None:
@@ -537,29 +548,99 @@ async def delete_scan(
     # ── Cleanup actions (table_name, action_type) ──
     cleanup_steps: list[tuple[str, str]] = []
 
-    # 1. vapt_findings.scan_id → SET NULL (findings SURVIVE per Phase F1)
-    if "vapt_findings" in existing_child_tables or not existing_child_tables:
+    # ── STEP 0 (cascade_findings=true): hard-delete evidence + poc + findings ──
+    # This is the new Phase 2 default — when a scan is deleted, ALL its
+    # findings (and their evidence chain, PoC results) are deleted too.
+    # Mirrors the user requirement: "if a target's report is deleted, the
+    # findings must also be deleted."
+    #
+    # Order matters because of FK constraints:
+    #   vapt_evidence        → vapt_findings.id
+    #   vapt_poc_results     → vapt_findings.id
+    #   vapt_findings        → vapt_scans.id (SET NULL but we hard-delete first)
+    if cascade_findings:
+        # 0a. Snapshot scan_tag into findings BEFORE deleting them — useful
+        # for the audit log entry that records "what was deleted".
+        findings_deleted_count = 0
         try:
-            async with session.begin_nested():  # SAVEPOINT
-                await session.execute(
-                    text("UPDATE vapt_findings SET scan_id = NULL WHERE scan_id = :sid"),
-                    {"sid": scan_id},
-                )
-            cleanup_steps.append(("vapt_findings", "SET NULL"))
+            async with session.begin_nested():
+                # Count first for the response (separate savepoint)
+                cnt_stmt = select(func.count(Finding.id)).where(Finding.scan_id == scan_id)
+                findings_deleted_count = await session.scalar(cnt_stmt) or 0
         except Exception as e:
-            logger.warning("delete_scan: vapt_findings SET NULL failed (continuing): %s", e)
+            logger.warning("delete_scan: findings count pre-check failed: %s", e)
 
-    # 2. vapt_chat_messages.scan_id → SET NULL
-    if "vapt_chat_messages" in existing_child_tables or not existing_child_tables:
+        # 0b. Delete vapt_evidence rows belonging to this scan's findings
+        # (subquery: finding_id IN (SELECT id FROM vapt_findings WHERE scan_id=...))
         try:
-            async with session.begin_nested():  # SAVEPOINT
+            async with session.begin_nested():
                 await session.execute(
-                    text("UPDATE vapt_chat_messages SET scan_id = NULL WHERE scan_id = :sid"),
+                    text(
+                        "DELETE FROM vapt_evidence WHERE finding_id IN "
+                        "(SELECT id FROM vapt_findings WHERE scan_id = :sid)"
+                    ),
                     {"sid": scan_id},
                 )
-            cleanup_steps.append(("vapt_chat_messages", "SET NULL"))
+            cleanup_steps.append(("vapt_evidence", "DELETE (cascade)"))
         except Exception as e:
-            logger.warning("delete_scan: vapt_chat_messages SET NULL failed (continuing): %s", e)
+            logger.warning("delete_scan: vapt_evidence cascade DELETE failed: %s", e)
+            cleanup_steps.append(("vapt_evidence", f"FAILED: {type(e).__name__}"))
+
+        # 0c. Delete vapt_poc_results rows belonging to this scan's findings
+        try:
+            async with session.begin_nested():
+                await session.execute(
+                    text(
+                        "DELETE FROM vapt_poc_results WHERE finding_id IN "
+                        "(SELECT id FROM vapt_findings WHERE scan_id = :sid)"
+                    ),
+                    {"sid": scan_id},
+                )
+            cleanup_steps.append(("vapt_poc_results", "DELETE (cascade)"))
+        except Exception as e:
+            logger.warning("delete_scan: vapt_poc_results cascade DELETE failed: %s", e)
+            cleanup_steps.append(("vapt_poc_results", f"FAILED: {type(e).__name__}"))
+
+        # 0d. Finally delete the findings themselves
+        try:
+            async with session.begin_nested():
+                await session.execute(
+                    text("DELETE FROM vapt_findings WHERE scan_id = :sid"),
+                    {"sid": scan_id},
+                )
+            cleanup_steps.append(("vapt_findings", f"DELETE (cascade, {findings_deleted_count} rows)"))
+        except Exception as e:
+            logger.warning("delete_scan: vapt_findings cascade DELETE failed: %s", e)
+            cleanup_steps.append(("vapt_findings", f"FAILED: {type(e).__name__}"))
+    else:
+        # Legacy Phase F1 behavior — preserve findings (SET NULL scan_id)
+        findings_deleted_count = 0
+
+        # 1. vapt_findings.scan_id → SET NULL (findings SURVIVE per Phase F1)
+        if "vapt_findings" in existing_child_tables or not existing_child_tables:
+            try:
+                async with session.begin_nested():  # SAVEPOINT
+                    await session.execute(
+                        text("UPDATE vapt_findings SET scan_id = NULL WHERE scan_id = :sid"),
+                        {"sid": scan_id},
+                    )
+                cleanup_steps.append(("vapt_findings", "SET NULL (preserved)"))
+            except Exception as e:
+                logger.warning("delete_scan: vapt_findings SET NULL failed (continuing): %s", e)
+                cleanup_steps.append(("vapt_findings", f"FAILED: {type(e).__name__}"))
+
+        # 2. vapt_chat_messages.scan_id → SET NULL
+        if "vapt_chat_messages" in existing_child_tables or not existing_child_tables:
+            try:
+                async with session.begin_nested():  # SAVEPOINT
+                    await session.execute(
+                        text("UPDATE vapt_chat_messages SET scan_id = NULL WHERE scan_id = :sid"),
+                        {"sid": scan_id},
+                    )
+                cleanup_steps.append(("vapt_chat_messages", "SET NULL"))
+            except Exception as e:
+                logger.warning("delete_scan: vapt_chat_messages SET NULL failed (continuing): %s", e)
+                cleanup_steps.append(("vapt_chat_messages", f"FAILED: {type(e).__name__}"))
 
     # 3. Hard DELETE tables (scan-scoped artifacts with no value after scan deletion)
     hard_delete_tables = [
@@ -626,15 +707,20 @@ async def delete_scan(
         ) from e
 
     logger.info(
-        "Scan deleted | scan_id=%s | findings_preserved=%d | process_details_deleted=%d | cleanup=%s",
-        scan_id, findings_count, process_details_count,
+        "Scan deleted | scan_id=%s | cascade_findings=%s | findings_count=%d | "
+        "process_details_deleted=%d | cleanup=%s",
+        scan_id, cascade_findings, findings_count, process_details_count,
         "; ".join(f"{t}:{a}" for t, a in cleanup_steps),
     )
 
     return {
         "scan_id": scan_id,
         "deleted": True,
-        "findings_preserved": findings_count,  # these survive (FK SET NULL)
-        "process_details_deleted": process_details_count,  # hard DELETE'd
+        "cascade_findings": cascade_findings,
+        # When cascade_findings=true: these findings were hard-deleted.
+        # When cascade_findings=false: these findings were preserved (SET NULL).
+        "findings_count": findings_count,
+        "findings_action": "deleted" if cascade_findings else "preserved",
+        "process_details_deleted": process_details_count,
         "cleanup_steps": cleanup_steps,  # per-table outcome log
     }

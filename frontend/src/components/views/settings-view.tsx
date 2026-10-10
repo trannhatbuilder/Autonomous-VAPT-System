@@ -9,7 +9,8 @@ import { Alert, AlertDescription } from "../ui/alert";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { Slider } from "../ui/slider";
 import { Switch } from "../ui/switch";
-import { Loader2, Save, Plug, CheckCircle2, AlertCircle, Plus, Trash2, Star, Edit3 } from "lucide-react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
+import { Loader2, Save, Plug, CheckCircle2, AlertCircle, Plus, Trash2, Star, Edit3, ShieldAlert, ServerCog, Activity } from "lucide-react";
 import {
   listChannels,
   createChannel,
@@ -164,129 +165,345 @@ export function SettingsView() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">AI Channels</h2>
-          <p className="text-xs text-zinc-500 mt-1">
-            Multi-channel config (CyberStrikeAI pattern) — stored in <code className="text-zinc-600 dark:text-zinc-400">config.yaml</code>
-          </p>
-        </div>
-        <Button
-          size="sm"
-          onClick={() => {
-            setEditingChannel(null);
-            setMode("create");
-          }}
-          className="bg-emerald-700 hover:bg-emerald-600 text-white"
-        >
-          <Plus className="w-4 h-4 mr-1" />
-          New channel
-        </Button>
+      <div>
+        <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Settings</h2>
+        <p className="text-xs text-zinc-500 mt-1">
+          Manage AI channels, system behaviour, and security posture.
+        </p>
       </div>
 
-      {/* Channels list — Phase C: pass allChannels to editor so it can render failover picker */}
-      {channels.length === 0 ? (
-        <Card className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800">
-          <CardContent className="py-12 text-center">
-            <AlertCircle className="w-8 h-8 text-amber-500 dark:text-amber-400 mx-auto mb-3" />
-            <p className="text-sm text-zinc-700 dark:text-zinc-300 mb-1">No channels configured</p>
-            <p className="text-xs text-zinc-500">
-              Click <strong>New channel</strong> to add OpenAI, Anthropic, DeepSeek, GLM, etc.
-            </p>
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="space-y-2">
-          {channels.map((ch) => {
-            const isDefault = ch.id === defaultChannelId;
-            return (
-              <Card key={ch.id} className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 hover:border-zinc-700">
-                <CardContent className="p-4">
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="font-medium text-zinc-900 dark:text-zinc-100">{ch.name || ch.id}</span>
-                        {isDefault && (
-                          <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-300 border border-emerald-800">
-                            <Star className="w-2.5 h-2.5" />
-                            Default
-                          </span>
-                        )}
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400">
-                          {ch.provider === "claude" ? "Claude" : "OpenAI-compat"}
-                        </span>
-                      </div>
-                      <div className="text-xs text-zinc-500 font-mono truncate">
-                        {ch.model} · {ch.base_url}
-                      </div>
-                      <div className="text-[10px] text-zinc-600 mt-1">
-                        key: <span className="font-mono">{ch.api_key}</span>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-1 ml-3">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => handleTestSaved(ch.id)}
-                        title="Test connection"
-                        className="text-zinc-700 dark:text-zinc-300 hover:text-zinc-100 h-8 px-2"
-                      >
-                        <Plug className="w-3.5 h-3.5 mr-1" />
-                        Test
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => {
-                          setEditingChannel(ch);
-                          setMode("edit");
-                        }}
-                        title="Edit"
-                        className="text-zinc-700 dark:text-zinc-300 hover:text-zinc-100 h-8 px-2"
-                      >
-                        <Edit3 className="w-3.5 h-3.5 mr-1" />
-                        Edit
-                      </Button>
-                      {!isDefault && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => handleSetDefault(ch.id)}
-                          title="Set as default"
-                          className="text-zinc-700 dark:text-zinc-300 hover:text-zinc-100 h-8 px-2"
-                        >
-                          <Star className="w-3.5 h-3.5" />
-                        </Button>
-                      )}
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => handleDelete(ch.id)}
-                        title="Delete"
-                        className="text-red-500 dark:text-red-400 hover:text-red-300 h-8 px-2"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </Button>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            );
-          })}
-        </div>
-      )}
+      {/* Tabbed layout — Phase 2 redesign */}
+      <Tabs defaultValue="channels" className="space-y-4">
+        <TabsList className="bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800">
+          <TabsTrigger value="channels" className="data-[state=active]:bg-white dark:data-[state=active]:bg-zinc-800">
+            <Plug className="w-3.5 h-3.5 mr-1.5" />
+            AI Channels
+          </TabsTrigger>
+          <TabsTrigger value="system" className="data-[state=active]:bg-white dark:data-[state=active]:bg-zinc-800">
+            <ServerCog className="w-3.5 h-3.5 mr-1.5" />
+            System
+          </TabsTrigger>
+          <TabsTrigger value="security" className="data-[state=active]:bg-white dark:data-[state=active]:bg-zinc-800">
+            <ShieldAlert className="w-3.5 h-3.5 mr-1.5" />
+            Security
+          </TabsTrigger>
+        </TabsList>
 
-      {/* Note */}
-      <Alert className="bg-zinc-900/50 border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400">
-        <AlertDescription className="text-xs">
-          <strong className="text-zinc-700 dark:text-zinc-300">Phase B migration:</strong> The old DB-stored per-user LLM settings
-          ({"<Settings → API Key>"} in Phase A) have been replaced by YAML-based multi-channel config.
-          New conversations use the default channel. Edit <code className="text-zinc-700 dark:text-zinc-300">config.yaml</code> at the project root
-          to view all channels (including those without api_key).
-        </AlertDescription>
-      </Alert>
+        {/* ── Tab 1: AI Channels ── */}
+        <TabsContent value="channels" className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">AI Channels</h3>
+              <p className="text-xs text-zinc-500 mt-0.5">
+                Multi-channel config (CyberStrikeAI pattern) — stored in <code className="text-zinc-600 dark:text-zinc-400">config.yaml</code>
+              </p>
+            </div>
+            <Button
+              size="sm"
+              onClick={() => {
+                setEditingChannel(null);
+                setMode("create");
+              }}
+              className="bg-emerald-700 hover:bg-emerald-600 text-white"
+            >
+              <Plus className="w-4 h-4 mr-1" />
+              New channel
+            </Button>
+          </div>
+
+          {/* Channels list — Phase C: pass allChannels to editor so it can render failover picker */}
+          {channels.length === 0 ? (
+            <Card className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800">
+              <CardContent className="py-12 text-center">
+                <AlertCircle className="w-8 h-8 text-amber-500 dark:text-amber-400 mx-auto mb-3" />
+                <p className="text-sm text-zinc-700 dark:text-zinc-300 mb-1">No channels configured</p>
+                <p className="text-xs text-zinc-500">
+                  Click <strong>New channel</strong> to add OpenAI, Anthropic, DeepSeek, GLM, etc.
+                </p>
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="space-y-2">
+              {channels.map((ch) => {
+                const isDefault = ch.id === defaultChannelId;
+                return (
+                  <Card key={ch.id} className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 hover:border-zinc-700">
+                    <CardContent className="p-4">
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="font-medium text-zinc-900 dark:text-zinc-100">{ch.name || ch.id}</span>
+                            {isDefault && (
+                              <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-300 border border-emerald-800">
+                                <Star className="w-2.5 h-2.5" />
+                                Default
+                              </span>
+                            )}
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400">
+                              {ch.provider === "claude" ? "Claude" : "OpenAI-compat"}
+                            </span>
+                          </div>
+                          <div className="text-xs text-zinc-500 font-mono truncate">
+                            {ch.model} · {ch.base_url}
+                          </div>
+                          <div className="text-[10px] text-zinc-600 mt-1">
+                            key: <span className="font-mono">{ch.api_key}</span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1 ml-3">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => handleTestSaved(ch.id)}
+                            title="Test connection"
+                            className="text-zinc-700 dark:text-zinc-300 hover:text-zinc-100 h-8 px-2"
+                          >
+                            <Plug className="w-3.5 h-3.5 mr-1" />
+                            Test
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => {
+                              setEditingChannel(ch);
+                              setMode("edit");
+                            }}
+                            title="Edit"
+                            className="text-zinc-700 dark:text-zinc-300 hover:text-zinc-100 h-8 px-2"
+                          >
+                            <Edit3 className="w-3.5 h-3.5 mr-1" />
+                            Edit
+                          </Button>
+                          {!isDefault && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => handleSetDefault(ch.id)}
+                              title="Set as default"
+                              className="text-zinc-700 dark:text-zinc-300 hover:text-zinc-100 h-8 px-2"
+                            >
+                              <Star className="w-3.5 h-3.5" />
+                            </Button>
+                          )}
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => handleDelete(ch.id)}
+                            title="Delete"
+                            className="text-red-500 dark:text-red-400 hover:text-red-300 h-8 px-2"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </Button>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Note */}
+          <Alert className="bg-zinc-900/50 border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400">
+            <AlertDescription className="text-xs">
+              <strong className="text-zinc-700 dark:text-zinc-300">Phase B migration:</strong> The old DB-stored per-user LLM settings
+              ({"<Settings → API Key>"} in Phase A) have been replaced by YAML-based multi-channel config.
+              New conversations use the default channel. Edit <code className="text-zinc-700 dark:text-zinc-300">config.yaml</code> at the project root
+              to view all channels (including those without api_key).
+            </AlertDescription>
+          </Alert>
+        </TabsContent>
+
+        {/* ── Tab 2: System ── */}
+        <TabsContent value="system" className="space-y-4">
+          <Card className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800">
+            <CardHeader>
+              <CardTitle className="text-zinc-900 dark:text-zinc-50 text-base flex items-center gap-2">
+                <ServerCog className="w-4 h-4 text-zinc-500" />
+                Pipeline Behaviour
+              </CardTitle>
+              <CardDescription className="text-zinc-600 dark:text-zinc-400">
+                Read-only view of the current agent + scan pipeline configuration.
+                Edit <code className="text-zinc-700 dark:text-zinc-300">.env</code> at the project root and restart the service to change.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              <SystemStatusRow
+                label="Orchestration mode"
+                value="Single ReAct agent (Phase 2)"
+                badge="default"
+              />
+              <SystemStatusRow
+                label="Max agent iterations"
+                value="100 / scan"
+              />
+              <SystemStatusRow
+                label="Token hard limit"
+                value="10,000,000 / scan"
+              />
+              <SystemStatusRow
+                label="Tool execution timeout"
+                value="300s (nmap) · 60s (default)"
+              />
+              <SystemStatusRow
+                label="Concurrent tool executions"
+                value="16 (semaphore cap)"
+              />
+              <SystemStatusRow
+                label="Default LLM temperature"
+                value="0.7"
+              />
+              <SystemStatusRow
+                label="Default max_completion_tokens"
+                value="4096"
+              />
+              <SystemStatusRow
+                label="Evidence output cap"
+                value="50 KB (spill to disk if exceeded)"
+              />
+              <SystemStatusRow
+                label="PII redaction patterns"
+                value="14 (PEM keys · JWTs · AWS/GitHub/Slack/Stripe tokens · IPs · MACs)"
+              />
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* ── Tab 3: Security ── */}
+        <TabsContent value="security" className="space-y-4">
+          <Card className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800">
+            <CardHeader>
+              <CardTitle className="text-zinc-900 dark:text-zinc-50 text-base flex items-center gap-2">
+                <ShieldAlert className="w-4 h-4 text-amber-500 dark:text-amber-400" />
+                Safety Posture
+              </CardTitle>
+              <CardDescription className="text-zinc-600 dark:text-zinc-400">
+                These toggles control whether destructive operations are gated
+                behind human approval. <strong className="text-amber-600 dark:text-amber-400">Both are disabled by default</strong> —
+                enable for any real engagement.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <SecurityToggleRow
+                label="HITL (Human-In-The-Loop) approval"
+                description="Pause agent before destructive tool calls (sqlmap --os-shell, metasploit exploit, hydra, mimikatz)."
+                envVar="VAPT_AI_HITL_DISABLED"
+                currentState="disabled (default)"
+                recommendedState="enabled for production"
+              />
+              <SecurityToggleRow
+                label="Scope Guard enforcement"
+                description="Block tool calls targeting hosts outside the declared consent scope (SSRF / out-of-scope protection)."
+                envVar="VAPT_AI_SCOPE_GUARD_DISABLED"
+                currentState="disabled (default)"
+                recommendedState="enabled for production"
+              />
+              <SecurityToggleRow
+                label="Audit log retention"
+                description="HMAC-sealed audit trail of every management action. 7-year retention per compliance baseline."
+                envVar="AUDIT_LOG_RETENTION_DAYS"
+                currentState="2555 days (7 years)"
+                recommendedState="keep default"
+              />
+              <SecurityToggleRow
+                label="Evidence custody chain"
+                description="HMAC-SHA256 linked custody seals on every Evidence row — tamper-evident chain."
+                envVar="(always on)"
+                currentState="enabled"
+                recommendedState="keep default"
+              />
+            </CardContent>
+          </Card>
+
+          <Card className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800">
+            <CardHeader>
+              <CardTitle className="text-zinc-900 dark:text-zinc-50 text-base flex items-center gap-2">
+                <Activity className="w-4 h-4 text-emerald-500 dark:text-emerald-400" />
+                Audit Trail Status
+              </CardTitle>
+              <CardDescription className="text-zinc-600 dark:text-zinc-400">
+                Quick stats on the audit log. Visit the API endpoint to drill down.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+              <AuditStatCard label="Total entries" value="—" hint="GET /api/audit/entries" />
+              <AuditStatCard label="HMAC verified" value="—" hint="GET /api/audit/verify-chain" />
+              <AuditStatCard label="Tamper alerts" value="0" hint="integrity OK" />
+              <AuditStatCard label="Earliest entry" value="—" hint="last 7 years" />
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
+
+// ── Helper components for the System / Security tabs ──
+
+function SystemStatusRow({ label, value, badge }: { label: string; value: string; badge?: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-1.5 border-b border-zinc-100 dark:border-zinc-800 last:border-0">
+      <span className="text-zinc-600 dark:text-zinc-400">{label}</span>
+      <div className="flex items-center gap-2">
+        {badge && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400">
+            {badge}
+          </span>
+        )}
+        <span className="text-zinc-900 dark:text-zinc-100 font-mono text-xs">{value}</span>
+      </div>
+    </div>
+  );
+}
+
+function SecurityToggleRow({
+  label,
+  description,
+  envVar,
+  currentState,
+  recommendedState,
+}: {
+  label: string;
+  description: string;
+  envVar: string;
+  currentState: string;
+  recommendedState: string;
+}) {
+  const isCritical = currentState.startsWith("disabled");
+  return (
+    <div className={`border rounded p-3 ${
+      isCritical
+        ? "bg-amber-50 dark:bg-amber-950/20 border-amber-300 dark:border-amber-900"
+        : "bg-zinc-50 dark:bg-zinc-950/40 border-zinc-200 dark:border-zinc-800"
+    }`}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{label}</div>
+          <div className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">{description}</div>
+        </div>
+        <span className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${
+          isCritical
+            ? "bg-amber-200 dark:bg-amber-900 text-amber-800 dark:text-amber-100"
+            : "bg-emerald-100 dark:bg-emerald-900 text-emerald-700 dark:text-emerald-200"
+        }`}>
+          {currentState}
+        </span>
+      </div>
+      <div className="text-[10px] text-zinc-500 dark:text-zinc-500 font-mono mt-2">
+        env: {envVar} · recommended: {recommendedState}
+      </div>
+    </div>
+  );
+}
+
+function AuditStatCard({ label, value, hint }: { label: string; value: string; hint: string }) {
+  return (
+    <div className="border border-zinc-200 dark:border-zinc-800 rounded p-2 bg-zinc-50 dark:bg-zinc-950/40">
+      <div className="text-[10px] uppercase tracking-wider text-zinc-500 dark:text-zinc-400">{label}</div>
+      <div className="text-lg font-semibold text-zinc-900 dark:text-zinc-100 mt-1 tabular-nums">{value}</div>
+      <div className="text-[10px] text-zinc-500 dark:text-zinc-500 font-mono mt-0.5 truncate">{hint}</div>
     </div>
   );
 }

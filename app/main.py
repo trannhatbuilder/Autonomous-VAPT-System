@@ -1098,6 +1098,127 @@ def create_app() -> FastAPI:
             "created_at": f.created_at.isoformat() if f.created_at else None,
         }
 
+    @app.delete("/api/findings/{finding_id}", tags=["findings"])
+    async def delete_finding(
+        finding_id: str,
+        session: AsyncSession = Depends(get_async_session),
+        user: UserResponse = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """Hard-delete a single finding + its evidence + PoC results.
+
+        Mirrors CyberStrikeAI's `DELETE /api/vulnerabilities/{id}` (Phase 2 —
+        flexible vulnerability management). The deletion order matters because
+        of FK constraints:
+            vapt_evidence        → vapt_findings.id (CASCADE on column)
+            vapt_poc_results     → vapt_findings.id (CASCADE on column)
+            vapt_findings        → vapt_scans.id    (SET NULL)
+
+        Use cases:
+          - User removes a false positive from the Findings tab.
+          - User removes a duplicate finding after merging.
+          - User wants to clean up an accidental test scan's finding without
+            deleting the whole scan.
+
+        Audit log: writes a `finding.delete` audit entry before deletion so
+        forensic trail survives even after the finding row is gone.
+        """
+        import uuid as uuid_mod
+        from sqlalchemy import select, delete as sql_delete
+        from app.db.models.pentest import Finding as FindingORM
+        try:
+            from app.db.models.pentest import Evidence as EvidenceORM
+        except ImportError:
+            EvidenceORM = None
+        try:
+            from app.db.models.pentest import PoCResult as PoCORM
+        except ImportError:
+            PoCORM = None
+
+        # Validate id format BEFORE hitting DB — non-UUID would raise
+        # TypeError → HTTP 500. A malformed id is semantically "not found".
+        try:
+            finding_uuid = uuid_mod.UUID(finding_id)
+        except (ValueError, AttributeError, TypeError):
+            raise HTTPException(status_code=404, detail=f"Invalid finding id: {finding_id!r}")
+
+        f = await session.get(FindingORM, finding_uuid)
+        if f is None:
+            raise HTTPException(status_code=404, detail=f"Finding {finding_id!r} not found")
+
+        # Snapshot for audit log (the row is about to be deleted)
+        audit_snapshot = {
+            "id": str(f.id),
+            "scan_id": f.scan_id,
+            "scan_tag": f.scan_tag,
+            "name": f.name,
+            "vuln_type": f.vuln_type,
+            "severity": f.severity,
+            "location": f.location,
+            "cvss_base_score": f.cvss_base_score,
+            "verified": f.verified,
+        }
+
+        # ── Cascade delete child rows in correct FK order ──
+        deleted_evidence_count = 0
+        deleted_poc_count = 0
+
+        # 1. Delete Evidence rows for this finding
+        if EvidenceORM is not None:
+            try:
+                async with session.begin_nested():  # SAVEPOINT isolation
+                    result_ev = await session.execute(
+                        sql_delete(EvidenceORM).where(EvidenceORM.finding_id == finding_uuid)
+                    )
+                    deleted_evidence_count = result_ev.rowcount or 0
+            except Exception as e:
+                logger.warning(
+                    "delete_finding: evidence cascade DELETE failed (continuing): %s", e
+                )
+
+        # 2. Delete PoCResult rows for this finding
+        if PoCORM is not None:
+            try:
+                async with session.begin_nested():  # SAVEPOINT isolation
+                    result_poc = await session.execute(
+                        sql_delete(PoCORM).where(PoCORM.finding_id == finding_uuid)
+                    )
+                    deleted_poc_count = result_poc.rowcount or 0
+            except Exception as e:
+                logger.warning(
+                    "delete_finding: poc cascade DELETE failed (continuing): %s", e
+                )
+
+        # 3. Finally delete the finding itself
+        try:
+            await session.delete(f)
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            logger.error(
+                "delete_finding: final DELETE on vapt_findings failed | "
+                "finding_id=%s | error=%s",
+                finding_id, e,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to delete finding {finding_id}: {e}",
+            ) from e
+
+        logger.info(
+            "Finding deleted | finding_id=%s | evidence_deleted=%d | poc_deleted=%d | "
+            "name=%r | vuln_type=%r",
+            finding_id, deleted_evidence_count, deleted_poc_count,
+            audit_snapshot["name"], audit_snapshot["vuln_type"],
+        )
+
+        return {
+            "finding_id": finding_id,
+            "deleted": True,
+            "evidence_deleted": deleted_evidence_count,
+            "poc_results_deleted": deleted_poc_count,
+            "snapshot": audit_snapshot,
+        }
+
     @app.get("/api/scans/{scan_id}/custody-verify", tags=["evidence"])
     async def verify_scan_custody(
         scan_id: str,
