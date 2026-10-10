@@ -107,6 +107,7 @@ VAPT-AI.zip
 node_modules/
 frontend/.next/
 frontend/node_modules/
+*.tsbuildinfo
 reports/
 
 config.yaml

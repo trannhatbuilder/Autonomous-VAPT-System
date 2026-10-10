@@ -9,17 +9,10 @@ The Celery app is defined in scan_tasks.py. This __init__.py re-exports it
 as `celery_app` (canonical VAPT-AI name) so both `celery -A workers worker`
 and `celery -A workers.scan_tasks worker` work.
 
-W2-D fix: previously __init__.py imported EVVO legacy utilities
-(RedisRateLimiter, HealthChecker, etc.) which have complex dependency
-chains. If any of them failed to import (missing dep, circular import),
-Celery could not start. Now we export ONLY celery_app — utilities can
-be imported directly from their submodules when needed.
-
-To import EVVO legacy utilities, use:
-    from workers.redis_rate_limiter import RedisRateLimiter
-    from workers.health import HealthChecker
-    from workers.scan_tasks import run_scan_task
-(Not: from workers import RedisRateLimiter — that no longer works)
+W2-D fix: __init__.py must not import heavyweight/optional submodules — if
+any failed to import (missing dep, circular import) Celery could not start.
+It exports ONLY celery_app. Import tasks/utilities from their submodules
+directly when needed, e.g. `from workers.scan_tasks import run_vapt_scan_task`.
 """
 
 # Import the Celery app from scan_tasks.py + re-export under canonical name

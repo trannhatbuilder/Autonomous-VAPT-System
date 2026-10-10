@@ -1,11 +1,11 @@
 """
 VAPT-AI LLM Client shim — Phase B/C.
 
-Backward-compatible shim for the existing agent loop
-(app/agents/react_agent.py, app/agents/base.py, app/orchestration/langgraph_supervisor.py).
-
-Loads the **default channel** from `config.yaml` (via app.core.channels)
-and delegates to app.core.llm_client.chat_completion (native httpx).
+Backward-compatible adapter for the agent loop (app/agents/react_agent.py).
+The native httpx implementation lives in app.core.llm_client; this module
+loads the **default channel** from `config.yaml` (via app.core.channels),
+converts it to the legacy `llm_config` dict shape, and delegates
+chat_completion to app.core.llm_client.chat_completion (native httpx).
 
 Existing call sites stay unchanged:
     llm_config = await get_user_llm_config(session, str(user_id))
@@ -64,40 +64,6 @@ async def get_user_llm_config(session: Any, user_id: str) -> dict[str, Any]:
     return _channel_to_config(channel)
 
 
-def get_channel_config(channel_id: str | None = None) -> dict[str, Any]:
-    """Synchronous helper — load a specific channel by id (or default).
-
-    Useful for non-async contexts (e.g. module-level setup).
-    """
-    from app.core.channels import get_channel, get_default_channel
-    if channel_id:
-        ch = get_channel(channel_id)
-        if ch is None:
-            raise ValueError(f"Channel {channel_id!r} not found in config.yaml")
-        return _channel_to_config(ch)
-    ch = get_default_channel()
-    if ch is None:
-        raise ValueError("No LLM channel configured. Edit config.yaml.")
-    return _channel_to_config(ch)
-
-
-def build_chat_params(
-    llm_config: dict[str, Any],
-    messages: list[dict[str, Any]],
-    tools: list[dict[str, Any]] | None = None,
-    temperature: float | None = None,
-) -> dict[str, Any]:
-    """Build a params dict for the native client.
-
-    Renamed from the deprecated `build_litellm_params` (no litellm anymore).
-    """
-    return {
-        "messages": messages,
-        "tools": tools,
-        "temperature": temperature if temperature is not None else llm_config.get("temperature", 0.7),
-    }
-
-
 async def chat_completion(
     llm_config: dict[str, Any],
     messages: list[dict[str, Any]],
@@ -144,8 +110,6 @@ async def chat_completion(
 
 __all__ = [
     "get_user_llm_config",
-    "get_channel_config",
-    "build_chat_params",
     "chat_completion",
     "LLMError",
 ]

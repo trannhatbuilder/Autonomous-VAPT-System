@@ -1,16 +1,20 @@
 """
 VAPT-AI channels router (Phase B — CyberStrikeAI pattern).
 
-Endpoints:
+Endpoints (all require auth except /diag):
   GET    /api/channels                  — list all channels (api_key masked)
+  GET    /api/channels/default          — get current default channel id
+  POST   /api/channels/default/{channel_id} — set default channel
+  GET    /api/channels/diag             — connectivity check (NO auth, no LLM call)
   GET    /api/channels/{channel_id}     — get one channel (api_key masked)
   POST   /api/channels                  — create new channel (full payload)
   PUT    /api/channels/{channel_id}     — update existing channel
   DELETE /api/channels/{channel_id}     — delete channel
-  POST   /api/channels/{channel_id}/test — test connection (sends 'Hi' ping)
-  POST   /api/channels/test             — test inline (no save, no auth) — for curl
-  POST   /api/channels/default/{channel_id} — set default channel
-  GET    /api/channels/default           — get current default channel id
+  POST   /api/channels/{channel_id}/test — test a saved channel (sends 'Hi' ping)
+  POST   /api/channels/test             — test inline config without saving (UI 'Test Connection')
+
+Route order matters: /default and /diag are registered BEFORE /{channel_id}
+so they are not captured as a channel id.
 """
 from __future__ import annotations
 

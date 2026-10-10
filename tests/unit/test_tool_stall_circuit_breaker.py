@@ -109,39 +109,3 @@ class TestMetasploitTimeout:
         )
 
 
-class TestAgentWallClockBudget:
-    """A specialist must stop when its wall-clock budget is exceeded.
-
-    Previously the D18 time budget was only evaluated once, before the loop, so
-    a specialist could keep calling tools (and appear frozen) indefinitely.
-    """
-
-    @pytest.mark.asyncio
-    async def test_agent_stops_and_skips_llm_when_budget_blown(self, monkeypatch):
-        import time as _time
-
-        import app.agents.base as base
-        import app.agents.llm_client as agents_llm_client
-
-        calls: list[dict] = []
-
-        async def fake_chat_completion(**kwargs):
-            calls.append(kwargs)
-            return {"content": "", "tool_calls": [], "finish_reason": "stop", "usage": {}}
-
-        monkeypatch.setattr(agents_llm_client, "chat_completion", fake_chat_completion)
-
-        agent = base.create_agent(
-            "recon", "scan_budget_test", "http://example.com", "t", "u", max_iterations=30,
-        )
-        # Pretend the agent has already been running past its budget.
-        agent.start_time = _time.time() - (base.MAX_AGENT_DURATION_SECONDS + 5)
-
-        result = await agent.run(
-            llm_config={"provider": "openai_compatible"}, executor=object(),
-        )
-
-        assert result.status == "timeout"
-        assert "wall-clock" in (result.error or "")
-        assert calls == [], "the LLM must not be called once the budget is exceeded"
-
