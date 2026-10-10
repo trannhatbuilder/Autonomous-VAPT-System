@@ -82,7 +82,7 @@ output:
   max_bytes: 50000
   format: text
   parse_hints:
-    subdomain: '^([a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})$'
+    subdomain: '^([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})$'
 
 timeout: 300
 allowed_exit_codes: [0]

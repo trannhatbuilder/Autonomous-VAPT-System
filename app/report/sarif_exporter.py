@@ -469,6 +469,8 @@ def generate_sarif_report_sync(
             auditor_verdict=f_dict.get("auditor_verdict"),
             confidence_score=f_dict.get("confidence_score", 0.0),
             evidence=ev_list,
+            description=f_dict.get("description"),
+            poc_command=f_dict.get("poc_command"),
         )
         findings.append(f)
 

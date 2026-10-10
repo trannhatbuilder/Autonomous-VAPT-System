@@ -1,34 +1,51 @@
-# VAPT-AI MCP Tool Wrapper — nuclei
-# ============================================================
-# Tool: nuclei (Fast vulnerability scanner)
-# Category: vuln_scanner
-# WSTG IDs: WSTG-INFO-04 (Search Engine Discovery), WSTG-CONF-01 (Network Configuration)
-# MITRE ATT&CK: T1595.002 (Active Scanning: Vulnerability Scanning)
-# Install: go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest (W1-I)
-# ============================================================
-
 name: nuclei
 command: nuclei
 enabled: true
 description: |
-  Fast, template-based vulnerability scanner. Uses YAML templates to detect
-  CVEs, misconfigurations, exposures, takeovers. 8000+ community templates.
+  Fast, template-based vulnerability scanner. Detects CVEs, misconfigurations,
+  exposures, takeovers via 8000+ community templates.
 
   Examples:
-    - Scan with all templates: nuclei -u <url>
-    - Specific severity: nuclei -u <url> -severity critical,high
-    - Specific tags: nuclei -u <url> -t cves -t exposures
-    - Update templates: nuclei -update-templates
+    - Scan with severity:  nuclei -u https://target.com -severity high,critical
+    - Focused tags:        nuclei -u https://target.com -tags exposure,misconfig
+    - All severities:      nuclei -u https://target.com -severity low,medium,high,critical
+
+  WORKFLOW GUIDANCE:
+    - Run ONE broad scan first (-severity high,critical), triage results,
+      then targeted follow-ups (-tags exposure or -tags ssl) only on
+      specific gaps. Do NOT re-run the full scan repeatedly with different
+      severities — that wastes iterations; use severity in the FIRST call
+      (e.g. "low,medium,high,critical") if you want everything at once.
+    - Output is human-readable text by default: [template-id] [protocol]
+      [severity] [matched-url] per line. Parse it directly as findings.
+
+  OUTPUT FORMAT — why TEXT beats JSONL for the agent (keep json_output=false):
+    - JSONL costs ~500-1500 chars PER finding (template path, template-url,
+      info{...}, matcher-name, extracted-results, metadata, curl-command, ...):
+        {"template":"http/exposures/configs/phpinfo-files.yaml",
+         "template-url":"...","template-id":"phpinfo-files",
+         "info":{"name":"phpinfo","severity":"high",...},
+         "matched":"https://emcer.in/info.php",...}          (~700 chars)
+    - TEXT costs ~60 chars per finding and keeps the fields that matter:
+        [phpinfo-files] [http] [high] https://emcer.in/info.php  (~60 chars)
+    - With the 50KB output cap that is ~40-70 findings as JSONL vs HUNDREDS as
+      text — and the LLM triages the compact text lines far faster.
+    - Enable json_output=true ONLY when chaining into another tool that needs
+      a machine-parseable stream.
+
+  WAF note: on Cloudflare-fronted targets, some template hits are the
+  WAF's own response, not the origin. Cross-check unexpected findings
+  (e.g. phpinfo exposure) with httpx before recording.
 
 short_description: Template-based vulnerability scanner (8000+ templates)
 
 category: vuln_scanner
 
 wstg_ids:
-  - WSTG-INFO-04  # Search Engine Discovery
-  - WSTG-CONF-01  # Network Configuration
+  - WSTG-INFO-04
+  - WSTG-CONF-01
 mitre_attack:
-  - T1595.002  # Vulnerability Scanning
+  - T1595.002
 
 safety_class: active
 
@@ -39,16 +56,24 @@ parameters:
     required: true
     flag: "-u"
 
+  # FIX: added — scan multiple URLs from subfinder/katana output at once
+  - name: list
+    type: string
+    description: File with list of URLs to scan (one per line, from httpx -l)
+    required: false
+    flag: "-list"
+    default: ""
+
   - name: templates
     type: string
-    description: 'Template directory or file (comma-separated for multiple). Default: all templates.'
+    description: 'Template directory or file (comma-separated for multiple)'
     required: false
     flag: "-t"
     default: ""
 
   - name: tags
     type: string
-    description: Template tags to run (comma-separated, e.g. cves,exposures,misconfig)
+    description: Template tags to run (comma-separated, e.g. exposure,misconfig,ssl)
     required: false
     flag: "-tags"
     default: ""
@@ -57,34 +82,77 @@ parameters:
     type: string
     description: |
       Severity filter (info,low,medium,high,critical — comma-separated).
-      W19-FIX3-F3: default "high,critical" — reduce noise from info/low findings
-      that are typically not actionable for pentest reports. Override with
-      "medium,high,critical" if you need a broader sweep.
+      Default "high,critical". For a single comprehensive pass, use
+      "low,medium,high,critical" instead of re-running per severity.
     required: false
     flag: "-severity"
     default: "high,critical"
+    options: ["info", "low", "medium", "high", "critical",
+              "high,critical", "medium,high,critical", "low,medium,high,critical"]
 
-  - name: output_format
-    type: string
-    description: Output format (text, json, jsonl, sarif)
+  # FIX: was a broken param — type:string with default:true (bool) produced
+  # "-jsonl true" on the command line. Replaced with explicit boolean.
+  - name: json_output
+    type: bool
+    description: |
+      JSONL output (-jsonl) for machine parsing. Default FALSE — the
+      human-readable text output ("[phpinfo-files] [http] [high] https://...")
+      is ~10x more token-efficient than JSONL (~60 vs ~700 chars/finding), so
+      under the 50KB cap text yields hundreds of findings where JSONL yields
+      only ~40-70. Enable ONLY when chaining into another tool that needs JSON.
     required: false
-    flag: "-jsonl"  # JSONL is easiest to parse
-    default: true
-    options: ["text", "json", "jsonl", "sarif"]
+    flag: "-jsonl"
+    default: false
 
+  # FIX: added — clean output: no banner, no ANSI, no progress noise.
+  # (Log showed stderr banner eating the 200-char SSE preview.)
+  - name: silent
+    type: bool
+    description: Show only findings, no banner (-silent)
+    required: false
+    flag: "-silent"
+    default: true
+
+  - name: no_color
+    type: bool
+    description: Disable ANSI colors (-no-color)
+    required: false
+    flag: "-no-color"
+    default: true
+
+  # BUG FIX (verified against nuclei v3.11.1): -no-meta does NOT merely trim
+  # noise — it STRIPS the "[template-id] [protocol] [severity]" prefix, leaving
+  # only the bare matched URL:
+  #   without -no-meta -> [smoke-test-detector] [http] [high] http://.../x.html
+  #   with    -no-meta -> http://.../x.html
+  # Since default was true, EVERY nuclei run lost the template-id + severity —
+  # exactly the fields the agent needs to triage findings and cite them in the
+  # report (and what parse_hints.finding matches). Default is now FALSE.
+  - name: no_meta
+    type: bool
+    description: |
+      Omit result metadata (-no-meta). WARNING: this removes the
+      "[template-id] [protocol] [severity]" prefix, leaving only the bare URL —
+      do NOT enable for scan output you intend to triage/report. Default FALSE.
+    required: false
+    flag: "-no-meta"
+    default: false
+
+  # FIX: 150 -> 75. 150 rps on WAF targets triggers bans mid-scan.
+  # Agent can raise for weak targets.
   - name: rate_limit
     type: integer
-    description: Maximum requests per second
+    description: Max requests per second (lower if WAF blocks mid-scan)
     required: false
     flag: "-rl"
-    default: 150
+    default: 75
 
   - name: concurrency
     type: integer
-    description: Number of concurrent templates to run
+    description: Concurrent templates (lower if WAF blocks)
     required: false
     flag: "-c"
-    default: 25
+    default: 15
 
   - name: timeout
     type: integer
@@ -93,19 +161,32 @@ parameters:
     flag: "-timeout"
     default: 10
 
+  # FIX: added — bound total scan time (nuclei with big template sets can
+  # exceed the hard timeout; partial results better than nothing)
+  - name: max_time
+    type: string
+    description: |
+      Max total scan duration (-max-time, e.g. "3m"). Bounds the whole run —
+      partial results are returned instead of being lost to a hard kill.
+    required: false
+    flag: "-max-time"
+    default: "3m"
+    duration: true
+
   - name: additional_args
     type: string
-    description: Additional nuclei arguments
+    description: |
+      Additional nuclei arguments (-stats, -dast, -exclude-tags, ...).
+      Full flexibility via this escape hatch.
     required: false
     default: ""
 
 output:
   max_bytes: 50000
-  format: jsonl
+  format: text   # FIX: jsonl -> text — human-readable default
   parse_hints:
-    finding: '"template-id":"([^"]+)"'
-    severity: '"info":\\{"severity":"([^"]+)"'
-    matched: '"matched":"([^"]+)"'
+    finding: '^\[([a-z0-9-]+)\]\s+\[([a-z]+)\]\s+\[([a-z]+)\]\s+(\S+)'
+    matched: '"matched":"([^"]+)"'   # keep for json_output=true case
 
-timeout: 900  # 15 minutes — nuclei can be slow with all templates
+timeout: 300
 allowed_exit_codes: [0]

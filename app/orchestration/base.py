@@ -151,6 +151,9 @@ class OrchestratorResult:
     total_tokens: int = 0
     duration_seconds: float = 0.0
     error: str | None = None
+    # FIX: final summary from the ReAct agent's exit tool.
+    # Optional default "" — legacy constructors keep working.
+    final_summary: str = ""
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     completed_at: datetime | None = None
     # Orchestration-specific extras
@@ -185,6 +188,9 @@ class OrchestratorResult:
             "total_tokens": self.total_tokens,
             "duration_seconds": self.duration_seconds,
             "error": self.error,
+            # FIX: expose final_summary so the UI/report can show the LLM's
+            # exit summary instead of an empty string.
+            "final_summary": self.final_summary,
             "agents_involved": self.agents_involved,
             "sub_agent_count": self.sub_agent_count,
             "plan_steps_total": self.plan_steps_total,
@@ -283,8 +289,15 @@ class BaseOrchestrator:
             decision.turn, decision.agent_name, decision.tool_name, decision.tool_args,
         )
 
-    def finalize(self, status: str, error: str | None = None) -> OrchestratorResult:
-        """Build the final OrchestratorResult."""
+    def finalize(
+        self, status: str, error: str | None = None, final_summary: str = "",
+    ) -> OrchestratorResult:
+        """Build the final OrchestratorResult.
+
+        `final_summary` is optional so existing callers keep working; when the
+        ReAct/caller path has an LLM exit summary, pass it here so it is not
+        silently dropped from the result.
+        """
         return OrchestratorResult(
             scan_id=self.scan_id,
             target=self.target,
@@ -296,6 +309,7 @@ class BaseOrchestrator:
             total_tokens=self.total_tokens,
             duration_seconds=time.time() - self.start_time,
             error=error,
+            final_summary=final_summary,
             completed_at=datetime.now(UTC),
             agents_involved=sorted(self.agents_involved),
             sub_agent_count=len(self.agents_involved) - 1,  # exclude orchestrator

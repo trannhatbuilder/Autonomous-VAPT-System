@@ -49,6 +49,7 @@ Why cap values are what they are:
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -77,9 +78,17 @@ DEFAULT_TOOL_CALL_CAP: int = 9999
 # Exploitation tools get a limit of 1: a second attempt with different args is
 # unlikely to be cheaper than switching (sqlmap <-> metasploit), and it protects
 # the scan's wall-clock budget.
-MAX_TOOL_STALLS_PER_SCAN: dict[str, int] = {}
-# DISABLED (worklog task #16): set to a very high number so stalls don't block.
-DEFAULT_TOOL_STALL_LIMIT: int = 9999
+#
+# RE-ENABLED (W22): a tool that hard-times-out will not succeed on the next
+# attempt with the same conditions. This is NOT a "thoroughness" cap (which the
+# worklog #16 decision disabled) — it is a stuck-tool guard, so it stays on.
+MAX_TOOL_STALLS_PER_SCAN: dict[str, int] = {
+    "metasploit": 1,   # the concrete incident: an msf module hung for 542s
+    "sqlmap": 1,
+    "hydra": 1,
+}
+# Generic fallback — one retry is tolerated, the 2nd stall blocks the tool.
+DEFAULT_TOOL_STALL_LIMIT: int = 2
 
 
 # ── Per-scan cap state ─────────────────────────────────────────────────────
@@ -88,6 +97,8 @@ DEFAULT_TOOL_STALL_LIMIT: int = 9999
 _SCAN_CAPS: dict[str, dict[str, int]] = {}
 # Per-scan stall counters: { scan_id -> { tool_name -> stall_count } }
 _SCAN_STALLS: dict[str, dict[str, int]] = {}
+# Per-scan invocation-failure counters: { scan_id -> { tool_name -> count } }
+_SCAN_INVOCATION_FAILURES: dict[str, dict[str, int]] = {}
 
 
 def _get_scan_state(scan_id: str) -> dict[str, int]:
@@ -190,6 +201,135 @@ def is_tool_stalled(scan_id: str, tool_name: str) -> tuple[bool, str]:
     return (True, reason)
 
 
+# ── Per-tool INVOCATION-FAILURE limits ─────────────────────────────────────
+# An "invocation failure" = the tool rejected its own COMMAND LINE: unknown
+# flag, unparsable value, missing required arg ("invalid value ... for flag
+# -to"). Retrying with different VALUES cannot fix these — the flag MAPPING is
+# wrong and the LLM has no reliable way to discover the right one. After N
+# invocation failures the tool is BLOCKED for the rest of the scan.
+#
+# This is deliberately NOT disabled by worklog task #16: that decision removed
+# "thoroughness" caps (how many times a WORKING tool may run). A tool that
+# refuses to start is broken, not overused — so it stays capped.
+MAX_TOOL_INVOCATION_FAILURES: dict[str, int] = {}
+DEFAULT_TOOL_INVOCATION_FAILURE_LIMIT: int = 2
+
+# Patterns that mark a COMMAND-LINE rejection (not a runtime/target error).
+# Checked against the HEAD of the tool output, where arg parsers print their
+# complaints.
+#
+# These are REGEX, not raw substrings, on purpose: a bare "invalid value"
+# shows up in plenty of TARGET error pages, but `invalid value ... for flag`
+# / `invalid value ... for --x` is unmistakably a CLI-parser complaint. Keeping
+# the value-case anchored lets us still catch gobuster/katana/feroxbuster bad
+# VALUES without false-positiving on target content.
+INVOCATION_ERROR_PATTERNS: tuple[str, ...] = (
+    r"incorrect usage",                      # gobuster (cobra)
+    r"flag provided but not defined",          # Go pflag — gobuster, katana, httpx
+    r"unknown shorthand flag",                 # Go pflag
+    r"unknown flag",                           # misc Go/C
+    r"unexpected argument",                    # feroxbuster (clap)
+    r"unrecognized argument",                  # argparse — "unrecognized arguments:"
+    r"no such option",                         # getopt-style
+    r"invalid option",                         # getopt — "invalid option -- 'x'"
+    r"invalid value\b.*\bfor\s+(?:flag|--)",   # bad VALUE: gobuster/katana/feroxbuster
+)
+_INVOCATION_ERROR_RES = tuple(re.compile(p) for p in INVOCATION_ERROR_PATTERNS)
+
+# How much of the output head to scan (arg parsers print usage errors up front).
+_INVOCATION_ERROR_SCAN_CHARS = 800
+
+
+# Human/LLM-readable alternatives to suggest when a tool is blocked as broken.
+INVOCATION_ERROR_ALTERNATIVES: dict[str, str] = {
+    "gobuster": "ffuf or feroxbuster for directory brute-force",
+    "feroxbuster": "ffuf or gobuster",
+    "ffuf": "gobuster or feroxbuster",
+    "httpx": "whatweb for fingerprinting",
+    "whatweb": "httpx -tech-detect",
+    "katana": "gau / waybackurls for URL discovery",
+    "nikto": "nuclei with misconfig tags",
+    "nuclei": "nikto",
+    "nmap": "rustscan or masscan",
+}
+
+
+def looks_like_invocation_error(text: str) -> bool:
+    """True if `text` looks like a command-line rejection from a tool.
+
+    Only the first _INVOCATION_ERROR_SCAN_CHARS characters are inspected —
+    arg parsers print usage errors up front, so this keeps the check cheap and
+    (together with the anchored regexes) keeps TARGET-supplied text from
+    matching.
+    """
+    if not text:
+        return False
+    head = text[:_INVOCATION_ERROR_SCAN_CHARS].lower()
+    return any(r.search(head) for r in _INVOCATION_ERROR_RES)
+
+
+def _get_invocation_failure_state(scan_id: str) -> dict[str, int]:
+    """Get or create the per-scan invocation-failure counter dict."""
+    if scan_id not in _SCAN_INVOCATION_FAILURES:
+        _SCAN_INVOCATION_FAILURES[scan_id] = {}
+    return _SCAN_INVOCATION_FAILURES[scan_id]
+
+
+def _resolve_invocation_failure_limit(tool_name: str) -> int:
+    """Resolve the invocation-failure limit for a tool name."""
+    return MAX_TOOL_INVOCATION_FAILURES.get(
+        tool_name, DEFAULT_TOOL_INVOCATION_FAILURE_LIMIT
+    )
+
+
+def mark_tool_invocation_failure(scan_id: str, tool_name: str) -> int:
+    """Record that a tool call failed at the invocation level (bad flags/args).
+
+    Returns the updated failure count for (scan_id, tool_name).
+    """
+    state = _get_invocation_failure_state(scan_id)
+    state[tool_name] = state.get(tool_name, 0) + 1
+    limit = _resolve_invocation_failure_limit(tool_name)
+    logger.warning(
+        "TOOL_INVOCATION_FAILURE | scan=%s | tool=%s | failures=%d/%d",
+        scan_id, tool_name, state[tool_name], limit,
+    )
+    return state[tool_name]
+
+
+def get_tool_invocation_failure_count(scan_id: str, tool_name: str) -> int:
+    """Return how many invocation failures this tool has in this scan."""
+    return _SCAN_INVOCATION_FAILURES.get(scan_id, {}).get(tool_name, 0)
+
+
+def is_tool_broken(scan_id: str, tool_name: str) -> tuple[bool, str]:
+    """Whether a tool has failed at invocation level too many times.
+
+    Returns (blocked, reason). reason is empty when blocked=False.
+    """
+    count = get_tool_invocation_failure_count(scan_id, tool_name)
+    limit = _resolve_invocation_failure_limit(tool_name)
+    if count < limit:
+        return (False, "")
+
+    alt = INVOCATION_ERROR_ALTERNATIVES.get(
+        tool_name, "a different tool from your allowlist"
+    )
+    reason = (
+        f"TOOL_BROKEN_SWITCH_REQUIRED: '{tool_name}' failed with "
+        f"command-line/invocation errors {count} times in this scan "
+        f"(limit={limit}). The flag mapping is wrong — retrying with different "
+        f"VALUES will NOT help (the tool rejects the syntax itself, not the "
+        f"target). Do NOT call '{tool_name}' again this scan. Switch to: {alt}. "
+        f"If you already have enough evidence, call record_vulnerability and then `exit`."
+    )
+    logger.warning(
+        "TOOL_BROKEN_SWITCH_REQUIRED | scan=%s | tool=%s | failures=%d/%d",
+        scan_id, tool_name, count, limit,
+    )
+    return (True, reason)
+
+
 def _resolve_cap(tool_name: str) -> int:
     """Resolve the cap for a tool name (falls back to DEFAULT_TOOL_CALL_CAP)."""
     return MAX_TOOL_CALLS_PER_SCAN.get(tool_name, DEFAULT_TOOL_CALL_CAP)
@@ -286,6 +426,7 @@ def clear_scan_caps(scan_id: str) -> None:
         )
         del _SCAN_CAPS[scan_id]
     _SCAN_STALLS.pop(scan_id, None)
+    _SCAN_INVOCATION_FAILURES.pop(scan_id, None)
 
 
 def get_tool_stall_stats(scan_id: str) -> dict[str, int]:
@@ -298,11 +439,19 @@ __all__ = [
     "DEFAULT_TOOL_CALL_CAP",
     "MAX_TOOL_STALLS_PER_SCAN",
     "DEFAULT_TOOL_STALL_LIMIT",
+    "MAX_TOOL_INVOCATION_FAILURES",
+    "DEFAULT_TOOL_INVOCATION_FAILURE_LIMIT",
+    "INVOCATION_ERROR_PATTERNS",
+    "INVOCATION_ERROR_ALTERNATIVES",
+    "looks_like_invocation_error",
     "TOOL_ALTERNATIVES",
     "check_tool_call_cap",
     "mark_tool_stalled",
     "get_tool_stall_count",
     "is_tool_stalled",
+    "mark_tool_invocation_failure",
+    "get_tool_invocation_failure_count",
+    "is_tool_broken",
     "get_tool_call_stats",
     "get_tool_stall_stats",
     "clear_scan_caps",

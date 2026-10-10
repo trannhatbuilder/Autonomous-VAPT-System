@@ -2,28 +2,101 @@ name: dnsenum
 command: dnsenum
 enabled: true
 description: |
-  dnsenum — DNS enumeration. Collects subdomains via Google, zone transfer,
-  reverse DNS, brute-force. Good for quick DNS recon.
-short_description: dnsenum — DNS enumeration (subdomains, zone transfer, reverse DNS)
+  dnsenum — DNS enumeration. Zone transfer (AXFR), MX/nameserver discovery,
+  reverse DNS, brute force.
+
+  ⚠ SCOPE — dnsenum is a NARROW tool here. subfinder already does passive
+  subdomain enumeration faster and more completely. Do NOT use dnsenum to
+  enumerate subdomains. Use it ONLY for:
+    1. AXFR (zone transfer) attempts — usually refused, but cheap to try.
+    2. MX / nameserver discovery — an MX A-record pointing OUTSIDE the CDN
+       range often reveals the ORIGIN IP behind Cloudflare/WAF. This is
+       dnsenum's highest-value output.
+
+  Verified on dnsenum 1.3.1 (installed here): `--noreverse` and `--nocolor`
+  both exist. The tool HAS a `-t/--timeout` flag, but it bounds each TCP/UDP
+  QUERY (default 10s) — there is NO total run-time budget flag.
+
+  Run-time rules:
+    1. noreverse=true is set by default — it skips the /24 reverse scan,
+       the #1 cause of timeouts. Do NOT turn it off.
+    2. dnsenum ALWAYS runs a brute-force step; there is NO flag to disable it.
+       It uses /usr/share/dnsenum/dns.txt (~1000 names) unless `-f <list>`
+       points somewhere else. MEASURED on this box:
+         - wildcard/CDN domain (all results omitted): ~3s
+         - domain WITHOUT wildcard DNS (full brute force): ~52s
+       Passing a SHORT `-f` list brings the second case down to ~1s.
+    3. Prefer subfinder for subdomains — dnsenum's brute force is redundant
+       with it and is the only source of the ~50s worst case.
+
+  Examples:
+    - AXFR + MX/NS only:  dnsenum example.com --noreverse --nocolor
+
+short_description: dnsenum — DNS enumeration (AXFR zone transfer, MX/nameserver, origin-IP discovery)
 category: recon
 wstg_ids:
   - WSTG-CONF-01
 mitre_attack:
   - T1592.002
 safety_class: active
+
 parameters:
   - name: domain
     type: string
     description: Target domain
     required: true
     position: 1
+
+  # FIX: added — skips the /24 reverse lookup, the dominant timeout cause.
+  - name: noreverse
+    type: bool
+    description: |
+      Skip reverse lookup of the /24 subnet (--noreverse). Keep this TRUE:
+      it scans 254 addresses and is the #1 cause of this tool hanging until
+      the timeout kills it (losing all partial output).
+    required: false
+    flag: "--noreverse"
+    default: true
+
+  # FIX: added — suppresses ANSI color (breaks output parsing otherwise)
+  - name: nocolor
+    type: bool
+    description: Disable colored output (required for machine parsing)
+    required: false
+    flag: "--nocolor"
+    default: true
+
   - name: additional_args
     type: string
-    description: Additional dnsenum arguments
+    description: |
+      Additional dnsenum arguments. TIP: `-f <small-list>` SHORTENS the run —
+      the default /usr/share/dnsenum/dns.txt is ~1000 names and costs ~50s on
+      a domain without wildcard DNS, versus ~1s for a short list. Avoid very
+      large wordlists; the tool has no total time bound flag.
     required: false
     default: ""
+
 output:
   max_bytes: 50000
   format: text
-timeout: 300
+  # NOTE: parse_hints is declarative metadata — nothing in the codebase reads
+  # OutputSpec.parse_hints today. Keep the regexes CORRECT anyway (verified
+  # against real dnsenum 1.3.1 output) so a future parser can rely on them.
+  # `(?s)` (DOTALL) is REQUIRED: every section header sits on its own line
+  # with the records on FOLLOWING lines, so a bare `.*?` never reaches the
+  # capture group (the previous version matched nothing).
+  parse_hints:
+    nameserver: '(?s)Name Servers:.*?(\S+\.(?:ns\d?)\.\S+)'
+    # MX is the highest-value output: an MX A-record outside the CDN range
+    # often exposes the ORIGIN IP behind Cloudflare/WAF.
+    mx_server: '(?s)Mail \(MX\).*?(\S+\.)\s+\d+\s+IN\s+A\s+(\d+\.\d+\.\d+\.\d+)'
+    zone_transfer: '(?i)zone transfer|\baxfr\b'
+    host_address: '(?s)Host.*?addresses?:.*?(\d+\.\d+\.\d+\.\d+)'
+
+# FIX: 300 -> 120. MEASURED on this box: ~3s on a wildcard/CDN domain, ~52s
+# on a domain WITHOUT wildcard DNS (the brute-force step runs unconditionally).
+# dnsenum has no internal TOTAL time bound (`-t` caps each query only), so 120s
+# gives >2x margin over the worst measured case while still failing fast on a
+# genuinely stuck run. Do NOT lower to 60 — the 52s case leaves no headroom.
+timeout: 120
 allowed_exit_codes: [0]

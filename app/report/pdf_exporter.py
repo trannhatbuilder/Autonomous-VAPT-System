@@ -707,66 +707,113 @@ class PDFExporter:
         block.append(header_table)
         block.append(Spacer(1, 8))
 
-        # ── 1. Observation (Evvo template)
+        # ── 1. Observation
         block.append(Paragraph("<b>Observation</b>", style_body))
         observation_text = self._extract_observation(f)
         block.append(Paragraph(self._escape(observation_text), style_body))
 
-        # Show observed response headers/output if available (detection-layer evidence)
         detection_evidence = [ev for ev in f.evidence if ev.layer == "detection"]
-        if detection_evidence:
-            block.append(Spacer(1, 4))
-            block.append(Paragraph("<i>Observed response (verifier-replayable):</i>", style_body))
-            for ev in detection_evidence[:1]:  # only first detection row
-                raw = ev.raw_output
-                if len(raw) > 1000:
-                    raw = raw[:1000] + "... [truncated]"
-                block.append(Paragraph(self._escape(raw), style_code))
 
-        # ── 2. Exploitation (PoC section — Bug 4 fix)
+        # ── 2. Exploitation (PoC)
+        # FIX: VAPT-AI's agent records ALL evidence at layer="detection"
+        # (tool_bridge._record_vulnerability is the only writer). The old
+        # code only rendered layer="exploitation" — which never exists —
+        # so every finding showed "No exploitation evidence" even when a
+        # full sqlmap command + output was stored. The PoC IS the
+        # detection evidence: command line + tool output.
         block.append(Spacer(1, 6))
-        block.append(Paragraph("<b>Exploitation</b>", style_body))
-        exploitation_evidence = [ev for ev in f.evidence if ev.layer == "exploitation"]
-        if exploitation_evidence or f.exploit_method:
-            if f.exploit_method:
+        block.append(Paragraph("<b>Proof of Concept (PoC)</b>", style_body))
+
+        poc_evidence = (
+            [ev for ev in f.evidence if ev.layer == "exploitation"]
+            or detection_evidence  # fallback — detection layer IS the PoC source
+        )
+
+        if poc_evidence:
+            ev = poc_evidence[0]  # primary evidence
+            raw = ev.raw_output or ""
+
+            # PoC verified badge — based on poc_status + verified flag
+            if f.verified and f.poc_status == "successful":
                 block.append(Paragraph(
-                    f"<i>Exploit method:</i> {self._escape(f.exploit_method)}",
+                    '<font color="#15803D"><b>✓ PoC VERIFIED</b></font> '
+                    '<font size="9">— tool output below confirms the vulnerability</font>',
                     style_body,
                 ))
-            block.append(Paragraph("<i>Initial discovery command:</i>", style_body))
-            # Show the exploitation-layer evidence as the PoC
-            if exploitation_evidence:
-                for ev in exploitation_evidence[:1]:
-                    raw = ev.raw_output
-                    if len(raw) > 1500:
-                        raw = raw[:1500] + "... [truncated]"
-                    block.append(Paragraph(self._escape(raw), style_code))
-                    # Anti-hallucination: reference evidence_id + hash
-                    captured_str = (
-                        ev.captured_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-                        if hasattr(ev.captured_at, "strftime")
-                        else str(ev.captured_at)[:19]
-                    )
-                    block.append(Paragraph(
-                        f"<i>Evidence ID: {str(getattr(ev, 'id', 'N/A'))[:8]}... | "
-                        f"Hash: {ev.evidence_hash[:32]}... | "
-                        f"Tool: {ev.tool_used} | "
-                        f"Captured: {captured_str}</i>",
-                        style_body,
-                    ))
-            else:
+            elif f.poc_status == "successful":
                 block.append(Paragraph(
-                    f"<i>$ {self._escape(f.exploit_method or 'n/a')}</i>",
-                    style_code,
+                    '<font color="#C2410C"><b>◐ PoC RECORDED (pending verification)</b></font>',
+                    style_body,
                 ))
+
+            # Tool used
+            if ev.tool_used:
                 block.append(Paragraph(
-                    "<i>PoC: Not yet validated — evidence chain only.</i>",
+                    f"<i>Tool:</i> <b>{self._escape(ev.tool_used)}</b>",
+                    style_body,
+                ))
+
+            # Command line — priority: "$ ..." in raw evidence → the exact
+            # command stashed in metadata_json.poc.command → exploit_method.
+            command_line = None
+            raw_body = raw
+            first_line, _, rest = raw.partition("\n")
+            if first_line.lstrip().startswith("$ "):
+                command_line = first_line.lstrip()[2:]
+                raw_body = rest.lstrip("\n")
+            elif getattr(f, "poc_command", None):
+                command_line = f.poc_command
+            elif f.exploit_method and f.exploit_method not in ("agent", "pipeline-injected"):
+                command_line = f.exploit_method
+
+            if command_line:
+                block.append(Paragraph("<i>Command:</i>", style_body))
+                block.append(Paragraph(self._escape(f"$ {command_line}"), style_code))
+
+            # Placeholder-repair disclosure — the stored command/evidence had a
+            # {{URL}}/<target>/$TARGET placeholder that VAPT-AI replaced with the
+            # finding's target. Warn the reader to verify before re-running.
+            if getattr(f, "placeholder_repaired", False):
+                block.append(Paragraph(
+                    '<font color="#B45309"><b>⚠ Placeholder auto-repaired</b></font> '
+                    '<font size="9">— the original evidence contained a '
+                    '{{URL}}/&lt;target&gt; placeholder which was replaced with the '
+                    "finding's target. Verify the command manually before "
+                    're-running it.</font>',
+                    style_body,
+                ))
+
+            # Raw output — generous cap (this is the proof)
+            if raw_body:
+                block.append(Paragraph("<i>Result:</i>", style_body))
+                if len(raw_body) > 2500:
+                    raw_body = raw_body[:2500] + "\n... [truncated — full output in evidence chain]"
+                block.append(Paragraph(self._escape(raw_body), style_code))
+
+            # Anti-hallucination reference
+            captured_str = (
+                ev.captured_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+                if hasattr(ev, "captured_at") and hasattr(ev.captured_at, "strftime")
+                else str(getattr(ev, "captured_at", "N/A"))[:19]
+            )
+            ev_hash = (getattr(ev, "evidence_hash", "") or "")[:32]
+            block.append(Paragraph(
+                f"<i>Evidence ID: {str(getattr(ev, 'id', 'N/A'))[:8]} | "
+                f"Hash: {ev_hash}... | Captured: {captured_str}</i>",
+                style_body,
+            ))
+
+            # Additional evidence layers (if more than one)
+            if len(poc_evidence) > 1:
+                block.append(Paragraph(
+                    f"<i>+ {len(poc_evidence) - 1} additional evidence entry(ies) "
+                    f"in the evidence chain for this finding.</i>",
                     style_body,
                 ))
         else:
             block.append(Paragraph(
-                "<i>No exploitation evidence recorded for this finding. "
-                "PoC: Not yet validated — detection-only finding.</i>",
+                "<i>No evidence recorded for this finding — treat as "
+                "unconfirmed. PoC: not validated.</i>",
                 style_body,
             ))
 
@@ -827,20 +874,17 @@ class PDFExporter:
         return block
 
     def _extract_observation(self, f: FindingReportData) -> str:
-        """Extract observation text from finding metadata or build from fields.
-
-        The Finding model has no `description` column — description lives in
-        `metadata_json.description` (W19-FIX Phase A). If absent, synthesize
-        from name + vuln_type + severity.
-        """
-        # Try metadata_json.description (set by tool_bridge._record_vulnerability)
-        # Note: FindingReportData doesn't carry metadata_json currently —
-        # we synthesize from vuln_type + severity.
+        # FIX: prefer the LLM's actual description (stored in
+        # metadata_json.description by tool_bridge._record_vulnerability and
+        # now exposed on FindingReportData.description by the collector);
+        # fall back to the synthesized text.
+        desc = getattr(f, "description", None)
+        if desc and str(desc).strip():
+            return str(desc)
         return (
             f"A {f.severity.lower()}-severity {f.vuln_type} vulnerability was identified "
-            f"at {f.location}. The issue was detected during automated scanning and "
-            f"verified through the W12 EvidenceAuditor (confidence: "
-            f"{f.confidence_score:.2f}, verdict: {f.auditor_verdict or 'N/A'})."
+            f"at {f.location}. Verified: {f.verified} (auditor verdict: "
+            f"{f.auditor_verdict or 'N/A'}, confidence: {f.confidence_score:.2f})."
         )
 
     def _impact_for_severity(self, sev: str, f: FindingReportData) -> str:
@@ -995,6 +1039,9 @@ def generate_pdf_report_sync(
             auditor_verdict=f_dict.get("auditor_verdict"),
             confidence_score=f_dict.get("confidence_score", 0.0),
             evidence=ev_list,
+            description=f_dict.get("description"),
+            poc_command=f_dict.get("poc_command"),
+            placeholder_repaired=f_dict.get("placeholder_repaired", False),
         )
         findings.append(f)
 

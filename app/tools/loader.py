@@ -72,6 +72,13 @@ class ParameterSpec:
     # Literal text appended to the arg VALUE (e.g. "; exit" for a shell/REPL
     # command). Lets a wrapper guarantee non-interactive execution.
     suffix: str = ""
+    # Go-duration flag (e.g. gobuster's `--timeout`/`--to`, which wants "10s").
+    # When true, a bare numeric value is completed with a "s" unit: 15 -> "15s".
+    # A value that already carries a unit ("10s", "2m") is left untouched.
+    # Needed because the LLM frequently sends a bare number despite a
+    # `type: string` schema, and a flag-name heuristic is ambiguous —
+    # `--timeout` is a Go duration for gobuster but plain seconds for dalfox.
+    duration: bool = False
 
     def to_json_schema(self) -> dict[str, Any]:
         """Convert to JSON Schema property for MCP input schema."""
@@ -155,8 +162,19 @@ class ToolDef:
         # Add positional args in order
         for p in positional:
             val = kwargs.get(p.name, p.default)
-            if val is not None and val != "" and val is not False:
-                args.append(str(val))
+            # Skip unset values. NOTE: a bare `val is not False` was NOT enough
+            # — 0 is a distinct object from False, so 0 was emitted as the
+            # literal "0". 0 means "unset" for numeric params (mirrors the
+            # flagged-arg loop below), so drop it here too. Every positional
+            # param is a string today, but this keeps the two loops consistent
+            # (and stops a future positional `port` defaulting to 0 from
+            # passing a literal "0"). Bools are unaffected: `True == 0` is
+            # False, and False is already skipped above.
+            if val is None or val == "" or val is False:
+                continue
+            if isinstance(val, (int, float)) and val == 0:
+                continue
+            args.append(str(val))
 
         # Add flagged args
         for p in flagged:
@@ -175,11 +193,24 @@ class ToolDef:
                 if val:  # True
                     args.append(p.flag)
             elif p.type == "integer" and val == 0:
-                # Skip integer 0 (default value — don't pass)
-                if p.default != 0:
-                    args.append(p.flag)
-                    args.append(str(val))
+                # 0 means "not set" for integer params — never pass it
+                # explicitly. The previous version emitted `-t 0` whenever the
+                # LLM sent 0 for a param whose default was non-zero, which
+                # makes tools like gobuster die ("threads must be > 0").
+                continue
             else:
+                # Go-duration flags need a time unit. The LLM frequently sends a
+                # bare number — as an int (15) or a string ("15") — despite a
+                # `type: string` schema; gobuster 3.8+ rejects it ("invalid
+                # value ... for flag -to"). Coerce bare numbers to "<n>s" while
+                # leaving an already-formatted "10s"/"2m" untouched.
+                if p.duration:
+                    if isinstance(val, (int, float)):
+                        val = f"{int(val)}s"
+                    else:
+                        sval = str(val).strip()
+                        if sval.isdigit():
+                            val = sval + "s"
                 args.append(p.flag)
                 # `suffix` appends literal text to the value — e.g. msfconsole's
                 # `-x` command gets "; exit" so the REPL never blocks.
@@ -202,10 +233,60 @@ _loaded_tools: dict[str, ToolDef] = {}
 _loaded_tools_mtime: float = 0.0  # mtime of the newest YAML file at last load
 
 
+def _newest_yaml_mtime(yaml_files: list[Path] | None = None) -> float:
+    """Return the newest mtime across the tool YAMLs (0.0 if none/unreadable).
+
+    Cheap — a glob + one stat per file, no YAML parsing. Shared by
+    load_all_tools() (cache key) and _yaml_mtime_changed() (the stale-schema
+    guard consulted by tool_bridge.build_tool_schemas). Pass `yaml_files` to
+    reuse an already-globbed list and avoid a redundant directory scan.
+    """
+    if yaml_files is None:
+        try:
+            yaml_files = sorted(TOOLS_DIR.glob("*.yaml"))
+        except OSError:
+            return 0.0
+    if not yaml_files:
+        return 0.0
+    try:
+        return max(f.stat().st_mtime for f in yaml_files)
+    except OSError:
+        return 0.0
+
+
+def _yaml_mtime_changed() -> bool:
+    """True if a tool YAML was edited since the last successful load.
+
+    Stat-only (no re-parse). Consumed by
+    app.agents.tool_bridge.build_tool_schemas() so that a memoized schema is
+    NOT served after a live YAML edit: that function early-returns on a cache
+    hit and would otherwise never reach load_all_tools() — whose re-parse is
+    the ONLY thing that runs the schema-cache invalidation. In a long-running
+    process (the MCP server) that meant an edited YAML stayed invisible until
+    a restart.
+
+    Returns False on a cold cache (nothing loaded yet) so we never report a
+    spurious change before the first load.
+    """
+    if not _loaded_tools:
+        return False
+    return _newest_yaml_mtime() != _loaded_tools_mtime
+
+
 def _parse_yaml(data: dict[str, Any]) -> ToolDef:
     """Parse a YAML dict into a ToolDef."""
     params = []
     for p in data.get("parameters", []):
+        # Guard: a param declaring BOTH `position` and `flag` is appended TWICE
+        # by build_command_args (once in the positional loop, once in the
+        # flagged loop) — producing a duplicated arg. Warn at parse time so the
+        # author notices; the YAML should use one or the other, not both.
+        if p.get("position") is not None and p.get("flag"):
+            logger.warning(
+                "Tool %s param %s has BOTH position and flag — it will be "
+                "emitted twice in the command args",
+                data.get("name", "?"), p.get("name", "?"),
+            )
         params.append(ParameterSpec(
             name=p["name"],
             type=p.get("type", "string"),
@@ -216,6 +297,7 @@ def _parse_yaml(data: dict[str, Any]) -> ToolDef:
             default=p.get("default"),
             options=p.get("options"),
             suffix=p.get("suffix", ""),
+            duration=p.get("duration", False),
         ))
 
     output_data = data.get("output", {})
@@ -266,10 +348,7 @@ def load_all_tools(force_reload: bool = False) -> dict[str, ToolDef]:
         # Empty / missing dir — return whatever we have (likely empty)
         return _loaded_tools
 
-    try:
-        newest_mtime = max(f.stat().st_mtime for f in yaml_files)
-    except OSError:
-        newest_mtime = 0.0
+    newest_mtime = _newest_yaml_mtime(yaml_files)
 
     if (
         not force_reload
@@ -305,6 +384,19 @@ def load_all_tools(force_reload: bool = False) -> dict[str, ToolDef]:
         except Exception as e:
             logger.error("Failed to load %s: %s", yaml_file, e)
 
+    # The OpenAI tool schemas the LLM sees are memoized in tool_bridge. A YAML
+    # edit changes mtime → we just re-parsed the ToolDefs above, so drop the
+    # memoized schemas too; otherwise the ReAct loop keeps advertising the OLD
+    # description/parameters until someone explicitly calls reload_tools().
+    # Lazy import avoids a circular import (tool_bridge imports this module).
+    try:
+        from app.agents.tool_bridge import invalidate_tool_schema_cache
+        invalidate_tool_schema_cache()
+        logger.info("Invalidated tool schema cache (YAML mtime changed)")
+    except Exception as exc:  # pragma: no cover — defensive: loader must not
+        # hard-fail if tool_bridge is unavailable (e.g. partial install).
+        logger.warning("Could not invalidate tool schema cache: %s", exc)
+
     logger.info("Loaded %d tools: %s", len(_loaded_tools), list(_loaded_tools.keys()))
     return _loaded_tools
 
@@ -322,48 +414,29 @@ def list_tools() -> list[ToolDef]:
 # ---------- MCP registration ----------
 
 def _build_scope_for_target(target: str):
-    """Build a permissive-but-safe ScopeGuard for one scan target.
+    """Build a permissive ScopeGuard for one scan target.
 
-    P1: allows the target host + any subdomain of its base domain.
-    Example: target="https://pentest-ground.com:4280/" allows:
-        - pentest-ground.com
-        - *.pentest-ground.com  (any subdomain)
-    IPs discovered via DNS resolution during recon still need to be added
-    explicitly (P2 will add a runtime scope-expand API).
+    Phase 3: ScopeGuard is disabled via env VAPT_AI_SCOPE_GUARD_DISABLED=1
+    (default). This function still returns a ScopeGuard instance for backward
+    compatibility with SubprocessExecutor (which expects a scope_guard arg),
+    but the guard's validate_command() always returns allowed=True.
 
-    Returns a configured ScopeGuard instance.
+    Returns a configured ScopeGuard instance (permissive — all targets allowed).
     """
-    from app.sandbox.scope_guard import ScopeGuard, ScopeRule
-    from urllib.parse import urlparse
-    import ipaddress
-
-    if not target:
-        return ScopeGuard(declared_scope=[])  # empty scope = blocks all target checks
-
-    # Extract host from URL/IP
-    host = target
-    if "://" in target:
-        try:
-            parsed = urlparse(target)
-            host = parsed.hostname or target
-        except Exception:
-            pass
-
-    rules: list[ScopeRule] = []
-
-    # If it's an IP, allow that exact IP
+    # Phase 3: keep importing ScopeGuard for now (module still exists).
+    # When scope_guard.py is deleted in a future phase, this will be replaced
+    # with a no-op stub class.
     try:
-        ip = ipaddress.ip_address(host)
-        rules.append(ScopeRule(host=str(ip)))
-    except ValueError:
-        # It's a hostname — allow exact + wildcard subdomain
-        rules.append(ScopeRule(host=host))
-        # Also allow *.host (subdomain glob)
-        # E.g. host="pentest-ground.com" → allow "*.pentest-ground.com"
-        if "." in host:
-            rules.append(ScopeRule(host=f"*.{host}"))
-
-    return ScopeGuard(declared_scope=rules)
+        from app.sandbox.scope_guard import ScopeGuard
+        return ScopeGuard(declared_scope=[])  # empty = permissive (env flag disables checks)
+    except ImportError:
+        # Fallback: scope_guard.py already deleted — return a no-op stub
+        class _NoopScopeGuard:
+            def validate_command(self, command, target=""):
+                from collections import namedtuple
+                R = namedtuple("ValidationResult", ["allowed", "command", "target", "reason", "severity"])
+                return R(allowed=True, command=command, target=target, reason="noop", severity="info")
+        return _NoopScopeGuard()
 
 
 def register_tools_with_mcp(mcp_server) -> None:
@@ -513,8 +586,22 @@ def reload_tools() -> dict[str, ToolDef]:
 
     Useful when a tool YAML has been edited at runtime (e.g. during dev) —
     safe to call from any thread, idempotent.
+
+    Also invalidates the agent's memoized LLM tool-schema cache
+    (app.agents.tool_bridge._tool_schema_cache). Without this, an edited
+    YAML would reload ToolDefs but the ReAct loop would keep sending the
+    STALE schema (old description/parameters) to the LLM. The import is
+    deferred to avoid a circular import at module load time (tool_bridge
+    imports this module at the top level).
     """
-    return load_all_tools(force_reload=True)
+    tools = load_all_tools(force_reload=True)
+    try:
+        from app.agents.tool_bridge import invalidate_tool_schema_cache
+        invalidate_tool_schema_cache()
+    except Exception as exc:  # pragma: no cover — defensive: loader must not
+        # hard-fail if tool_bridge is unavailable (e.g. partial install).
+        logger.warning("Could not invalidate tool schema cache after reload: %s", exc)
+    return tools
 
 
 if __name__ == "__main__":

@@ -6,27 +6,39 @@
 # MITRE ATT&CK: T1190 (Exploit Public-Facing Application)
 # Install: apt install sqlmap + pip install sqlmap (W1-I)
 # ============================================================
-# D25 HITL POLICY:
-#   - detect mode (--batch, no --os-shell, no --dump): safety_class=active (no HITL)
-#   - exploit mode (--os-shell, --dump, --sql-shell): safety_class=destructive (HITL required)
-# This wrapper defaults to detect mode. Exploit mode requires separate wrapper
-# (sqlmap_exploit.yaml — W6 task) with safety_class=destructive.
+# D25 HITL POLICY (WIDENED — dump/os-shell now ENABLED):
+#   - detect:  --batch only.
+#   - dump:    --dump / -D / -T (first-class params) — extract data as PoC.
+#   - exploit: --os-shell / --sql-shell (via additional_args) — final-proof
+#              escalation only.
+#   - blocked: ONLY --os-pwn and --priv-esc (see `forbidden_args` below),
+#              enforced in tool_bridge.execute_tool_call (NOT scope_guard,
+#              which is permissive in this deploy).
+# HITL is DISABLED in this deployment, so these flags run WITHOUT a human gate.
+# The agent is instructed to escalate gradually (detect -> dump -> os-shell)
+# and to treat --os-shell as a last resort.
 # ============================================================
 
 name: sqlmap
 command: sqlmap
 enabled: true
 description: |
-  SQL injection detection + exploitation tool. Detect mode only — does NOT
-  dump data or spawn shells. For exploitation (HITL required), use sqlmap_exploit.
+  SQL injection detection + exploitation. Full capability: detect, enumerate,
+  and dump database content as PoC. sqlmap output (injection point + payload
+  + DBMS + dumped rows) IS the strongest PoC for SQLi findings.
 
-  Examples:
-    - Detect SQLi on URL: sqlmap -u <url> --batch
-    - With POST data: sqlmap -u <url> --data="user=1&pass=2" --batch
-    - Specific param: sqlmap -u <url> -p id --batch
-    - With cookie: sqlmap -u <url> --cookie="session=abc" --batch
+  Workflow (escalate gradually):
+    1. Detect:        sqlmap -u <url> --batch
+    2. Confirm data:  sqlmap -u <url> -p <param> --batch --dump -D <db> -T <table>
+    3. Only if needed: --os-shell (RCE — use as final proof, document impact).
+       Pass --os-shell / --sql-shell through additional_args (no dedicated param).
 
-short_description: SQL injection detection (detect mode — no exploitation)
+  Tips: --random-agent is ON by default (WAF). If blocked, add
+  --tamper=space2comment via additional_args. Use -p to target one param
+  instead of full-URL scans (much faster). Prefer -D/-T with --dump to avoid
+  dumping every DBMS table (slow — may exhaust the tool timeout).
+
+short_description: SQL injection detection + data dump (PoC extraction; escalate gradually)
 
 category: web_scanner
 
@@ -35,7 +47,7 @@ wstg_ids:
 mitre_attack:
   - T1190  # Exploit Public-Facing Application
 
-safety_class: active  # detect mode — no HITL required
+safety_class: destructive  # now includes --dump / --os-shell escalation
 
 parameters:
   - name: target
@@ -67,11 +79,13 @@ parameters:
 
   - name: method
     type: string
-    description: HTTP method (GET, POST, PUT, DELETE)
+    description: |
+      HTTP method (GET, POST, PUT, DELETE). Default empty — sqlmap infers the
+      method from the URL (GET) or --data (POST). Only set to force a method.
     required: false
     flag: "--method"
-    default: "GET"
-    options: ["GET", "POST", "PUT", "DELETE", "PATCH"]
+    default: ""
+    options: ["", "GET", "POST", "PUT", "DELETE", "PATCH"]
 
   - name: level
     type: integer
@@ -112,9 +126,63 @@ parameters:
     flag: "--batch"
     default: true
 
+  # FIX: added — sqlmap's default UA is instantly blocked by Cloudflare/WAF
+  # (agent previously had to hack this via additional_args)
+  - name: random_agent
+    type: bool
+    description: Use a random User-Agent (--random-agent). ALWAYS enable for WAF-fronted targets.
+    required: false
+    flag: "--random-agent"
+    default: true
+
+  # FIX: added — per-request timeout; keeps slow/WAF targets from stalling
+  - name: timeout
+    type: integer
+    description: HTTP request timeout in seconds (--timeout)
+    required: false
+    flag: "--timeout"
+    default: 20
+
+  - name: threads
+    type: integer
+    description: Concurrency (default 1 — raise to 4 for faster tests on confirmed targets)
+    required: false
+    flag: "--threads"
+    default: 1
+
+  # WIDENED (was hard-blocked): --dump is now a first-class param. Scope the
+  # extraction with dump_db (-D) / dump_table (-T); a bare --dump enumerates
+  # ALL tables of ALL databases and can exhaust the 300s tool timeout.
+  - name: dump
+    type: bool
+    description: |
+      Extract DB entries for the tested parameter (--dump) — the PoC for SQLi
+      impact. Combine with dump_db (-D) and dump_table (-T) to avoid dumping
+      the entire DBMS (slow; may hit the 300s timeout).
+    required: false
+    flag: "--dump"
+    default: false
+
+  - name: dump_db
+    type: string
+    description: "Target database for --dump -D (e.g. dvwa). Empty = all databases."
+    required: false
+    flag: "-D"
+    default: ""
+
+  - name: dump_table
+    type: string
+    description: "Target table for --dump -T (e.g. users). Empty = all tables of the selected DB."
+    required: false
+    flag: "-T"
+    default: ""
+
   - name: additional_args
     type: string
-    description: Additional sqlmap arguments (NO --os-shell, --dump, --sql-shell — use sqlmap_exploit)
+    description: |
+      Additional sqlmap arguments (e.g. --tamper=space2comment, --os-shell,
+      --sql-shell). ONLY --os-pwn and --priv-esc are hard-blocked by
+      tool_bridge (forbidden_args).
     required: false
     default: ""
 
@@ -126,14 +194,16 @@ output:
     dbms: "back-end DBMS: (.*)"
     payload: "Payload: (.*)"
 
-timeout: 600
+# FIX: 600 -> 300. sqlmap has no total run-time bound; with tamper scripts the
+# request count multiplies and a 10-minute run still never finishes. 300s is
+# enough for a single-parameter test; past that the agent should narrow scope
+# (e.g. -p <specific-param>) instead of waiting.
+timeout: 300
 allowed_exit_codes: [0, 1]  # 1 = no SQLi found — still useful
 
-# Block destructive flags — if user tries to pass these, scope_guard will reject
+# Only the most dangerous flags remain blocked — enforced in
+# app/agents/tool_bridge.py (execute_tool_call), NOT by scope_guard.
+# --dump / --dump-all / --os-shell / --sql-shell are intentionally ALLOWED now.
 forbidden_args:
-  - "--os-shell"
-  - "--sql-shell"
-  - "--dump"
-  - "--dump-all"
-  - "--os-pwn"
-  - "--priv-esc"
+  - "--os-pwn"    # out-of-band shell (Meterpreter/VNC) — not needed
+  - "--priv-esc"  # DB process privilege escalation — not needed

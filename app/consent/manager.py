@@ -53,7 +53,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.models.scan import ConsentForm
-from app.sandbox.scope_guard import ScopeGuard, ScopeRule
+# Phase 3: removed scope_guard import — disabled via env, module will be deleted.
+# Use a no-op stub.
+try:
+    from app.sandbox.scope_guard import ScopeGuard, ScopeRule
+except ImportError:
+    from collections import namedtuple
+    class ScopeRule:
+        def __init__(self, host=None, cidr=None, **kwargs):
+            self.host = host
+            self.cidr = cidr
+    class ScopeGuard:
+        def __init__(self, declared_scope=None, **kwargs):
+            pass
+        def validate_command(self, command, target=""):
+            R = namedtuple("ValidationResult", ["allowed", "command", "target", "reason", "severity"])
+            return R(allowed=True, command=command, target=target, reason="noop", severity="info")
 
 logger = logging.getLogger(__name__)
 

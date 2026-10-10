@@ -5,20 +5,27 @@
 # WSTG IDs: WSTG-INFO-04 (Search Engine Discovery), WSTG-CONF-01 (Network Configuration)
 # MITRE ATT&CK: T1595.002 (Active Scanning: Vulnerability Scanning)
 # Install: go install github.com/projectdiscovery/httpx/cmd/httpx@latest (W1-I)
+# NOTE: This MUST be the ProjectDiscovery Go binary, NOT the Python httpx CLI.
+#       Python venv's httpx console-script has been renamed to httpx-python.
+#       Verify with: httpx -version  ->  "Current Version: v1.x.x"
 # ============================================================
 
 name: httpx
 command: httpx
 enabled: true
 description: |
-  Fast HTTP probe + fingerprint. Detects live hosts, status codes, titles,
-  tech stack, redirects, IPs. Use on subfinder output to find live web apps.
+  Fast HTTP probe + fingerprint (ProjectDiscovery). Detects live hosts, status
+  codes, titles, tech stack, redirects, IPs, and CDN/WAF presence.
+  Use on subfinder output to find live web apps.
 
   Examples:
-    - Probe single URL: httpx -u http://example.com
-    - Probe list: subfinder -d example.com | httpx
-    - With tech detection: httpx -u <url> -tech-detect
-    - Screenshot (needs chromedp): httpx -u <url> -screenshot
+    - Probe single URL: httpx -u https://example.com -tech-detect
+    - Probe list:       httpx -l urls.txt -status-code
+    - From stdin:       subfinder -d example.com | httpx -silent
+
+  NOTE: If output is empty, do NOT assume the host is dead — check
+  -cdn/-ip results and stderr. Targets behind WAF/challenge pages
+  (e.g. "One moment, please...") may still be live.
 
 short_description: HTTP probe + tech fingerprint
 
@@ -35,16 +42,16 @@ safety_class: active
 parameters:
   - name: target
     type: string
-    description: Target URL or domain (or use -list for file)
+    description: Target URL or domain (e.g. https://example.com or example.com)
     required: false
-    flag: "-u"
+    flag: "-u"          # FIX: was position:1 — PD httpx requires -u, no positional URL
     default: ""
 
   - name: list
     type: string
     description: File with list of URLs/hosts (one per line)
     required: false
-    flag: "-list"
+    flag: "-list"       # long form of -l, both valid in goflags
     default: ""
 
   - name: status_code
@@ -75,6 +82,21 @@ parameters:
     flag: "-web-server"
     default: true
 
+  - name: ip
+    type: bool
+    description: Show resolved IP address
+    required: false
+    flag: "-ip"
+    default: true
+
+  # FIX: added — critical for detecting WAF/CDN-fronted targets
+  - name: cdn
+    type: bool
+    description: Show if host is behind CDN/WAF (wappalyzer-style cdn detection)
+    required: false
+    flag: "-cdn"
+    default: true
+
   - name: follow_redirects
     type: bool
     description: Follow HTTP redirects
@@ -87,7 +109,7 @@ parameters:
     description: Number of concurrent threads
     required: false
     flag: "-threads"
-    default: 50
+    default: 25          # FIX: 50 -> 25, lower to reduce rate-limit/ban risk on WAF-fronted targets
 
   - name: timeout
     type: integer
@@ -96,24 +118,57 @@ parameters:
     flag: "-timeout"
     default: 10
 
+  - name: retries
+    type: integer
+    description: Number of retries on failed requests
+    required: false
+    flag: "-retries"
+    default: 2
+
+  - name: rate_limit
+    type: integer
+    description: Maximum requests per second
+    required: false
+    flag: "-rate-limit"
+    default: 50
+
   - name: silent
     type: bool
-    description: Only print live hosts (no banner)
+    description: Only print results (suppress banner)
     required: false
     flag: "-silent"
     default: true
+    # NOTE: wrapper must respect explicit false — do not treat bool:false
+    # as "parameter absent" or this default can never be overridden.
+
+  # FIX: added — prevents ANSI escape codes from breaking output parsing
+  - name: no_color
+    type: bool
+    description: Disable colored output (required for regex parsing)
+    required: false
+    flag: "-no-color"
+    default: true
+    locked: true         # if your wrapper supports it: LLM should not override
 
   - name: additional_args
     type: string
-    description: Additional httpx arguments
+    description: |
+      Additional httpx arguments. WARNING: only for experienced operators —
+      args here bypass parameter validation. Do not use to override safety
+      defaults (e.g. -rate-limit).
     required: false
     default: ""
 
 output:
   max_bytes: 50000
   format: text
+  # NOTE: httpx prints "(empty) stdout" when all probes fail; stderr may
+  # still contain useful errors. The orchestrator MUST surface stderr and
+  # exit_code alongside stdout — "(no output)" alone is not actionable
+  # for the ReAct loop.
   parse_hints:
-    live_host: '^(https?://[^\\s]+)\\s+\\[(\\d+)\\]\\s+\\[([^\\]]+)\\]\\s+(.*)$'
+    live_host: '^(https?://[^\s]+)\s+\[(\d+)\]\s+\[([^\]]+)\]\s+(.*)$'
+    cdn_detected: '\[cdn\]|\[cloudflare\]|\[cloudfront\]|\[akamai\]'
 
 timeout: 300
-allowed_exit_codes: [0]
+allowed_exit_codes: [0]  # httpx exits 0 even with 0 live hosts; non-zero = invocation error

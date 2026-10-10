@@ -12,11 +12,14 @@ mitre_attack:
   - T1592.002
 safety_class: active
 parameters:
+  # NOTE: the installed fierce (Python argparse) only accepts the long form
+  # `--domain DOMAIN` — there is NO `-d` short flag. Using `-d` made every
+  # call fail with "unrecognized arguments: -d <domain>" (exit 2).
   - name: domain
     type: string
     description: Target domain
     required: true
-    flag: "-d"
+    flag: "--domain"
   - name: additional_args
     type: string
     description: Additional fierce arguments

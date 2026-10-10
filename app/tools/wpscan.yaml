@@ -3,8 +3,27 @@ command: wpscan
 enabled: true
 description: |
   WPScan — WordPress vulnerability scanner. Enumerates plugins, themes, users,
-  checks for known vulnerabilities. Requires free API token for vulnerability DB.
-short_description: WPScan — WordPress vulnerability scanner
+  backups, timthumb files, and checks them against the WPScan vuln DB.
+
+  WHEN TO USE — check BEFORE calling:
+    Only run on targets that ARE WordPress. Detect first with httpx/whatweb:
+    WordPress markers = /wp-content/, /wp-includes/, wp-json REST API,
+    "WordPress" in whatweb output. If the target is not WordPress,
+    DO NOT call wpscan — it wastes several minutes and returns nothing.
+
+  API TOKEN LIMITATION:
+    Without --api-token (free, wpscan.com), enumeration still works
+    (plugins/themes/users are listed) but VULNERABILITY LOOKUPS ARE SKIPPED
+    SILENTLY. An empty "Known vulnerabilities" section with no token does
+    NOT mean the site is secure — it means CVE data was unavailable. Note
+    this limitation in your report.
+
+  Examples:
+    - Full enum:          wpscan -u https://target.com --enumerate ap,at,u
+    - Aggressive plugins: wpscan -u https://target.com --enumerate ap --plugins-detection aggressive
+    - With token:         wpscan -u https://target.com --api-token <token> --enumerate vp
+
+short_description: WPScan — WordPress vulnerability scanner (WP targets only)
 category: web_scanner
 wstg_ids:
   - WSTG-INFO-04
@@ -12,31 +31,87 @@ wstg_ids:
 mitre_attack:
   - T1595.002
 safety_class: active
+
 parameters:
   - name: target
     type: string
     description: WordPress URL (e.g. http://example.com)
     required: true
     flag: "-u"
+
   - name: enumerate
     type: string
-    description: What to enumerate (vp=plugins, vt=themes, u=users, ap=all plugins)
+    description: |
+      What to enumerate: ap=all plugins, at=all themes, u=users,
+      vp=vulnerable plugins (needs token), cb=config backups, dbe=db exports.
+      Default ap,at,u is a good first pass.
     required: false
     flag: "--enumerate"
     default: "ap,at,u"
+
+  # FIX: added — aggressive plugin detection when passive misses things
+  - name: plugins_detection
+    type: string
+    description: |
+      Plugin detection mode (mixed, passive, aggressive). "aggressive" finds
+      far more plugins but sends many more requests (slower, noisier on WAF).
+    required: false
+    flag: "--plugins-detection"
+    default: "mixed"
+    options: ["mixed", "passive", "aggressive"]
+
+  # FIX: added — WAFs block the default wpscan UA instantly
+  - name: random_user_agent
+    type: bool
+    description: Use a random browser User-Agent (--random-user-agent). Keep true for WAF-fronted targets.
+    required: false
+    flag: "--random-user-agent"
+    default: true
+
   - name: api_token
     type: string
-    description: WPScan API token (free from wpscan.com — needed for vuln DB)
+    description: |
+      WPScan API token (free from wpscan.com). REQUIRED for vulnerability
+      DB lookups — without it, enumeration works but CVE checks are
+      silently skipped (see description).
     required: false
     flag: "--api-token"
     default: ""
+
+  # FIX: added — clean output
+  - name: no_banner
+    type: bool
+    description: Suppress banner (--no-banner)
+    required: false
+    flag: "--no-banner"
+    default: true
+
+  # FIX: added — skips the slow update check at startup
+  - name: no_update
+    type: bool
+    description: Skip WPScan update check (--no-update) — faster startup
+    required: false
+    flag: "--no-update"
+    default: true
+
   - name: additional_args
     type: string
-    description: Additional wpscan arguments
+    description: |
+      Additional wpscan arguments (--passwords for brute force with
+      -U users, --usernames, --detection-mode, ...). Full capability
+      via this escape hatch.
     required: false
     default: ""
+
 output:
   max_bytes: 50000
   format: text
-timeout: 600
+  parse_hints:
+    vuln_found: '(?i)\[!\] (vulnerability|title:)|Validated:.*CVE-(\d+)'
+    plugin_found: '\[i\] Plugin\(s\) Identified.*?(\S+)'
+    user_found: '\[i\] User\(s\) Identified.*?(\S+)'
+
+# FIX: 600 -> 300 — typical WP enum finishes well within 3 minutes;
+# longer runs are aggressive-detection on huge sites (rare in this pipeline)
+timeout: 300
 allowed_exit_codes: [0, 1]

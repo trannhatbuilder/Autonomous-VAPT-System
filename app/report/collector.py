@@ -26,6 +26,17 @@ from app.db.models.hitl import HITLApproval
 
 logger = logging.getLogger(__name__)
 
+# W19-FIX6: severity ordering rank (lower = more severe). Used because
+# `severity` is a free-text column — an SQL ORDER BY sorts alphabetically
+# (critical, high, info, low, medium) which is wrong.
+_SEVERITY_RANK: dict[str, int] = {
+    "critical": 0,
+    "high": 1,
+    "medium": 2,
+    "low": 3,
+    "info": 4,
+}
+
 
 # ---------------------------------------------------------------------------
 # Dataclasses — plain-data snapshot of a scan for report generation
@@ -107,6 +118,21 @@ class FindingReportData:
     # - how_to_disprove: str
     # - recommended_next_steps: list[str]
     explanation: dict[str, Any] | None = None
+    # W19-FIX6: expose the LLM-authored vulnerability description. It is not
+    # a Finding column — tool_bridge._record_vulnerability stores it in
+    # metadata_json["description"]. The PDF exporter's _extract_observation()
+    # prefers this when present, else synthesizes from vuln_type + severity.
+    description: str | None = None
+    # W19-FIX6: the exact PoC command that produced the evidence. Also not a
+    # Finding column — tool_bridge._record_vulnerability stashes it under
+    # metadata_json["poc"]["command"]. The PDF/UI PoC sections prefer this
+    # when the raw evidence does not start with a "$ <command>" line.
+    poc_command: str | None = None
+    # Placeholder-repair transparency flag. tool_bridge._record_vulnerability
+    # rewrites {{URL}}/<target>/$TARGET placeholders in the command/evidence
+    # to the real target and sets metadata_json["poc"]["placeholder_repaired"].
+    # Report renderers show a "verify before re-running" warning when True.
+    placeholder_repaired: bool = False
 
     @classmethod
     def from_orm(cls, f: Finding, evidence: list[Evidence]) -> "FindingReportData":
@@ -127,6 +153,22 @@ class FindingReportData:
         explanation = meta.get("explanation")
         if explanation is not None and not isinstance(explanation, dict):
             explanation = None  # defensive — explanation must be dict
+        # W19-FIX6: extract the LLM's description + PoC command from metadata.
+        # tool_bridge._record_vulnerability stores:
+        #   metadata_json["description"]          — LLM's what/where/why text
+        #   metadata_json["poc"]["command"]       — exact command that produced
+        #                                            the PoC (written by the
+        #                                            record_vulnerability step)
+        #   metadata_json["poc_command"]          — legacy/fallback key
+        poc_meta = meta.get("poc") if isinstance(meta.get("poc"), dict) else {}
+        description_raw = meta.get("description")
+        poc_command_raw = (
+            poc_meta.get("command")
+            or meta.get("poc_command")
+        )
+        # Placeholder-repair flag — set by tool_bridge when it substituted a
+        # {{URL}}/<target>/$TARGET placeholder with the concrete target.
+        placeholder_repaired = bool(poc_meta.get("placeholder_repaired", False))
         return cls(
             id=f.id,
             name=f.name,
@@ -155,6 +197,20 @@ class FindingReportData:
             internet_verification=internet_meta if isinstance(internet_meta, dict) else None,
             # W19-FIX5 Phase L v2: pass explanation to FindingReportData
             explanation=explanation,
+            # W19-FIX6: surface metadata_json.description to report renderers.
+            description=(
+                description_raw.strip()
+                if isinstance(description_raw, str) and description_raw.strip()
+                else None
+            ),
+            # W19-FIX6: surface the exact PoC command (metadata_json.poc.command).
+            poc_command=(
+                poc_command_raw.strip()
+                if isinstance(poc_command_raw, str) and poc_command_raw.strip()
+                else None
+            ),
+            # Placeholder-repair transparency flag (metadata_json.poc).
+            placeholder_repaired=placeholder_repaired,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -187,6 +243,11 @@ class FindingReportData:
             "internet_verification": self.internet_verification,
             # W19-FIX5 Phase L v2: expose explanation for frontend
             "explanation": self.explanation,
+            # W19-FIX6: expose LLM description + PoC command to renderers / API.
+            "description": self.description,
+            "poc_command": self.poc_command,
+            # Placeholder-repair transparency flag (shown as a warning in UI/PDF).
+            "placeholder_repaired": self.placeholder_repaired,
         }
 
 
@@ -275,10 +336,30 @@ async def collect_scan_data(
         findings_query = findings_query.where(Finding.verified == True)  # noqa: E712
     if not include_false_positives:
         findings_query = findings_query.where(Finding.false_positive == False)  # noqa: E712
-    findings_query = findings_query.order_by(Finding.severity.asc(), Finding.created_at.asc())
+    # NOTE: SQL ORDER BY is deliberately kept even though the Python sort
+    # below owns the final ordering — it serves as the deterministic
+    # tie-break when two findings share the same (severity, created_at),
+    # which happens when record_vulnerability fires multiple times within
+    # one second (stable sort preserves SQL order for equal keys).
+    #
+    # Also: no SQL ORDER BY on severity — severity is a string, so
+    # alphabetical order is WRONG (critical < high < info < low < medium puts
+    # medium after low). Sort in Python by an explicit severity rank below.
+    findings_query = findings_query.order_by(Finding.created_at.asc())
 
     findings_result = await session.execute(findings_query)
-    findings_orm = findings_result.scalars().all()
+    findings_orm = list(findings_result.scalars().all())
+
+    # W19-FIX6: correct severity ordering (critical → high → medium → low → info).
+    # pdf_exporter re-sorts with its own SEVERITY_RANK, but SARIF / the API /
+    # any direct consumer of the collector would otherwise inherit the broken
+    # alphabetical order.
+    findings_orm.sort(
+        key=lambda f: (
+            _SEVERITY_RANK.get((f.severity or "info").lower(), 9),
+            f.created_at.isoformat() if f.created_at else "",
+        )
+    )
 
     findings: list[FindingReportData] = []
     for f in findings_orm:

@@ -60,7 +60,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.sandbox.scope_guard import ScopeGuard, ScopeViolation, ValidationResult
+# Phase 3: ScopeGuard is disabled via env + module will be deleted.
+# Use a no-op stub when the module is not available.
+try:
+    from app.sandbox.scope_guard import ScopeGuard, ScopeViolation, ValidationResult
+except ImportError:
+    from collections import namedtuple
+    ValidationResult = namedtuple("ValidationResult", ["allowed", "command", "target", "reason", "severity"])
+    class ScopeViolation(Exception):
+        pass
+    class ScopeGuard:
+        def __init__(self, declared_scope=None, **kwargs):
+            pass
+        def validate_command(self, command, target=""):
+            return ValidationResult(allowed=True, command=command, target=target, reason="noop", severity="info")
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +139,33 @@ class ToolResult:
             "exit_code": self.exit_code,
             "stdout": self.stdout[:500] if self.stdout else "",
             "stderr": self.stderr[:500] if self.stderr else "",
+            "error": self.error,
+            "truncated": self.truncated,
+            "spill_path": self.spill_path,
+            "duration_seconds": self.duration_seconds,
+            "command": self.command,
+            "target": self.target,
+            "scope_violation": self.scope_violation,
+        }
+
+    def to_llm_dict(self) -> dict[str, Any]:
+        """Serialize to dict for LLM/agent consumption (FULL output).
+
+        Identical to `to_dict()` except stdout/stderr are NOT clipped to 500
+        chars. The executor already caps raw output at `output_max_bytes`
+        (default 50KB) and spills anything larger to disk, so returning the
+        full `stdout` here is safe and bounded. The agent layer
+        (`tool_bridge.execute_tool_call`) applies its own head+tail
+        truncation (`MAX_LLM_OUTPUT_CHARS`) before the text reaches the LLM.
+
+        `to_dict()` is kept for HTTP/JSON API responses (routes/) where a
+        compact payload is desirable; this method is for the agent path only.
+        """
+        return {
+            "success": self.success,
+            "exit_code": self.exit_code,
+            "stdout": self.stdout or "",
+            "stderr": self.stderr or "",
             "error": self.error,
             "truncated": self.truncated,
             "spill_path": self.spill_path,
@@ -212,32 +252,11 @@ class SubprocessExecutor:
 
         binary = cmd_list[0]
 
-        # ---------- W10-S7: Tool allowlist enforcement ----------
-        # If agent_name is provided, validate that the binary is in the agent's
-        # tool_allowlist. This is the second layer of defense (the first layer
-        # is in BaseAgent._validate_tool_call — this layer catches direct
-        # executor.execute() calls that bypass the agent abstraction).
-        if agent_name is not None:
-            from app.agents.registry import agent_registry
-            allowed, reason = agent_registry.validate_tool_call(agent_name, binary)
-            if not allowed:
-                logger.warning(
-                    "TOOL_ALLOWLIST_VIOLATION | scan=%s | agent=%s | binary=%s | reason=%s",
-                    scan_id, agent_name, binary, reason,
-                )
-                await self._log_tool_allowlist_violation(
-                    scan_id=scan_id, agent_name=agent_name, binary=binary,
-                    command=cmd_str, target=target, reason=reason,
-                    actor_id=actor_id or self.actor_id,
-                )
-                return ToolResult(
-                    success=False,
-                    error=f"TOOL_ALLOWLIST_VIOLATION: {reason}",
-                    command=cmd_str,
-                    target=target,
-                    duration_seconds=time.time() - start_time,
-                    scope_violation=False,
-                )
+        # ---------- W10-S7: Tool allowlist enforcement (REMOVED Phase 2) ----------
+        # Phase 2 overhaul: specialist agents + registry removed. Single ReAct
+        # loop has ALL tools — no per-agent allowlist validation needed.
+        # The ScopeGuard (when enabled) still validates binaries against the
+        # global allowlist.
 
         # ---------- Scope guard validation (W8-A: + audit log) ----------
         validation = self.scope_guard.validate_command(cmd_str, target)
@@ -367,101 +386,13 @@ class SubprocessExecutor:
             ToolResult. On HITL reject/timeout/abort, success=False with
             error message explaining the HITL decision.
         """
-        # 1. Resolve HITLManager (lazy init if not provided)
-        if hitl_manager is None:
-            if db_session is None:
-                from app.db.session import async_session
-                async with async_session() as session:
-                    return await self.execute_with_hitl(
-                        command=command, target=target, tool_name=tool_name,
-                        tool_args=tool_args, scan_id=scan_id,
-                        agent_reasoning=agent_reasoning,
-                        predicted_impact=predicted_impact,
-                        scan_context=scan_context, timeout=timeout,
-                        env=env, workdir=workdir,
-                        allowed_exit_codes=allowed_exit_codes,
-                        db_session=session, hitl_manager=hitl_manager,
-                    )
-            from app.hitl.manager import HITLManager
-            hitl_manager = HITLManager(db_session)
-
-        # 2. Check if HITL is required for this tool
-        if not hitl_manager.is_hitl_required(tool_name, tool_args):
-            # No HITL needed — execute directly (W8-A: passes scan_id for audit attribution)
-            return await self.execute(
-                command=command, target=target, timeout=timeout,
-                env=env, workdir=workdir, allowed_exit_codes=allowed_exit_codes,
-                scan_id=scan_id,
-            )
-
-        # 3. HITL required — request + wait for decision
-        decision = await hitl_manager.request_and_wait(
+        # Phase 3: HITL is fully disabled — execute directly without any gate.
+        # The execute_with_hitl method is kept for backward compatibility but
+        # always calls self.execute() directly (no HITLManager, no DB row).
+        return await self.execute(
+            command=command, target=target, timeout=timeout,
+            env=env, workdir=workdir, allowed_exit_codes=allowed_exit_codes,
             scan_id=scan_id,
-            tool_name=tool_name,
-            target=target,
-            args=tool_args,
-            predicted_impact=predicted_impact,
-            agent_reasoning=agent_reasoning,
-            scan_context=scan_context,
-        )
-
-        # Commit the HITLApproval row (caller may also commit, but we want
-        # the row persisted even if subprocess fails)
-        if db_session is not None:
-            try:
-                await db_session.commit()
-            except Exception as e:
-                logger.warning("HITL commit failed (non-fatal): %s", e)
-
-        # 4. Branch on decision
-        if decision.decision == "approve":
-            # Execute with original args (W8-A: passes scan_id)
-            return await self.execute(
-                command=command, target=target, timeout=timeout,
-                env=env, workdir=workdir, allowed_exit_codes=allowed_exit_codes,
-                scan_id=scan_id,
-            )
-
-        if decision.decision == "suggest_alternative":
-            # Rebuild command from suggested_args + execute
-            new_args = decision.suggested_args or {}
-            new_command = self._rebuild_command_from_args(command, new_args)
-            logger.info(
-                "HITL suggested alternative args for %s: %s -> %s",
-                tool_name, tool_args, new_args,
-            )
-            return await self.execute(
-                command=new_command, target=target, timeout=timeout,
-                env=env, workdir=workdir, allowed_exit_codes=allowed_exit_codes,
-                scan_id=scan_id,
-            )
-
-        if decision.decision == "reject":
-            return ToolResult.error_result(
-                f"HITL rejected by {decision.decided_by}: {decision.comment}",
-                command=" ".join(command) if isinstance(command, list) else command,
-                target=target,
-            )
-
-        if decision.decision == "user_aborted":
-            return ToolResult.error_result(
-                f"HITL aborted by user: {decision.comment}",
-                command=" ".join(command) if isinstance(command, list) else command,
-                target=target,
-            )
-
-        if decision.decision == "approval_timeout":
-            return ToolResult.error_result(
-                f"HITL approval timeout: {decision.comment}",
-                command=" ".join(command) if isinstance(command, list) else command,
-                target=target,
-            )
-
-        # Unknown decision — fail safe
-        return ToolResult.error_result(
-            f"HITL unknown decision: {decision.decision} ({decision.comment})",
-            command=" ".join(command) if isinstance(command, list) else command,
-            target=target,
         )
 
     def _rebuild_command_from_args(

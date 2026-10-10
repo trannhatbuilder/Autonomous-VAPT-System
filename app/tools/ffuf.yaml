@@ -3,7 +3,25 @@ command: ffuf
 enabled: true
 description: |
   ffuf — fast web fuzzer. Directory/file discovery, vhost fuzzing, parameter
-  fuzzing. 3x faster than gobuster. Supports recursion + rate limiting.
+  fuzzing. 3x faster than gobuster.
+
+  Examples:
+    - Dir brute:        ffuf -u https://target.com/FUZZ -w wordlist.txt
+    - With extensions:  ffuf -u https://target.com/FUZZ -w w.txt -e php,txt,bak
+    - POST param fuzz:  ffuf -u https://target.com/login -X POST -d "user=FUZZ" -w users.txt
+    - Vhost fuzz:       ffuf -u https://target.com -H "Host: FUZZ.target.com" -w vhosts.txt
+    - Recursive:        ffuf -u https://target.com/FUZZ -w w.txt -recursion -recursion-depth 2
+
+  WAF tips:
+    - If EVERY response has the same status/size (e.g. all 500 or all 403),
+      the target soft-404s — use -ac (auto-calibrate) or filter with
+      -fs <size> / -fc <code> to cut noise.
+    - If getting blocked/rate-limited, lower -t (threads) or add
+      -rate-limit via additional_args.
+    - -fc 500 is safe to add when the target returns 500 for everything
+      (Cloudflare-fronted PHP errors) — real findings there are unlikely
+      buried in 500s.
+
 short_description: ffuf — fast web fuzzer (dirs, vhosts, params)
 category: web_scanner
 wstg_ids:
@@ -11,37 +29,104 @@ wstg_ids:
 mitre_attack:
   - T1595.003
 safety_class: active
+
 parameters:
   - name: target
     type: string
     description: Target URL with FUZZ keyword (e.g. http://example.com/FUZZ)
     required: true
     flag: "-u"
+
   - name: wordlist
     type: string
-    description: Wordlist file
+    description: |
+      Wordlist file. small (common.txt) for first pass; medium/big for
+      deeper enumeration when first pass finds something.
     required: true
     flag: "-w"
     default: "/usr/share/wordlists/dirb/common.txt"
+
   - name: extensions
     type: string
     description: File extensions (comma-separated)
     required: false
     flag: "-e"
     default: ""
+
+  # FIX: 50 -> 25. 50 threads on WAF-fronted targets triggers rate-limit
+  # bans mid-scan (observed). Agent can still raise it for weak targets.
   - name: threads
     type: integer
-    description: Concurrent threads
+    description: Concurrent threads (raise for weak targets, lower if WAF blocks)
     required: false
     flag: "-t"
-    default: 50
+    default: 25
+
+  # FIX: added — CRITICAL for WAF/soft-404 targets. Without filtering,
+  # a target that returns 500/403 for everything floods the output with
+  # thousands of false positives (observed on emcer.in: every path => 500).
+  # Use -fc / -fs via this or filter_status / filter_size params.
+  - name: filter_codes
+    type: string
+    description: |
+      HTTP status codes to EXCLUDE (-fc), e.g. "500" or "404,500".
+      Use when the target returns the same code for every path (soft-404).
+    required: false
+    flag: "-fc"
+    default: ""
+
+  - name: filter_size
+    type: string
+    description: |
+      Response sizes to EXCLUDE (-fs), e.g. "2358" (the WAF error page size).
+      The #1 noise-cutter for WAF-fronted targets.
+    required: false
+    flag: "-fs"
+    default: ""
+
+  # FIX: added — auto-calibration, detects soft-404 patterns automatically
+  - name: auto_calibrate
+    type: bool
+    description: Auto-calibrate filtering (-ac) — detects soft-404 responses automatically
+    required: false
+    flag: "-ac"
+    default: true
+
+  # FIX: added — bounds TOTAL run time so ffuf self-terminates with partial
+  # results instead of being killed at the hard timeout with NO output.
+  # (Same pattern as katana -max-time / nikto -maxtime.)
+  # BUGFIX: ffuf's -maxtime takes PLAIN SECONDS (int), NOT a Go duration.
+  # Do NOT set `duration: true` — the loader then emits "240s" and ffuf
+  # aborts immediately: `invalid value "240s" for flag -maxtime: parse error`.
+  - name: max_time
+    type: integer
+    description: |
+      Max total run time in SECONDS (-maxtime, e.g. 240). Without it, a big
+      wordlist × slow target burns the full hard timeout and loses ALL results.
+    required: false
+    flag: "-maxtime"
+    default: 240
+
+  # NOTE (2026-10): the old `no_color` param (flag "-nc") was REMOVED — ffuf
+  # 2.1.0-dev has NO -nc flag (nor -no-color/--no-color); passing it aborts
+  # ffuf with `flag provided but not defined: -nc`. Findings are printed
+  # WITHOUT real color codes by default (`-c` defaults to false); the only
+  # noise is a `\r\x1b[2K` erase-line prefix that is harmless. `-s` is NOT a
+  # substitute: it strips the `[Status: ...]` metadata from findings.
+
   - name: additional_args
     type: string
-    description: Additional ffuf arguments
+    description: |
+      Additional ffuf arguments (-recursion, -rate-limit, -X POST, -d data,
+      -H headers, -cookie, ...). Full attack flexibility here.
     required: false
     default: ""
+
 output:
   max_bytes: 50000
   format: text
-timeout: 600
+  parse_hints:
+    finding: '^\S+\s+\[Status: (\d+), Size: (\d+), Words: (\d+), Lines: (\d+)\]'
+
+timeout: 300   # FIX: 600 -> 300 — maxtime 240s fires first; backstop only
 allowed_exit_codes: [0]

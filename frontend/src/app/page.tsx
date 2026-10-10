@@ -34,9 +34,9 @@ type ViewName = "dashboard" | "scans" | "findings" | "settings" | "reports";
 
 interface SelectedFinding {
   id: string;
-  // Store the full finding object so FindingDetailView v1 can render
-  // without needing GET /api/findings/{id} (not yet implemented).
-  // We pass via props from report-history-view.
+  // Full finding object from report-history-view. Used as an initial/fallback
+  // render; FindingDetailView refetches the complete finding (with evidence
+  // chain + PoC command) via GET /api/findings/{id}.
   data: any;
 }
 
@@ -122,11 +122,10 @@ function AppShell() {
             </div>
           </div>
         </header>
-        {/* Note: v1 FindingDetailView needs the finding object in scope.
-            We pass selectedFinding.id + a back callback. The detail view
-            will be enhanced in Phase L v2 to fetch by id when backend
-            gets GET /api/findings/{id} endpoint. For v1, the report-history-view
-            passes the finding object via window.history state. */}
+        {/* FindingDetailView refetches the full finding (with evidence chain
+            and PoC command) via GET /api/findings/{id}. The finding object from
+            report-history-view is passed as initial/fallback data so the view
+            renders instantly and still works if the fetch fails. */}
         <FindingDetailView
           findingId={selectedFinding.id}
           findingData={selectedFinding.data}

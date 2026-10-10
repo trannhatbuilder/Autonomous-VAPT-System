@@ -17,7 +17,7 @@ import {
   AlertCircle,
   Loader2,
 } from "lucide-react";
-import { getFindings, type ProcessDetailRow } from "../../lib/api";
+import { getFinding, type ProcessDetailRow } from "../../lib/api";
 import { useToast } from "../../hooks/use-toast";
 
 /**
@@ -27,7 +27,8 @@ import { useToast } from "../../hooks/use-toast";
  * template structure:
  *   1. Header (title, severity, CVSS, URL)
  *   2. Description (LLM-generated + "Independent verification" line)
- *   3. Proof of Concept (command + key output from evidence layer=exploitation)
+ *   3. Proof of Concept (command + key output; falls back to evidence
+ *      layer=detection, the only layer the agent actually writes)
  *   4. Evidence (command + raw_output from evidence layer=detection)
  *   5. Remediation (numbered steps from finding.remediation)
  *   6. AI Confidence (overall % + 4-dim breakdown bars + internet cross-check)
@@ -80,6 +81,17 @@ interface Finding {
   auditor_verdict?: string | null;
   confidence_score?: number;
   exploit_method?: string | null;
+  poc_command?: string | null;
+  // Set by the backend when tool_bridge substituted a {{URL}}/<target>
+  // placeholder in the command/evidence with the finding's real target.
+  placeholder_repaired?: boolean;
+  metadata_json?: {
+    poc?: {
+      status?: string;
+      command?: string | null;
+      placeholder_repaired?: boolean;
+    };
+  } | null;
   internet_verified?: boolean;
   internet_verification?: {
     confirmed: boolean;
@@ -110,21 +122,51 @@ const SEVERITY_COLORS: Record<string, string> = {
 };
 
 export function FindingDetailView({ findingId, findingData, onBack }: FindingDetailProps) {
-  const [finding, setFinding] = useState<Finding | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Seed state from the `findingData` prop via a lazy initializer so we never
+  // call setState synchronously inside the effect body (react-hooks/
+  // set-state-in-effect). The prop payload is only used when there is no
+  // findingId to fetch from; it carries NO evidence rows.
+  const [finding, setFinding] = useState<Finding | null>(() =>
+    !findingId && findingData ? (findingData as Finding) : null
+  );
+  const [loading, setLoading] = useState(() => Boolean(findingId) || !findingData);
   const { toast } = useToast();
 
   useEffect(() => {
-    // Phase L v1: use the finding object passed via props (no API fetch —
-    // backend doesn't yet have GET /api/findings/{id} endpoint).
-    if (findingData) {
-      setFinding(findingData as Finding);
-      setLoading(false);
-      return;
-    }
-    // Fallback: if no findingData, show "not available" message.
-    // Phase L v2 will fetch from GET /api/findings/{id} when backend adds it.
-    setLoading(false);
+    // Phase L v2: fetch finding by ID from GET /api/findings/{id} endpoint.
+    // This returns the finding WITH its evidence rows joined so the UI can
+    // display the PoC (tool + command + raw output).
+    //
+    // CRITICAL: must use the `getFinding` api helper (which goes through
+    // `apiFetch` → adds `Authorization: Bearer <jwt>` + the correct base URL).
+    // A previous raw `fetch(...)` sent no auth header (the JWT lives in
+    // localStorage, not a cookie) → 401 → silent fallback to the list payload,
+    // which carries NO evidence → the PoC section rendered empty.
+    // Falls back to the findingData prop if the API call fails.
+    if (!findingId) return;
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const data = await getFinding(findingId);
+        if (!cancelled && data) {
+          setFinding(data as unknown as Finding);
+        }
+      } catch (err) {
+        console.error(`Failed to fetch finding ${findingId}`, err);
+        // Fallback to findingData prop (passed from report-history-view).
+        // NOTE: that payload has no `evidence` rows — the PoC section will
+        // show "No evidence recorded" if this fallback is ever used.
+        if (!cancelled && findingData) {
+          setFinding(findingData as Finding);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
   }, [findingData, findingId, toast]);
 
   if (loading) {
@@ -154,6 +196,11 @@ export function FindingDetailView({ findingId, findingData, onBack }: FindingDet
   const detectionEvidence = finding.evidence?.filter((e) => e.layer === "detection") || [];
   const exploitationEvidence = finding.evidence?.filter((e) => e.layer === "exploitation") || [];
   const auditEvidence = finding.evidence?.filter((e) => e.layer === "audit") || [];
+  // FIX: the agent records ALL evidence at layer="detection"
+  // (tool_bridge._record_vulnerability is the only writer), so the
+  // exploitation layer never exists. The PoC IS the detection evidence:
+  // command line + tool output. Fall back to it when exploitation is empty.
+  const pocEvidence = exploitationEvidence.length ? exploitationEvidence : detectionEvidence;
 
   return (
     <div className="max-w-5xl mx-auto p-6 space-y-4">
@@ -242,35 +289,106 @@ export function FindingDetailView({ findingId, findingData, onBack }: FindingDet
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          {exploitationEvidence.length === 0 ? (
+          {pocEvidence.length === 0 ? (
             <div className="text-sm text-zinc-500 dark:text-zinc-400 italic">
-              No exploitation evidence recorded for this finding.
+              No evidence recorded for this finding — treat as unconfirmed.
               {finding.poc_status === "successful"
-                ? " PoC status: successful (exploit chain recorded)."
+                ? " PoC status: successful."
                 : finding.poc_status === "attempted"
                 ? " PoC status: attempted (inconclusive)."
                 : " PoC status: not_attempted."}
             </div>
           ) : (
-            exploitationEvidence.map((ev, i) => (
-              <div key={i} className="space-y-2">
-                <div className="text-xs text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">
-                  Tool used: {ev.tool_used}
+            <>
+              {/* PoC verified / recorded badge — derived from real flags */}
+              {finding.verified && finding.poc_status === "successful" ? (
+                <div className="text-sm font-semibold text-emerald-600 dark:text-emerald-400">
+                  ✓ PoC VERIFIED
+                  <span className="font-normal text-zinc-500 dark:text-zinc-400">
+                    {" "}— tool output below confirms the vulnerability
+                  </span>
                 </div>
-                <pre className="text-xs text-zinc-300 bg-zinc-950 border border-zinc-800 rounded p-3 font-mono overflow-x-auto max-h-80 overflow-y-auto">
-                  {ev.raw_output.slice(0, 5000)}
-                  {ev.raw_output.length > 5000 && "\n... [truncated]"}
-                </pre>
-                <div className="text-[10px] text-zinc-500 dark:text-zinc-500 font-mono">
-                  evidence_hash: {ev.evidence_hash.slice(0, 32)}... · captured: {ev.captured_at}
+              ) : finding.poc_status === "successful" ? (
+                <div className="text-sm font-semibold text-orange-600 dark:text-orange-400">
+                  ◐ PoC RECORDED (pending verification)
                 </div>
-              </div>
-            ))
+              ) : null}
+
+              {/* Placeholder-repair disclosure — the stored evidence had a
+                  {{URL}}/<target> placeholder that the backend replaced with
+                  the finding's target. Warn the reader to verify manually. */}
+              {(finding.placeholder_repaired ||
+                finding.metadata_json?.poc?.placeholder_repaired) && (
+                <div className="text-xs text-amber-600 dark:text-amber-400">
+                  ⚠ Placeholder in the original evidence was auto-replaced with the
+                  finding&apos;s URL. Verify the command manually before re-running it.
+                </div>
+              )}
+
+              {pocEvidence.map((ev, i) => {
+                // Command line — priority: "$ ..." in raw evidence → the exact
+                // command from metadata_json.poc.command → exploit_method.
+                let commandLine: string | null = null;
+                const raw = ev.raw_output || "";
+                const [firstLine, ...restLines] = raw.split("\n");
+                let resultBody = raw;
+                if (firstLine?.trimStart().startsWith("$ ")) {
+                  commandLine = firstLine.trimStart().slice(2);
+                  resultBody = restLines.join("\n").replace(/^\n+/, "");
+                } else if (finding.poc_command) {
+                  commandLine = finding.poc_command;
+                } else if (
+                  finding.exploit_method &&
+                  finding.exploit_method !== "agent" &&
+                  finding.exploit_method !== "pipeline-injected"
+                ) {
+                  commandLine = finding.exploit_method;
+                }
+                return (
+                  <div key={i} className="space-y-2">
+                    <div className="text-xs text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">
+                      Tool used: {ev.tool_used}
+                    </div>
+                    {commandLine && (
+                      <div>
+                        <div className="text-xs text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">
+                          Command
+                        </div>
+                        <pre className="text-xs text-zinc-300 bg-zinc-950 border border-zinc-800 rounded p-3 font-mono overflow-x-auto whitespace-pre-wrap break-all">
+                          $ {commandLine}
+                        </pre>
+                      </div>
+                    )}
+                    <div>
+                      <div className="text-xs text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">
+                        Result
+                      </div>
+                      <pre className="text-xs text-zinc-300 bg-zinc-950 border border-zinc-800 rounded p-3 font-mono overflow-x-auto max-h-80 overflow-y-auto">
+                        {resultBody.slice(0, 5000)}
+                        {resultBody.length > 5000 && "\n... [truncated — full output in evidence chain]"}
+                      </pre>
+                    </div>
+                    <div className="text-[10px] text-zinc-500 dark:text-zinc-500 font-mono">
+                      evidence_hash: {(ev.evidence_hash || "").slice(0, 32)}... · captured: {ev.captured_at}
+                    </div>
+                  </div>
+                );
+              })}
+              {pocEvidence.length > 1 && (
+                <div className="text-xs text-zinc-500 dark:text-zinc-400 italic">
+                  + {pocEvidence.length - 1} additional evidence entry(ies) in the
+                  evidence chain for this finding.
+                </div>
+              )}
+            </>
           )}
         </CardContent>
       </Card>
 
       {/* ── 4. Evidence (detection layer) ── */}
+      {/* Hidden when the PoC card above already rendered the detection rows
+          (i.e. no exploitation-layer evidence exists) to avoid duplication. */}
+      {exploitationEvidence.length > 0 && (
       <Card className="bg-white dark:bg-zinc-900/60 border-zinc-200 dark:border-zinc-800">
         <CardHeader>
           <CardTitle className="text-zinc-900 dark:text-zinc-50 text-base flex items-center gap-2">
@@ -299,13 +417,15 @@ export function FindingDetailView({ findingId, findingData, onBack }: FindingDet
               </div>
             ))
           )}
-          {auditEvidence.length > 0 && (
-            <div className="text-xs text-zinc-500 dark:text-zinc-400 italic mt-2">
-              + {auditEvidence.length} audit-layer evidence entries (omitted from view).
-            </div>
-          )}
         </CardContent>
       </Card>
+      )}
+
+      {auditEvidence.length > 0 && (
+        <div className="text-xs text-zinc-500 dark:text-zinc-400 italic px-1">
+          + {auditEvidence.length} audit-layer evidence entries (omitted from view).
+        </div>
+      )}
 
       {/* ── 5. Remediation ── */}
       {finding.remediation && (

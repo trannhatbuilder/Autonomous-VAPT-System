@@ -2,25 +2,36 @@ name: metasploit
 command: msfconsole
 enabled: true
 description: |
-  Metasploit Framework — exploit development + execution. 4000+ exploit modules,
-  payloads, encoders, NOP generators. Requires msfrpcd running for RPC integration
-  (W6 task). This wrapper covers msfconsole CLI mode only.
+  Metasploit Framework — exploit execution via non-interactive msfconsole.
 
-  D25 HITL POLICY: safety_class=destructive — ALL exploit execution requires HITL.
-short_description: Metasploit Framework — exploit execution (HITL required)
+  ⚠ NO HUMAN GATE: exploits RUN IMMEDIATELY when called. Use only for
+  confirmed vulnerabilities within the authorized target, and prefer
+  non-destructive proof (auxiliary/scanner modules, version checks).
+  For most vulnerabilities, sqlmap/nuclei output is sufficient PoC —
+  reach for metasploit only when lighter tools cannot prove impact.
+
+  Workflow per module:
+    msfconsole -q -x "use auxiliary/scanner/http/http_version; set RHOSTS <target>; run"
+
+  Output markers: "session opened" = successful exploitation;
+  "[-] Exploit aborted" = failed; module errors print inline.
+
+short_description: Metasploit Framework — exploit execution (runs immediately, no gate)
 category: exploitation
 wstg_ids:
   - WSTG-INPV-11
 mitre_attack:
   - T1190
 safety_class: destructive
+
 parameters:
   - name: command
     type: string
     description: |
-      msfconsole command string (e.g. "use exploit/multi/handler; set RHOSTS 10.0.0.5; run").
-      The wrapper runs it non-interactively: `msfconsole -q -x "<command>; exit"`.
-      Do NOT append "exit" yourself — it is added automatically.
+      msfconsole command string (e.g. "use auxiliary/scanner/http/http_version;
+      set RHOSTS 10.0.0.5; run"). Do NOT append "exit" — added automatically
+      (suffix "; exit"). Prefer auxiliary modules; exploit/ modules only
+      for confirmed vulns.
     required: true
     flag: "-x"
     suffix: "; exit"
@@ -35,12 +46,14 @@ parameters:
     description: Additional msfconsole arguments
     required: false
     default: ""
+
 output:
   max_bytes: 50000
   format: text
-# msfconsole takes ~10-40s just to boot Ruby; a single auxiliary module run is
-# usually seconds. 180s allows that comfortably while cutting off a module that
-# blocks (e.g. an exploit waiting for a session) instead of holding the scan for
-# 10 minutes. After a timeout the stall circuit-breaker forces a tool switch.
+  parse_hints:
+    session_opened: 'Meterpreter session (\d+) opened'
+    exploit_success: '(?i)exploit completed|session opened|command shell session'
+    exploit_failed: '(?i)exploit aborted|expfailed|no session'
+
 timeout: 180
 allowed_exit_codes: [0, 1]

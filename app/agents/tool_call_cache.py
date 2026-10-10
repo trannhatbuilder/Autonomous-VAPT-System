@@ -303,6 +303,33 @@ def increment_call_count(scan_id: str, tool_name: str, tool_args: dict[str, Any]
     return cache["call_counts"][signature]
 
 
+# ── Unknown-tool attempt counter (hallucinated tool guard) ──────────────
+# The LLM occasionally invents tools ("execute", "bash", "curl") that do
+# not exist. Without a counter the agent retries them every iteration
+# (observed: `execute` called 3× in one scan). We track attempts per
+# (scan_id, tool_name) — NOT per args, since hallucinated tools are
+# usually called with varying args — and shorten the error after the 2nd
+# try so the loop cannot burn the context/iteration budget.
+#
+# Stored inside the per-scan cache dict, so `clear_scan_cache(scan_id)`
+# cleans it up automatically (no leak across scans).
+
+
+def get_unknown_tool_count(scan_id: str, tool_name: str) -> int:
+    """Return how many times an unknown tool was requested in this scan."""
+    cache = _get_scan_cache(scan_id)
+    return cache.get("unknown_tools", {}).get(tool_name, 0)
+
+
+def increment_unknown_tool_count(scan_id: str, tool_name: str) -> int:
+    """Increment the unknown-tool attempt counter. Returns the new count."""
+    cache = _get_scan_cache(scan_id)
+    if "unknown_tools" not in cache:
+        cache["unknown_tools"] = {}
+    cache["unknown_tools"][tool_name] = cache["unknown_tools"].get(tool_name, 0) + 1
+    return cache["unknown_tools"][tool_name]
+
+
 __all__ = [
     "get_cached_unavailable",
     "mark_unavailable",
@@ -313,4 +340,6 @@ __all__ = [
     "clear_scan_cache",
     "get_call_count",
     "increment_call_count",
+    "get_unknown_tool_count",
+    "increment_unknown_tool_count",
 ]

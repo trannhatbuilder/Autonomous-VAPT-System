@@ -23,9 +23,15 @@ import logging
 import re
 from typing import Any
 
-from app.tools.loader import load_all_tools, ToolDef, _build_scope_for_target
+from app.tools.loader import (
+    load_all_tools,
+    ToolDef,
+    _build_scope_for_target,
+    _yaml_mtime_changed,
+)
 from app.sandbox.executor import SubprocessExecutor, ToolResult
-from app.sandbox.scope_guard import ScopeGuard
+# Phase 3: removed scope_guard import — disabled via env, module will be deleted.
+# from app.sandbox.scope_guard import ScopeGuard
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +50,19 @@ from app.harness.ansi import strip_ansi as _strip_ansi, _ANSI_ESCAPE_RE
 MAX_LLM_OUTPUT_CHARS = 8000
 
 
+# Placeholder patterns an LLM may leave in a PoC command/evidence instead of
+# substituting the concrete target (e.g. `dalfox url "{{URL}}"`). A literal
+# placeholder makes the PoC non-reproducible and looks fabricated to a
+# reviewer, so `_record_vulnerability` rewrites them in place and flags the
+# repair via metadata_json["poc"]["placeholder_repaired"].
+_PLACEHOLDER_RE = re.compile(
+    r"\{\{\s*(?:url|target|host|domain|endpoint)\s*\}\}"
+    r"|<\s*(?:url|target|host|domain|endpoint)\s*>"
+    r"|\$(?:URL|TARGET|HOST|DOMAIN)\b",
+    re.IGNORECASE,
+)
+
+
 # ---------- Schema cache (per-agent-toolset) ----------
 #
 # build_tool_schemas() is called once per ReAct iteration. Without a cache,
@@ -51,8 +70,12 @@ MAX_LLM_OUTPUT_CHARS = 8000
 # ToolDefs — cheap relative to the YAML parse, but still O(N) per call.
 # We memoize on (frozenset(tool_names) or None-for-all).
 #
-# Cache is invalidated automatically when load_all_tools() re-parses YAMLs
-# (the underlying ToolDef objects change identity).
+# NOTE: this cache is invalidated automatically — `load_all_tools(...)` calls
+# back into `invalidate_tool_schema_cache()` whenever it re-parses the YAMLs
+# (i.e. on a mtime change / force_reload). `reload_tools()` in
+# app/tools/loader.py also does this explicitly, so an edited YAML is picked
+# up without a process restart. If you bypass load_all_tools entirely, call
+# `invalidate_tool_schema_cache()` yourself.
 
 _tool_schema_cache: dict[str, list[dict[str, Any]]] = {}
 
@@ -88,7 +111,15 @@ def build_tool_schemas(tool_names: list[str] | None = None) -> list[dict[str, An
     key = _cache_key(tool_names)
     cached = _tool_schema_cache.get(key)
     if cached is not None:
-        return cached
+        # Stale-schema guard: editing a YAML moves its mtime but does NOT
+        # invalidate this cache on its own — the invalidation lives inside
+        # load_all_tools(), which is only reached on a cache MISS below. In a
+        # long-running process (the MCP server) that meant an edited YAML kept
+        # advertising the OLD schema until a restart. _yaml_mtime_changed() is
+        # a stat-only check (no parse), so consulting it per call is cheap.
+        if not _yaml_mtime_changed():
+            return cached
+        invalidate_tool_schema_cache()
 
     all_tools = load_all_tools()
     schemas: list[dict[str, Any]] = []
@@ -99,12 +130,22 @@ def build_tool_schemas(tool_names: list[str] | None = None) -> list[dict[str, An
         if tool_names and name not in tool_names:
             continue
 
-        description = tool_def.short_description or tool_def.description[:200]
+        # FIX: the full description contains usage examples, flag notes, and
+        # WAF/limitations guidance the LLM NEEDS to call the tool correctly.
+        # short_description alone starves the model of syntax information —
+        # this is why it guessed wrong flags (e.g. httpx '-s').
+        # Prefer the full description; fall back to short_description only
+        # if the YAML has no long description.
+        desc = (tool_def.description or "").strip()
+        if not desc:
+            desc = (tool_def.short_description or "").strip()
+        if len(desc) > 1200:
+            desc = desc[:1200] + "\n... [see tool docs for more]"
         schemas.append({
             "type": "function",
             "function": {
                 "name": name,
-                "description": description,
+                "description": desc,
                 "parameters": tool_def.to_mcp_input_schema(),
             },
         })
@@ -132,10 +173,24 @@ def build_tool_schemas(tool_names: list[str] | None = None) -> list[dict[str, An
                     "target": {"type": "string", "description": "Affected URL or IP:port"},
                     "location": {"type": "string", "description": "Specific endpoint/parameter affected"},
                     "evidence": {"type": "string", "description": "Proof — tool output, PoC command + result"},
+                    "command": {"type": "string", "description": "Exact command line that produced the evidence (e.g. 'sqlmap -u http://target/?id=1 --batch'). Optional — derived from evidence if omitted."},
+                    "tool": {
+                        "type": "string",
+                        "description": (
+                            "Name of the security tool that produced this evidence "
+                            "(e.g. 'sqlmap', 'dalfox', 'nuclei', 'nmap', 'httpx'). "
+                            "REQUIRED — displayed as 'Tool used' in the report. "
+                            "Do NOT write 'agent' or 'curl'."
+                        ),
+                    },
                     "description": {"type": "string", "description": "Detailed description of the vulnerability"},
                     "remediation": {"type": "string", "description": "How to fix this vulnerability"},
                     "cvss_score": {"type": "number", "description": "CVSS v3.1 base score (0-10)"},
                 },
+                # NOTE: `tool` is intentionally NOT in `required` — some LLM
+                # providers hard-fail on missing required params, which would
+                # abort the whole finding. `_record_vulnerability` falls back
+                # to parsing the tool name out of the command line instead.
                 "required": ["title", "severity", "vuln_type", "target", "evidence", "description"],
             },
         },
@@ -212,71 +267,19 @@ async def _maybe_run_hitl_gate(
     ):
         return None  # HITL disabled — proceed with execute, no DB row created
 
-    try:
-        from app.db.session import async_session
-        from app.hitl.manager import HITLManager
-
-        async with async_session() as session:
-            mgr = HITLManager(session)
-            if not mgr.is_hitl_required(tool_name, tool_args):
-                return None  # not destructive — proceed normally
-
-            # Predicted impact — auto-derived from tool + args
-            predicted_impact = _derive_predicted_impact(tool_name, tool_args, cmd_str)
-            agent_reasoning = (
-                f"Agent invoked {tool_name} with args {tool_args} against {target}. "
-                f"Full command: {cmd_str[:200]}"
-            )
-
-            # KG confidence — default 0.5 (no KG lookup in this hot path)
-            kg_confidence = 0.5
-
-            decision = await mgr.request_and_wait(
-                scan_id=scan_id,
-                tool_name=tool_name,
-                target=target,
-                args=tool_args,
-                predicted_impact=predicted_impact,
-                agent_reasoning=agent_reasoning,
-                kg_confidence=kg_confidence,
-            )
-            await session.commit()
-
-        # Translate decision to agent-facing string
-        if decision.decision == "approve":
-            logger.info(
-                "HITL approved | scan=%s | tool=%s | decided_by=%s | duration=%.2fs",
-                scan_id, tool_name, decision.decided_by, decision.duration_seconds,
-            )
-            return None  # proceed with execute
-        elif decision.decision == "suggest_alternative" and decision.suggested_args:
-            suggested_str = json.dumps(decision.suggested_args, ensure_ascii=False)
-            return (
-                f"[HITL SUGGEST_ALTERNATIVE] {decision.comment}\n"
-                f"Suggested args: {suggested_str}\n"
-                f"Retry the tool with these args if appropriate."
-            )
-        else:
-            # reject / user_aborted / approval_timeout
-            return (
-                f"[HITL {decision.decision.upper()}] Tool '{tool_name}' was "
-                f"NOT executed. Reason: {decision.comment}\n"
-                f"Decided by: {decision.decided_by} "
-                f"(duration: {decision.duration_seconds:.2f}s).\n"
-                f"You can: (a) try a different exploit path, (b) try different "
-                f"args that are less destructive, or (c) report the finding "
-                f"with the evidence you already have."
-            )
-    except Exception as exc:
-        logger.exception(
-            "HITL gate failed (non-fatal — falling back to allow) | scan=%s | tool=%s | %s",
-            scan_id, tool_name, exc,
-        )
-        # Safe default: allow the tool to execute (HITL is a safety check,
-        # not a hard gate — failing open avoids blocking the agent entirely).
-        # If you want fail-closed, change this to:
-        #     return f"[HITL ERROR] Gate failed: {exc}. Tool blocked as safety measure."
-        return None
+    # Phase 3: HITL gate is fully disabled — env check above returns None.
+    # The block below is dead code (never reached when VAPT_AI_HITL_DISABLED=1).
+    # Kept as comment for reference; will be removed when hitl/ package is deleted.
+    #
+    # try:
+    #     from app.db.session import async_session
+    #     from app.hitl.manager import HITLManager
+    #     async with async_session() as session:
+    #         mgr = HITLManager(session)
+    #         ...
+    # except Exception as exc:
+    #     return None
+    return None
 
 
 def _derive_predicted_impact(tool_name: str, tool_args: dict[str, Any], cmd_str: str) -> str:
@@ -364,7 +367,7 @@ async def execute_tool_call(
                   still used inside the run closure)
 
     Returns:
-        Tool output string (for LLM consumption). Truncated to ~4000 chars.
+        Tool output string (for LLM consumption). Truncated to MAX_LLM_OUTPUT_CHARS (8000) chars.
     """
     # Handle special tools (these don't go through ExecutionService — they
     # don't run subprocesses; they're agent-control tools)
@@ -379,7 +382,7 @@ async def execute_tool_call(
         try:
             from app.agents.react_agent import MIN_AGENT_TURNS, MIN_COMMANDS_FOR_COMPLETE
             from app.agents.tool_call_caps import get_tool_call_stats
-            stats = get_tool_call_stats(scan_id) if hasattr(get_tool_call_stats, "__call__") else {}
+            stats = get_tool_call_stats(scan_id) or {}
             commands_run = sum(stats.values()) if stats else 0
             # Get turn count from scan_registry (best-effort)
             turn = 0
@@ -398,10 +401,10 @@ async def execute_tool_call(
                 return (
                     f"REJECTED: Pentest is NOT complete. You have only run "
                     f"{commands_run}/{MIN_COMMANDS_FOR_COMPLETE} commands and "
-                    f"{turn}/{MIN_AGENT_TURNS} turns. A thorough pentest requires: "
-                    f"header check (curl -sI), port scan (nmap), directory brute (ffuf/gobuster), "
-                    f"nuclei scan, SQLi testing (sqlmap), XSS testing (dalfox), "
-                    f"and parameter discovery (arjun). Continue testing."
+                    f"{turn}/{MIN_AGENT_TURNS} turns. Continue testing with AVAILABLE tools: "
+                    f"nmap (ports), httpx/whatweb (fingerprint + headers), ffuf (dir brute), "
+                    f"nuclei (vuln scan), katana (crawl), nikto (misconfig). "
+                    f"Do NOT call tools not in your list — they do not exist."
                 )
         except ImportError:
             # MIN_AGENT_TURNS not available (older react_agent) — fall through
@@ -450,6 +453,21 @@ async def execute_tool_call(
             scan_id, tool_name,
         )
         return stall_reason
+
+    # ── Invocation-failure circuit-breaker (checked BEFORE cache lookups) ──
+    # A tool that keeps rejecting its own command line (unknown flag / bad
+    # value) is broken. Symmetric with the stall check above, this refuses the
+    # tool BEFORE the result caches: a usage error gets cached like any other
+    # result, so checking after the cache would let an identical retry return
+    # the cached error and never re-reach the switch instruction.
+    from app.agents.tool_call_caps import is_tool_broken
+    broken, broken_reason = is_tool_broken(scan_id, tool_name)
+    if broken:
+        logger.warning(
+            "Tool call blocked by invocation-failure circuit-breaker | scan=%s | tool=%s",
+            scan_id, tool_name,
+        )
+        return broken_reason
 
     # Layer 1: tool availability (binary missing/blocked)
     cached_unavail = get_cached_unavailable(scan_id, tool_name)
@@ -539,12 +557,60 @@ async def execute_tool_call(
     all_tools = load_all_tools()
     tool_def = all_tools.get(tool_name)
     if tool_def is None:
-        return f"Error: tool '{tool_name}' not found."
+        # FIX: strong stop message + count unknown-tool attempts so the
+        # agent cannot burn iterations calling hallucinated tools.
+        from app.agents.tool_call_cache import increment_unknown_tool_count
+        attempt = increment_unknown_tool_count(scan_id, tool_name)
+        if attempt >= 2:
+            # Terse form after the 2nd try — the long message already
+            # appeared in context; repeating it wastes tokens.
+            logger.warning(
+                "Unknown tool requested again (attempt #%d) | scan=%s | tool=%s",
+                attempt, scan_id, tool_name,
+            )
+            return (
+                f"Error: tool '{tool_name}' does NOT exist ({attempt} attempts). "
+                f"STOP calling it. There is NO shell/execute tool. Pick a tool "
+                f"from the list you were given."
+            )
+        available = sorted(n for n, t in all_tools.items() if t.enabled)
+        return (
+            f"Error: tool '{tool_name}' does NOT EXIST in this environment. "
+            f"It will fail every time you call it — do NOT retry.\n"
+            f"There is NO shell/execute tool. You cannot run arbitrary commands "
+            f"(curl, echo, cat, ...). Use only the tools below.\n"
+            f"Available tools: {', '.join(available)}.\n"
+            f"If you need to send raw HTTP requests, use httpx or whatweb instead."
+        )
+
+    # ── Forbidden-args enforcement (defense-in-depth for destructive flags) ──
+    # ScopeGuard is permissive in this deployment, so forbidden_args MUST be
+    # checked here. Checks BOTH explicit args AND additional_args string.
+    if tool_def.forbidden_args:
+        args_str = " ".join(str(v) for v in tool_args.values()).lower()
+        for forbidden in tool_def.forbidden_args:
+            if forbidden.lower() in args_str:
+                logger.warning(
+                    "FORBIDDEN_ARG_BLOCKED | scan=%s | tool=%s | flag=%s",
+                    scan_id, tool_name, forbidden,
+                )
+                return (
+                    f"BLOCKED: '{forbidden}' is a forbidden argument for "
+                    f"'{tool_name}' in this deployment (not permitted without a "
+                    f"human gate, which is unavailable here). Do NOT retry with "
+                    f"this flag — use the allowed detection/dump options instead."
+                )
 
     # Build command args from tool_args
     try:
         args = tool_def.build_command_args(**tool_args)
     except Exception as exc:
+        # A loader-level failure building the argv is itself an invocation
+        # failure (the flag mapping could not be resolved). Count it so a tool
+        # whose args are persistently unbuildable is blocked like any other
+        # broken tool, instead of the agent retrying it forever.
+        from app.agents.tool_call_caps import mark_tool_invocation_failure
+        mark_tool_invocation_failure(scan_id, tool_name)
         return f"Error building command args for {tool_name}: {exc}"
 
     # Build full command
@@ -592,7 +658,11 @@ async def execute_tool_call(
             scan_id=scan_id,
             actor_id="agent",
         )
-        return result.to_dict()
+        # Option 2: use to_llm_dict() (FULL stdout, bounded by the executor's
+        # 50KB output cap + disk spill) instead of to_dict() which clips
+        # stdout/stderr to 500 chars — that clipping made the MAX_LLM_OUTPUT_CHARS
+        # head+tail truncation below dead code and starved the LLM of results.
+        return result.to_llm_dict()
 
     execution = await svc.submit(
         tool_name=tool_def.name,
@@ -615,15 +685,32 @@ async def execute_tool_call(
         if result_dict.get("scope_violation"):
             output_parts.append("SCOPE VIOLATION: target not in declared scope. Tool blocked.")
         stdout = result_dict.get("stdout") or ""
-        if stdout:
-            output_parts.append(stdout)
         stderr = result_dict.get("stderr") or ""
         exit_code = result_dict.get("exit_code")
-        if stderr and exit_code not in (0, None):
-            output_parts.append(f"[stderr] {stderr[:500]}")
+
+        # FIX: ALWAYS surface stderr — tools write diagnostics to stderr even
+        # on exit 0 (nikto plugin errors, whatweb warnings, httpx probe notes).
+        # Suppressing it made empty results unexplainable to the agent.
+        if stdout:
+            output_parts.append(stdout)
+        if stderr:
+            output_parts.append(f"[stderr] {stderr[:1000]}")  # was: only when exit != 0, capped 500
+
         error = result_dict.get("error")
         if error:
             output_parts.append(f"[error] {error}")
+
+        # FIX: structured summary instead of bare "(no output)" — the agent
+        # needs to know HOW empty the result was to decide next steps.
+        if not output_parts:
+            output_parts.append(
+                f"[empty_result] stdout: 0 bytes, stderr: 0 bytes, exit_code: {exit_code}. "
+                f"The tool produced nothing — possible causes: (1) target behind "
+                f"WAF/challenge page, (2) your IP is rate-limited/blocked by the "
+                f"target, (3) wrong flags for this tool version. Do NOT conclude "
+                f"the target is down or secure. Try different flags, a different "
+                f"tool, or note this limitation in the final report."
+            )
     elif execution.status == ExecutionStatus.HARD_TIMEOUT:
         # Record the stall so the circuit-breaker can force a tool switch if
         # the agent tries this tool again in this scan.
@@ -685,6 +772,21 @@ async def execute_tool_call(
     # context budget and the LLM reads "\x1b[0m" instead of the finding.
     body = _strip_ansi(body)
 
+    # ── Invocation-failure tracking (W22) ──────────────────────────────
+    # If the tool rejected its OWN command line (unknown flag / bad value /
+    # usage error), count it toward the per-scan invocation-failure budget.
+    # Two such failures block the tool for the scan — see is_tool_broken()
+    # at the top of this function. Only the output HEAD is inspected and the
+    # patterns are CLI-syntax-specific, so TARGET-supplied text does not trip
+    # this (a bare "invalid value" is NOT a marker; it must be anchored to
+    # "... for flag/--x").
+    from app.agents.tool_call_caps import (
+        looks_like_invocation_error,
+        mark_tool_invocation_failure,
+    )
+    if looks_like_invocation_error(body):
+        mark_tool_invocation_failure(scan_id, tool_name)
+
     # Truncate for LLM context (keep first + last half).
     # NOTE: truncation must happen on `body` BEFORE caching — otherwise
     # the cached value is the un-truncated version, which won't match
@@ -692,6 +794,16 @@ async def execute_tool_call(
     if len(body) > MAX_LLM_OUTPUT_CHARS:
         half = MAX_LLM_OUTPUT_CHARS // 2
         body = body[:half] + "\n... [truncated] ...\n" + body[-half:]
+
+    # ── Surface spill artifact path (evidence preservation) ─────────
+    # When the executor's 50KB output cap spills the FULL stdout to disk
+    # (data/evidence_spills/output_<uuid>.txt), include the path in the
+    # LLM-facing output. Without this, the truncated body loses the
+    # evidence reference and the report/ContextManager truncation (Fix 7)
+    # cannot point back to the complete output.
+    spill_path = (execution.result or {}).get("spill_path") if execution.result else None
+    if spill_path:
+        body += f"\n[full_output_spilled] {spill_path}"
 
     # ── Phase F5: populate caches AFTER subprocess returns ──────────
     # Detect patterns in the output and mark the appropriate cache so
@@ -704,11 +816,19 @@ async def execute_tool_call(
         # Mark for ALL future calls to this tool_name — no point retrying.
         mark_unavailable(scan_id, tool_name, body)
     elif "scope violation" in output_lower_head:
-        # Layer 3: scope-blocked combo — mark for this specific (tool, args)
+        # Layer 2: scope-blocked combo — mark for this specific (tool, args)
         # so different args of the same tool are still tried.
         mark_scope_blocked(scan_id, tool_name, tool_args, body)
+    elif body.strip() in ("(no output)", "[empty_result]") or body.startswith("[empty_result]"):
+        # Layer 2 (negative): result is EMPTY — do NOT cache it.
+        # Empty results are often transient (target rate-limited, momentary
+        # network failure, WAF challenge). Caching them would poison the
+        # cache: the agent's retry with identical args would keep returning
+        # the stale empty payload even after the target recovers.
+        # Let the subprocess run again later instead.
+        pass
     else:
-        # Layer 2: successful (or non-binary/scope error) — cache body
+        # Layer 3: successful (or non-binary/scope error) — cache body
         # so the LLM's retry with same args returns cached output.
         cache_result(scan_id, tool_name, tool_args, body)
 
@@ -784,26 +904,88 @@ async def _record_vulnerability(args: dict[str, Any], scan_id: str) -> str:
         mitre_attack_technique = args.get("mitre_attack_technique") or args.get("mitre_technique") or None
         mitre_attack_tactic = args.get("mitre_attack_tactic") or args.get("mitre_tactic") or None
 
-        # PoC metadata
-        exploit_method = args.get("exploit_method") or args.get("source_tool") or "agent"
+        # ── Tool name resolution ─────────────────────────────────────────
+        # Reports/UI show evidence.tool_used as "Tool used" and
+        # metadata_json["poc"]["command"] as the PoC command. The LLM used to
+        # leave tool_used as the generic "agent" (the schema had no `tool`
+        # field to fill), so every finding looked unattributed. Resolution
+        # order:
+        #   1. explicit `tool` arg (added to the schema above)
+        #   2. first token of the PoC command ("$ dalfox url ..." → "dalfox")
+        #   3. legacy aliases (source_tool / exploit_method)
+        #   4. "agent" (last resort — means the LLM really did not say)
+        command_raw = (args.get("command") or args.get("poc_command") or "").strip()
+        tool_name = (args.get("tool") or "").strip().lower()
+        if tool_name in ("", "agent", "curl"):
+            first_token = command_raw.lstrip("$ ").split()
+            if first_token:
+                tool_name = first_token[0].strip("\"'").lower()
+        if not tool_name or tool_name == "agent":
+            tool_name = (
+                str(args.get("source_tool") or args.get("exploit_method") or "agent")
+                .strip()
+                .lower()
+            )
+        exploit_method = tool_name or "agent"
+
         raw_evidence = args.get("evidence") or ""
-        # PoC definition (worklog task #18, refined):
-        # A PoC is "command + server response" — NOT a regex pattern match.
-        # The LLM is the judge: if it calls record_vulnerability with
-        # evidence (any tool output), the finding is recorded as PoC=successful.
-        # Each target system has different bugs — we cannot assume specific
-        # patterns like uid=root or set-cookie: missing flags. The LLM saw
-        # the tool output and decided it constitutes a vulnerability.
+        if isinstance(raw_evidence, str):
+            raw_evidence = raw_evidence.strip()
+
+        # ── Evidence enforcement (worklog task #19, CyberStrikeAI parity) ──
+        # A finding WITHOUT evidence is NOT a finding — it is a hypothesis.
+        # CyberStrikeAI rejects via missingVulnerabilityReproFields() at
+        # vulnerability_tools.go:284-286. VAPT-AI previously accepted empty
+        # evidence and saved the finding anyway → user saw findings with
+        # "PoC: none" and "Evidence: none" in the UI.
         #
-        # Previous strict-pattern gate (exploit_patterns.py) was REMOVED
-        # because it rejected legitimate findings that didn't match
-        # hard-coded signatures. The LLM's judgment is the new gate.
-        if raw_evidence:
-            poc_status = "successful"  # any tool output = PoC confirmed
-            exploit_match_reason = "LLM provided tool output as evidence (PoC = command + server response)"
-        else:
-            poc_status = "not_attempted"
-            exploit_match_reason = "no evidence provided — LLM did not attach tool output"
+        # Now: REJECT the record_vulnerability call if evidence is empty.
+        # Tell the LLM exactly what to do: run a tool, capture output,
+        # then re-call with that output in the `evidence` parameter.
+        if not raw_evidence:
+            return json.dumps({
+                "status": "rejected",
+                "error": "missing_evidence",
+                "message": (
+                    "REJECTED: record_vulnerability requires the `evidence` "
+                    "parameter to contain raw tool output. A finding without "
+                    "evidence is a hypothesis, not a finding. "
+                    "PoC = command + server response. "
+                    "Run a tool (curl, nmap, nuclei, sqlmap, etc.), capture "
+                    "the server's response, then re-call record_vulnerability "
+                    "with that output in the `evidence` field. "
+                    "Example: evidence=\"curl -sI https://target/\\nHTTP/2 200\\n"
+                    "server: nginx\\nset-cookie: PHPSESSID=abc; path=/\\n"
+                    "(missing HttpOnly, Secure, SameSite)\""
+                ),
+            })
+
+        # ── Placeholder repair ({{URL}}, <target>, $TARGET) ──────────────
+        # LLMs occasionally template-ize the command instead of substituting
+        # the concrete target. Repair in place rather than rejecting: a
+        # rejection throws away a finding that already cost LLM tokens, while
+        # a silent repair is only safe if it is disclosed — so we flag it via
+        # metadata_json["poc"]["placeholder_repaired"] (surfaced in the UI/PDF
+        # as a "verify before re-running" warning).
+        real_target = str(args.get("target") or location or "").strip()
+        placeholder_repaired = False
+        if real_target:
+            repaired_cmd = _PLACEHOLDER_RE.sub(real_target, command_raw)
+            repaired_ev = _PLACEHOLDER_RE.sub(real_target, raw_evidence)
+            if repaired_cmd != command_raw or repaired_ev != raw_evidence:
+                placeholder_repaired = True
+                command_raw = repaired_cmd
+                raw_evidence = repaired_ev
+        if placeholder_repaired:
+            logger.info(
+                "Evidence placeholder repaired | scan=%s | title=%s | target=%s",
+                scan_id, title[:60], real_target,
+            )
+
+        # PoC definition: command + server response. The LLM is the judge.
+        # Any tool output attached as evidence = PoC confirmed.
+        poc_status = "successful"
+        exploit_match_reason = "LLM provided tool output as evidence (PoC = command + server response)"
 
         # Pack description + remediation into metadata_json (model has no `description` column)
         description = args.get("description") or ""
@@ -815,6 +997,15 @@ async def _record_vulnerability(args: dict[str, Any], scan_id: str) -> str:
             metadata_payload["remediation"] = remediation
         if raw_evidence:
             metadata_payload["raw_evidence_excerpt"] = raw_evidence[:2000]
+        # W19-FIX6: capture the exact PoC command so reports/UI can show it.
+        # Prefer an explicit `command` arg (already placeholder-repaired
+        # above); otherwise derive it from a leading "$ <command>" line in the
+        # evidence payload.
+        poc_command = command_raw
+        if not poc_command and raw_evidence:
+            first_line = raw_evidence.split("\n", 1)[0].strip()
+            if first_line.startswith("$ "):
+                poc_command = first_line[2:].strip()
         # Stash the exploit-gate verdict so the auditor + UI can show *why*
         # a finding was or wasn't promoted to a true PoC. This is what the
         # user asked for: "if no exploit output, don't call it a finding."
@@ -822,7 +1013,13 @@ async def _record_vulnerability(args: dict[str, Any], scan_id: str) -> str:
             "status": poc_status,
             "reason": exploit_match_reason,
             "definition": "PoC = command executed + server response captured. LLM judged this as a vulnerability.",
+            "command": poc_command or None,
         }
+        if placeholder_repaired:
+            # Transparency flag: the stored command/evidence is NOT byte-for-byte
+            # what the LLM emitted — a {{...}}/<...>/$TARGET placeholder was
+            # replaced with the real target. UI/PDF show this as a warning.
+            metadata_payload["poc"]["placeholder_repaired"] = True
 
         async with async_session() as session:
             svc = EvidenceService(session)

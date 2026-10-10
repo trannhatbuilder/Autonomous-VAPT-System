@@ -33,15 +33,20 @@ safety_class: active
 parameters:
   - name: mode
     type: string
-    description: Scan mode (dir, dns, vhost, fuzz)
+    description: |
+      Scan mode. "dir" = directory/file brute-force (default), "vhost" =
+      virtual-host discovery, "fuzz" = FUZZ-keyword fuzzing.
+      NOTE: gobuster's DNS mode is intentionally NOT exposed — it takes
+      `--domain` instead of `-u`, which this single-target wrapper can't
+      route. Use the `subfinder` tool for DNS subdomain enumeration.
     required: true
     position: 1
     default: "dir"
-    options: ["dir", "dns", "vhost", "fuzz"]
+    options: ["dir", "vhost", "fuzz"]
 
   - name: target
     type: string
-    description: Target URL (for dir/vhost/fuzz) or domain (for dns)
+    description: "Target URL (required for every supported mode - dir, vhost, fuzz)"
     required: true
     flag: "-u"
 
@@ -71,23 +76,37 @@ parameters:
 
   - name: threads
     type: integer
-    description: Number of concurrent threads
+    description: |
+      Number of concurrent threads. Default 25 (W19-FIX: lowered from 50) —
+      gentler on Cloudflare-fronted / rate-limiting targets to avoid bans and
+      false negatives. Raise explicitly for internal/robust hosts.
     required: false
     flag: "-t"
-    default: 50
+    default: 25
 
   - name: timeout
-    type: integer
-    description: HTTP timeout (seconds)
+    type: string
+    description: |
+      HTTP timeout in Go duration format — MUST include the unit:
+      "10s", "30s", "2m". A bare number like 15 causes a parse error.
     required: false
-    flag: "-to"
-    default: 10
+    flag: "--to"
+    default: "10s"
+    duration: true   # loader.py appends "s" if the LLM sends a bare number (15 -> 15s)
+    options: ["5s", "10s", "15s", "30s"]   # enum gợi ý cho LLM
+
+  - name: quiet
+    type: bool
+    description: Suppress the banner (results are still printed)
+    required: false
+    flag: "-q"
+    default: true
 
   - name: no_progress
     type: bool
-    description: Hide progress bar (cleaner output)
+    description: Hide the progress bar/updates (cleaner output for automation)
     required: false
-    flag: "-q"
+    flag: "--np"
     default: true
 
   - name: additional_args
@@ -100,7 +119,12 @@ output:
   max_bytes: 50000
   format: text
   parse_hints:
-    found: '(\\S+)\\s+\\(Status:\\s+(\\d+)\\)\\s+\\[Size:\\s+(\\d+)\\]'
+    found: '(\S+)\s+\(Status:\s+(\d+)\)\s+\[Size:\s+(\d+)\]'
 
 timeout: 600
-allowed_exit_codes: [0, 1]  # 1 = no results found
+# VERIFIED against gobuster 3.8.2 (/usr/bin/gobuster):
+#   0 = success, INCLUDING zero results found (exit stays 0)
+#   1 = REAL error — connection refused / unreachable host, missing wordlist
+#   3 = invalid mode / bad usage ("No help topic")
+# Only 0 is a successful scan; 1 and 3 must surface as failures.
+allowed_exit_codes: [0]

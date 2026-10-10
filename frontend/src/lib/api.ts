@@ -543,6 +543,64 @@ export async function getFindings(params?: {
   return apiFetch("/api/findings", undefined, params as any);
 }
 
+/** One evidence row attached to a finding (the PoC source of truth). */
+export interface FindingEvidence {
+  layer: string;
+  raw_output: string;
+  tool_used: string;
+  custody_seal: string;
+  evidence_hash: string;
+  captured_at: string | null;
+  spill_path: string | null;
+}
+
+/** GET /api/findings/{id} — single finding WITH its evidence chain.
+ *
+ * The list endpoint (`getFindings`) deliberately omits the evidence rows
+ * (payload size), so this detail endpoint is the ONLY way the UI can render
+ * the PoC: Tool → Command → Result → evidence hash.
+ *
+ * MUST go through `apiFetch` (not a raw fetch): the backend auth is
+ * `HTTPBearer` reading the `Authorization: Bearer <jwt>` header, and the
+ * token lives in localStorage — a raw fetch with `credentials: "include"`
+ * sends no header, gets a 401, and the caller silently falls back to the
+ * list payload (which has no evidence) → empty PoC.
+ */
+export async function getFinding(findingId: string): Promise<{
+  id: string;
+  scan_id: string;
+  name: string;
+  vuln_type: string;
+  severity: string;
+  cvss_vector: string | null;
+  cvss_score: number;
+  location: string;
+  cwe_id: string | null;
+  cve_id: string | null;
+  wstg_test_id: string | null;
+  mitre_attack_technique: string | null;
+  mitre_attack_tactic: string | null;
+  mitre_attack_subtechnique: string | null;
+  description: string;
+  remediation: string;
+  poc_status: string;
+  poc_tier: number | null;
+  poc_command: string | null;
+  exploit_method: string | null;
+  verified: boolean;
+  false_positive: boolean;
+  auditor_verdict: string | null;
+  confidence_score: number;
+  internet_verified?: boolean;
+  internet_verification?: Record<string, any> | null;
+  explanation?: Record<string, any> | null;
+  metadata_json?: Record<string, any>;
+  evidence: FindingEvidence[];
+  created_at: string | null;
+}> {
+  return apiFetch(`/api/findings/${findingId}`);
+}
+
 // ============================================================
 // Phase F6 — Markdown export (CyberStrikeAI pattern)
 // ============================================================
@@ -664,12 +722,26 @@ export interface ScanDetail extends ScanSummary {
   process_details_total?: number;
 }
 
-/** GET /api/scans/{scan_id} — single scan detail (lite by default). */
+/** GET /api/scans/{scan_id} — single scan detail (lite by default).
+ *
+ * Returns `null` when the scan is not found in the DB (404). The backend
+ * deletes scans but preserves findings, so a UI that still references a
+ * scan id (stale URL, deleted scan) must degrade gracefully instead of
+ * throwing — callers should render an "unavailable" placeholder.
+ */
 export async function getScanDetail(
   scanId: string,
   params?: { include_process_details?: 0 | 1; limit_process_details?: number }
-): Promise<ScanDetail> {
-  return apiFetch(`/api/scans/${scanId}`, undefined, params as any);
+): Promise<ScanDetail | null> {
+  try {
+    return await apiFetch<ScanDetail>(`/api/scans/${scanId}`, undefined, params as any);
+  } catch (err: any) {
+    if (err?.status === 404) {
+      console.warn(`[api] Scan ${scanId} not found in DB — returning null`);
+      return null;
+    }
+    throw err;  // re-throw non-404 errors
+  }
 }
 
 export interface ProcessDetailRow {

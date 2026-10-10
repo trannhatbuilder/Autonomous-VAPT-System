@@ -38,6 +38,23 @@ parameters:
     required: true
     flag: "-u"
 
+  # W23-FIX: added. Without -k, feroxbuster aborts HTTPS scans against
+  # CDN/WAF-fronted hosts (Cloudflare, Akamai, fastly) and self-signed certs
+  # with "Could not connect" / cert-verify errors, producing ZERO findings.
+  # VERIFIED: `-k, --insecure` exists in feroxbuster 2.13.1 (help output).
+  # Default ON: agent scans are reconnaissance against untrusted targets where
+  # a broken/observed cert chain must NOT abort the scan. Set false only when
+  # strict cert validation is explicitly required.
+  - name: insecure_tls
+    type: bool
+    description: |
+      Skip TLS certificate verification (-k). KEEP ON for CDN/WAF-fronted
+      HTTPS targets (Cloudflare, Akamai) and self-signed certs — otherwise
+      feroxbuster fails with "Could not connect" and returns no results.
+    required: false
+    flag: "-k"
+    default: true
+
   - name: wordlist
     type: string
     description: |
@@ -94,7 +111,7 @@ output:
   max_bytes: 50000
   format: text
   parse_hints:
-    found: '^(\\d{3})\\s+(\\S+)\\s+(\\S+)\\s+(\\d+\\s+\\w+)'
+    found: '^(\d{3})\s+(\S+)\s+(\S+)\s+(\d+\w+)'
 
-timeout: 900  # 15 min — recursive scans can be slow
+timeout: 300  # 5 min (was 900s/15min — too long for single-host scan)
 allowed_exit_codes: [0, 1]

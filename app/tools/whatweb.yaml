@@ -15,9 +15,15 @@ description: |
   web servers, analytics packages, etc. 1800+ plugins.
 
   Examples:
-    - Fingerprint single URL: whatweb <url>
-    - Aggressive: whatweb -a 3 <url>
-    - Output JSON: whatweb --output-json <url>
+    - Fingerprint single URL:  whatweb http://example.com
+    - Multiple targets:        whatweb -i urls.txt
+    - Aggressive:              whatweb -a 3 http://example.com
+    - JSON output:             whatweb --output-format json http://example.com
+
+  NOTE: Aggression 3+ sends many requests and may trigger WAF/challenge
+  blocks. Prefer -a 1 for the first pass; escalate only if needed.
+  If output is empty, the target may be behind a WAF/challenge page —
+  report the limitation instead of concluding the site is down.
 
 short_description: Web tech fingerprint (1800+ plugins)
 
@@ -37,28 +43,59 @@ parameters:
     description: Target URL (e.g. http://example.com)
     required: true
     position: 1
+    default: ""
+
+  # FIX: added — probe multiple hosts from a file in one call
+  - name: list
+    type: string
+    description: File with list of URLs/hosts (one per line)
+    required: false
+    flag: "-i"
+    default: ""
 
   - name: aggression
     type: integer
-    description: Aggression level (1=stealthy, 3=aggressive — more requests)
+    description: |
+      Aggression level (1=stealthy, 3=aggressive — sends more requests,
+      higher WAF-trigger risk). Default 1.
     required: false
     flag: "-a"
     default: 1
     options: [1, 2, 3, 4]
 
+  # FIX: was flag "--output-json" which DOES NOT EXIST in whatweb.
+  # Correct syntax: --output-format <format> (or -o <format>).
   - name: output_format
     type: string
-    description: Output format (text, json, xml)
+    description: Output format (brief, verbose, json, xml, ndjson)
     required: false
-    flag: "--output-json"
+    flag: "--output-format"
     default: ""
+    options: [brief, verbose, json, xml, ndjson]
 
   - name: no_errors
     type: bool
     description: Suppress error messages
     required: false
     flag: "--no-errors"
-    default: true
+    default: false   # FIX: was true — suppressing errors hides WHY a scan
+                     # returned empty. Errors must reach the agent's context.
+
+  # REMOVED: `quiet` (-q) parameter.
+  # whatweb's -q/--quiet suppresses ALL console output (results included) —
+  # it is designed for use with --log-* file output, not for clean stdout.
+  # With default: true it was appended on EVERY call, so every scan returned
+  # 0 bytes and the orchestrator showed [empty_result]. The version banner is
+  # small and harmless, so its only purpose was to hide the results we want.
+  # Deleting the parameter (rather than defaulting it to false) guarantees the
+  # LLM can never set it. Need banner suppression? Use additional_args.
+
+  - name: max_threads
+    type: integer
+    description: Max concurrent threads (lower = gentler on target)
+    required: false
+    flag: "--max-threads"
+    default: 10
 
   - name: user_agent
     type: string
@@ -69,15 +106,24 @@ parameters:
 
   - name: additional_args
     type: string
-    description: Additional whatweb arguments
+    description: |
+      Additional whatweb arguments. WARNING: bypasses parameter validation.
+      Do not use to override safety defaults.
     required: false
     default: ""
 
 output:
   max_bytes: 50000
   format: text
+  # FIX: single-escaped regex — YAML single-quoted strings do not need
+  # backslash escaping. Double-escaping (\\[) breaks matching if the
+  # wrapper compiles the string as-is.
   parse_hints:
-    tech: '\\[([^\\]]+)\\]'
+    tech: '\[([^\]]+)\]'
+    challenge_page: 'One moment|challenge|cf-edge|captcha'
 
 timeout: 120
 allowed_exit_codes: [0]
+# NOTE: whatweb may exit non-zero if the target is unreachable;
+# the orchestrator should still surface stderr in that case rather
+# than treating it as a silent failure.

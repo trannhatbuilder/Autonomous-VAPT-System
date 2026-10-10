@@ -597,7 +597,9 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
 
     # ---------- Scan endpoints (W3-A) ----------
-    from app.agents.agent import run_scan as agent_run_scan, get_available_tools
+    # Phase 2 overhaul: removed app.agents.agent import — replaced with
+    # direct load_all_tools() call for the /tools endpoint below.
+    # from app.agents.agent import run_scan as agent_run_scan, get_available_tools
     from fastapi import APIRouter
     scan_router = APIRouter(prefix="/api/scans", tags=["scans"])
 
@@ -780,7 +782,20 @@ def create_app() -> FastAPI:
         user: UserResponse = Depends(get_current_user),
     ) -> dict[str, Any]:
         """List all tools available to the scan agent."""
-        tools = get_available_tools()
+        # Phase 2: inline get_available_tools() — no more app.agents.agent
+        from app.tools.loader import load_all_tools
+        all_tools = load_all_tools()
+        tools = [
+            {
+                "name": t.name,
+                "description": t.short_description or t.description[:200],
+                "category": t.category,
+                "safety_class": t.safety_class,
+                "wstg_ids": t.wstg_ids,
+                "parameters": [p.name for p in t.parameters],
+            }
+            for t in all_tools.values()
+        ]
         return {
             "tools_count": len(tools),
             "tools": tools,
@@ -907,73 +922,25 @@ def create_app() -> FastAPI:
             ],
         }
 
-    # ---------- HITL endpoints (W3-C) ----------
-    from app.hitl.manager import HITLManager
+    # ---------- HITL endpoints (Phase 3: REMOVED) ----------
+    # HITL is fully disabled. These endpoints returned 410 Gone if called.
+    # from app.hitl.manager import HITLManager
 
     @app.get("/api/hitl/pending/{scan_id}", tags=["hitl"])
     async def get_pending_approvals(
         scan_id: str,
-        session: AsyncSession = Depends(get_async_session),
         user: UserResponse = Depends(get_current_user),
     ) -> dict[str, Any]:
-        """Get all pending HITL approvals for a scan."""
-        mgr = HITLManager(session)
-        approvals = await mgr.get_pending_approvals(scan_id)
-        return {
-            "scan_id": scan_id,
-            "pending_count": len(approvals),
-            "approvals": [
-                {
-                    "id": str(a.id),
-                    "tool_name": a.tool_name,
-                    "target": a.target,
-                    "args": a.args_json,
-                    "predicted_impact": a.predicted_impact,
-                    "agent_reasoning": a.agent_reasoning,
-                    "kg_confidence": a.kg_confidence,
-                    "status": a.status,
-                    "expires_at": a.expires_at.isoformat(),
-                    "created_at": a.created_at.isoformat(),
-                }
-                for a in approvals
-            ],
-        }
+        """HITL is disabled (Phase 3). Returns empty list."""
+        return {"scan_id": scan_id, "pending_count": 0, "approvals": [], "note": "HITL disabled (Phase 3)"}
 
     @app.post("/api/hitl/{approval_id}/approve", tags=["hitl"])
-    async def approve_hitl(
-        approval_id: str,
-        time_limit_seconds: int | None = None,
-        session: AsyncSession = Depends(get_async_session),
-        user: UserResponse = Depends(get_current_user),
-    ) -> dict[str, Any]:
-        """Approve a HITL request."""
-        import uuid as uuid_mod
-        mgr = HITLManager(session)
-        approval = await mgr.approve(
-            uuid_mod.UUID(approval_id),
-            user_id=uuid_mod.UUID(user.id),
-            time_limit_seconds=time_limit_seconds,
-        )
-        if approval is None:
-            raise HTTPException(status_code=404, detail="Approval not found or already decided")
-        return {"status": "ok", "approval_status": approval.status}
+    async def approve_hitl(approval_id: str, user: UserResponse = Depends(get_current_user)) -> dict[str, Any]:
+        raise HTTPException(status_code=410, detail="HITL is disabled (Phase 3 overhaul)")
 
     @app.post("/api/hitl/{approval_id}/abort", tags=["hitl"])
-    async def abort_hitl(
-        approval_id: str,
-        session: AsyncSession = Depends(get_async_session),
-        user: UserResponse = Depends(get_current_user),
-    ) -> dict[str, Any]:
-        """Abort (reject) a HITL request."""
-        import uuid as uuid_mod
-        mgr = HITLManager(session)
-        approval = await mgr.abort(
-            uuid_mod.UUID(approval_id),
-            user_id=uuid_mod.UUID(user.id),
-        )
-        if approval is None:
-            raise HTTPException(status_code=404, detail="Approval not found or already decided")
-        return {"status": "ok", "approval_status": approval.status}
+    async def abort_hitl(approval_id: str, user: UserResponse = Depends(get_current_user)) -> dict[str, Any]:
+        raise HTTPException(status_code=410, detail="HITL is disabled (Phase 3 overhaul)")
 
     # ---------- Evidence custody endpoints (W4-A) ----------
     from app.evidence.custody import CustodyVerifier
@@ -999,6 +966,137 @@ def create_app() -> FastAPI:
         import uuid as uuid_mod
         verifier = CustodyVerifier(session)
         return await verifier.verify_finding_chain(uuid_mod.UUID(finding_id))
+
+    @app.get("/api/findings/{finding_id}", tags=["findings"])
+    async def get_finding_detail(
+        finding_id: str,
+        session: AsyncSession = Depends(get_async_session),
+        user: UserResponse = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """Get a single finding with its evidence rows joined.
+
+        Returns the full finding object + an `evidence` array containing
+        all Evidence rows (detection + exploitation layers) with their
+        raw_output, tool_used, custody_seal, evidence_hash, captured_at.
+
+        This endpoint is called by the frontend FindingDetailView to
+        display the PoC (command + server response) in the UI.
+        """
+        import uuid as uuid_mod
+        from sqlalchemy import select
+        from app.db.models.pentest import Finding as FindingORM
+        try:
+            from app.db.models.pentest import Evidence as EvidenceORM
+        except ImportError as exc:  # pragma: no cover — misconfigured install
+            # Structlog idiom: keyword fields render correctly under both the
+            # ConsoleRenderer (dev) and JSONRenderer (prod).
+            logger.warning(
+                "evidence_model_import_failed — /api/findings/{id} will always "
+                "return an empty evidence list (PoC section blank)",
+                error=str(exc),
+            )
+            EvidenceORM = None
+
+        # Validate the id BEFORE hitting the DB — a non-UUID path segment
+        # (hand-edited URL, bad client) would otherwise make SQLAlchemy raise
+        # a TypeError → HTTP 500. A malformed id is semantically "not found".
+        try:
+            finding_uuid = uuid_mod.UUID(finding_id)
+        except (ValueError, AttributeError, TypeError):
+            raise HTTPException(status_code=404, detail=f"Invalid finding id: {finding_id!r}")
+
+        f = await session.get(FindingORM, finding_uuid)
+        if f is None:
+            raise HTTPException(status_code=404, detail=f"Finding {finding_id!r} not found")
+
+        # metadata_json-derived values are needed by the evidence loop below
+        # (the tool_used fallback parses the PoC command), so resolve them first.
+        meta = f.metadata_json if isinstance(f.metadata_json, dict) else {}
+        poc_meta = meta.get("poc") if isinstance(meta.get("poc"), dict) else {}
+        poc_command_meta = poc_meta.get("command") or meta.get("poc_command") or None
+
+        # --- tool_used read-layer fallback --------------------------------
+        # Legacy findings stored tool_used="agent" because the old
+        # record_vulnerability schema had no `tool` field for the LLM to fill
+        # (see app/agents/tool_bridge._record_vulnerability). Recover the real
+        # tool name from the first token of the PoC command so pre-fix findings
+        # render correctly without a DB backfill.
+        def _resolve_evidence_tool(
+            tool_used: str | None, poc_command: str | None
+        ) -> str | None:
+            if tool_used and tool_used.strip().lower() not in ("", "agent", "curl"):
+                return tool_used
+            if poc_command:
+                tokens = poc_command.strip().lstrip("$ ").split()
+                if tokens:
+                    return tokens[0].strip("\"'")
+            return tool_used
+
+        # Fetch evidence rows
+        evidence_list = []
+        if EvidenceORM is not None:
+            ev_rows = (await session.execute(
+                select(EvidenceORM)
+                .where(EvidenceORM.finding_id == f.id)
+                .order_by(EvidenceORM.captured_at.asc())
+            )).scalars().all()
+            evidence_list = [
+                {
+                    "layer": e.layer,
+                    "raw_output": e.raw_output,
+                    "tool_used": _resolve_evidence_tool(e.tool_used, poc_command_meta),
+                    "custody_seal": e.custody_seal,
+                    "evidence_hash": e.evidence_hash,
+                    "captured_at": e.captured_at.isoformat() if e.captured_at else None,
+                    "spill_path": e.spill_path,
+                }
+                for e in ev_rows
+            ]
+
+        return {
+            "id": str(f.id),
+            "scan_id": f.scan_id,
+            "scan_tag": f.scan_tag,
+            "name": f.name,
+            "vuln_type": f.vuln_type,
+            "severity": f.severity,
+            "cvss_vector": f.cvss_vector,
+            "cvss_score": f.cvss_base_score,  # alias — model column is cvss_base_score
+            "cvss_base_score": f.cvss_base_score,
+            "cvss_severity": f.cvss_severity,
+            "location": f.location,
+            "cwe_id": f.cwe_id,
+            "cve_id": f.cve_id,
+            "wstg_test_id": f.wstg_test_id,
+            "mitre_attack_technique": f.mitre_attack_technique,
+            "mitre_attack_tactic": f.mitre_attack_tactic,
+            "mitre_attack_subtechnique": f.mitre_attack_subtechnique,
+            "poc_status": f.poc_status,
+            "poc_tier": f.poc_tier,
+            "exploit_method": f.exploit_method,
+            "remediation": f.remediation,
+            "verified": f.verified,
+            "false_positive": f.false_positive,
+            "auditor_verdict": f.auditor_verdict,
+            "confidence_score": f.confidence_score,
+            # ── metadata_json-derived fields (no Finding columns exist) ──
+            # description / poc_command / explanation live inside JSONB; the
+            # frontend renders the PoC + 4-dim confidence from these.
+            "description": meta.get("description", ""),
+            "poc_command": poc_command_meta,
+            # Transparency flag set by tool_bridge when it replaced a
+            # {{URL}}/<target> placeholder in the evidence with the real target.
+            "placeholder_repaired": bool(poc_meta.get("placeholder_repaired", False)),
+            "internet_verified": (
+                bool(meta.get("internet_verification", {}).get("confirmed", False))
+                if isinstance(meta.get("internet_verification"), dict) else False
+            ),
+            "internet_verification": meta.get("internet_verification"),
+            "explanation": meta.get("explanation"),
+            "metadata_json": f.metadata_json,
+            "evidence": evidence_list,
+            "created_at": f.created_at.isoformat() if f.created_at else None,
+        }
 
     @app.get("/api/scans/{scan_id}/custody-verify", tags=["evidence"])
     async def verify_scan_custody(
@@ -1192,15 +1290,15 @@ def create_app() -> FastAPI:
     load_all_tools()
     register_tools_with_mcp(mcp_server)
 
-    # W3-D: Register YAML tool names with scope guard (so they're allowed)
-    from app.sandbox.scope_guard import register_yaml_tools
-    from app.tools.loader import list_tools as _list_tools
-    register_yaml_tools({t.name for t in _list_tools()})
-
-    # W6-B: Register 8 Metasploit MCP tools + include router
-    from app.exploit.metasploit_tools import register_metasploit_mcp_tools, create_metasploit_router
-    register_metasploit_mcp_tools(mcp_server)
-    app.include_router(create_metasploit_router(get_current_user, UserResponse))
+    # Phase 3: removed scope_guard.register_yaml_tools + metasploit MCP tools.
+    # ScopeGuard is disabled via env; metasploit is called via subprocess
+    # (tool YAML), not via MCP.
+    # from app.sandbox.scope_guard import register_yaml_tools
+    # register_yaml_tools({t.name for t in _list_tools()})
+    # from app.exploit.metasploit_tools import register_metasploit_mcp_tools, create_metasploit_router
+    # register_metasploit_mcp_tools(mcp_server)
+    # Phase 3: removed metasploit router — called via subprocess (tool YAML).
+    # app.include_router(create_metasploit_router(get_current_user, UserResponse))
 
     @app.get("/mcp/tools/list", tags=["mcp"])
     async def mcp_tools_list() -> dict[str, Any]:
@@ -1829,9 +1927,9 @@ def create_app() -> FastAPI:
     from app.routes.vulnerabilities import router as vulns_router
     app.include_router(vulns_router)
 
-    # ---------- W14-S8: C2 Routes ----------
-    from app.routes.c2 import router as c2_router
-    app.include_router(c2_router)
+    # ---------- C2 Routes (Phase 3: REMOVED) ----------
+    # from app.routes.c2 import router as c2_router
+    # app.include_router(c2_router)
 
     # ---------- W17: KG Routes ----------
     from app.routes.kg import router as kg_router

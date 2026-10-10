@@ -113,7 +113,7 @@ class ToolExecution:
     status: ExecutionStatus = ExecutionStatus.QUEUED
     started_at: datetime | None = None
     completed_at: datetime | None = None
-    result: dict[str, Any] | None = None  # ToolResult.to_dict() on success
+    result: dict[str, Any] | None = None  # ToolResult.to_dict()/to_llm_dict() on success
     error: str | None = None
     duration_seconds: float = 0.0
 
@@ -137,7 +137,7 @@ class ToolExecution:
 
 RunClosure = Callable[
     [asyncio.Event],            # cancel_event — set when cancel() is called
-    Awaitable[dict[str, Any]],  # returns ToolResult.to_dict()
+    Awaitable[dict[str, Any]],  # returns ToolResult.to_dict() / to_llm_dict()
 ]
 
 

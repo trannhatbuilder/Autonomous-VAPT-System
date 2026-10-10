@@ -4,6 +4,25 @@ enabled: true
 description: |
   Katana — web crawler from ProjectDiscovery. Discovers endpoints, JavaScript
   files, API paths. Headless browser mode for dynamic content.
+
+  Examples:
+    - Basic crawl:        katana -u https://example.com -d 2 -ct 3m
+    - Deeper, slower:     katana -u https://example.com -d 3 -c 10 -rl 50 -ct 5m
+
+  NOTES:
+    - WAF/challenge-fronted targets (Cloudflare etc.) can trap the crawler
+      in loops. The crawl-duration limit (-ct) ALWAYS bounds the crawl — katana
+      returns whatever it discovered up to that point instead of being killed
+      with nothing.
+    - VERIFIED on katana v1.7.0: the duration flag is `-ct` / `-crawl-duration`
+      (max duration to crawl the target; units s/m/h/d). There is NO `-max-time`
+      flag — an older/incorrect name that makes katana abort with
+      "flag provided but not defined: -max-time".
+    - Keep depth 2 for the first pass. Depth 3+ multiplies URLs
+      exponentially and frequently triggers rate-limiting/bans.
+    - On targets that respond 403 to everything (WAF blocked), crawling
+      is pointless — switch to ffuf/feroxbuster or skip to the next phase.
+
 short_description: Katana — web crawler (endpoint + JS discovery)
 category: recon
 wstg_ids:
@@ -11,25 +30,93 @@ wstg_ids:
 mitre_attack:
   - T1592.002
 safety_class: active
+
 parameters:
   - name: target
     type: string
     description: Target URL
     required: true
     flag: "-u"
+
+  # FIX: default 3 -> 2. Depth 3 on WAF-fronted targets caused a 300s
+  # hard-timeout with zero results (the crawl never finished).
   - name: depth
     type: integer
-    description: Crawl depth
+    description: Crawl depth (2 = first pass; 3+ only for confirmed-clean targets)
     required: false
     flag: "-d"
-    default: 3
+    default: 2
+
+  # FIX: added — THE critical guard. Bounds TOTAL crawl time so katana
+  # self-terminates and returns partial results instead of being killed
+  # by the wrapper's hard timeout (which discards everything).
+  # Must stay well below the tool-level `timeout` (180s) below.
+  # FIX2: flag corrected `-max-time` -> `-ct` (VERIFIED katana v1.7.0; the
+  # old name aborts the whole run: "flag provided but not defined").
+  - name: max_time
+    type: string
+    description: |
+      Maximum total crawl time (katana -ct / -crawl-duration; units s/m/h/d,
+      e.g. "2m", "3m", "150s"). ALWAYS set this — without it a trapped crawler
+      burns the full hard timeout and returns nothing.
+    required: false
+    flag: "-ct"
+    default: "2m"
+    duration: true            # bare numbers get "s" appended (needs loader.py duration field)
+
+  - name: timeout
+    type: string
+    description: Per-request timeout in seconds (e.g. 20)
+    required: false
+    flag: "-timeout"
+    default: "20"
+
+  # FIX: added — rate/concurrency control for WAF-fronted targets
+  - name: concurrency
+    type: integer
+    description: Number of concurrent workers (lower = gentler on target)
+    required: false
+    flag: "-c"
+    default: 10
+
+  - name: rate_limit
+    type: integer
+    description: Max requests per second
+    required: false
+    flag: "-rl"
+    default: 50
+
+  # FIX: added — clean machine-readable output, no banner
+  - name: silent
+    type: bool
+    description: Show only findings (suppress banner)
+    required: false
+    flag: "-silent"
+    default: true
+
+  # FIX: added — prevents ANSI codes from breaking output parsing
+  - name: no_colors
+    type: bool
+    description: Disable colored output
+    required: false
+    flag: "-nc"
+    default: true
+
   - name: additional_args
     type: string
-    description: Additional katana arguments
+    description: |
+      Additional katana arguments. WARNING: bypasses parameter validation.
+      Do not use to override -ct (it is the anti-hang guard).
     required: false
     default: ""
+
 output:
   max_bytes: 50000
   format: text
-timeout: 300
+  parse_hints:
+    endpoint: '^(https?://\S+)'
+
+# FIX: 300 -> 180. -max-time (120s) must fire FIRST and return partial
+# results; this hard timeout is only the backstop.
+timeout: 180
 allowed_exit_codes: [0]

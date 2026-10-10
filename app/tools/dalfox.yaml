@@ -32,11 +32,25 @@ mitre_attack:
 safety_class: active
 
 parameters:
-  - name: target
+  - name: mode
     type: string
-    description: Target URL (with params if known)
+    description: |
+      dalfox subcommand (positional, must precede the target):
+      "url" = single target URL (default), "file" = list of targets,
+      "pipe" = read targets from stdin, "sxss" = stored XSS mode.
     required: true
     position: 1
+    default: "url"
+    options: ["url", "file", "pipe", "sxss"]
+
+  - name: target
+    type: string
+    description: Target URL (with params if known, e.g. https://example.com/search?q=test)
+    required: true
+    position: 2
+    # NOTE: NO `flag:` — dalfox v2 has no `--url`; the URL is the positional
+    # arg of the `url` subcommand (`dalfox url <target>`). Declaring both a
+    # `flag` and a `position` made the loader emit the arg twice.
 
   - name: param
     type: string
@@ -98,8 +112,8 @@ output:
   max_bytes: 50000
   format: text
   parse_hints:
-    xss_found: '\\[V\\]\\s+Found\\s+at\\s+(\\S+)'
-    payload: 'Payload:\\s+(\\S+)'
+    xss_found: '\[V\]\s+Found\s+at\s+(\S+)'
+    payload: 'Payload:\s+(\S+)'
 
-timeout: 600
+timeout: 300  # 5 min (was 600s — reduced for faster scans)
 allowed_exit_codes: [0]

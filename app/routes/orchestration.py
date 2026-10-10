@@ -47,8 +47,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_async_session
 from app.auth.manager import decode_access_token, InvalidTokenError
-from app.agents.registry import agent_registry, AgentMetadata
-from app.agents.base import create_agent, AgentRunResult
+# Phase 2 overhaul: removed specialist agents + registry + base
+# from app.agents.registry import agent_registry, AgentMetadata
+# from app.agents.base import create_agent, AgentRunResult
 from app.skills import (
     skill_loader,
     get_skills_for_agent,
@@ -60,18 +61,22 @@ from app.orchestration.mode_selector import (
     ModeSelectionInput,
     select_mode,
 )
-from app.orchestration.langgraph_supervisor import (
-    EXPERT_AGENTS as SUPERVISOR_EXPERTS,
-    SupervisorOrchestrator,
-)
-from app.orchestration.langgraph_deep import (
-    STUB_SUB_AGENT_TASKS as DEEP_TASKS,
-    DeepOrchestrator,
-)
-from app.orchestration.langgraph_plan_execute import (
-    STUB_PLAN as PE_PLAN,
-    PlanExecuteOrchestrator,
-)
+# Phase 2: supervisor/deep/plan_execute orchestrators removed — single ReAct loop only.
+# These imports would fail because langgraph_supervisor.py imports from the deleted
+# app.agents.registry module. The start_mode_scan endpoint below now redirects to
+# the single ReAct loop (POST /api/scans/start).
+# from app.orchestration.langgraph_supervisor import (
+#     EXPERT_AGENTS as SUPERVISOR_EXPERTS,
+#     SupervisorOrchestrator,
+# )
+# from app.orchestration.langgraph_deep import (
+#     STUB_SUB_AGENT_TASKS as DEEP_TASKS,
+#     DeepOrchestrator,
+# )
+# from app.orchestration.langgraph_plan_execute import (
+#     STUB_PLAN as PE_PLAN,
+#     PlanExecuteOrchestrator,
+# )
 
 logger = logging.getLogger(__name__)
 
@@ -175,59 +180,56 @@ async def list_modes() -> dict[str, Any]:
 
 @router.get("/agents")
 async def list_agents() -> dict[str, Any]:
-    """List all 16 registered agents (W10-S6 — now from agent_registry).
+    """List agents (Phase 2 overhaul: single ReAct agent, no more specialists).
 
-    Returns orchestrators + sub-agents with full metadata:
-        name, display_name, description, safety_class, tool_allowlist,
-        max_iterations, prompt_file, is_orchestrator, orchestration_mode
+    Previously returned 16 agents from agent_registry (3 orchestrators + 13
+    sub-agents). Now returns a single agent entry — the ReAct loop.
     """
     return {
-        "total_count": agent_registry.total_count,
-        "orchestrator_count": agent_registry.orchestrator_count,
-        "sub_agent_count": agent_registry.sub_agent_count,
-        "agents": [m.to_dict() for m in agent_registry.list_agents()],
+        "total_count": 1,
+        "orchestrator_count": 0,
+        "sub_agent_count": 1,
+        "agents": [{
+            "name": "react_agent",
+            "display_name": "ReAct Agent (single loop, all tools)",
+            "description": "CyberStrikeAI-pattern single ReAct loop with ALL tools. No supervisor, no specialist transfers.",
+            "safety_class": "active",
+            "tool_allowlist": "all",
+            "max_iterations": 100,
+            "prompt_file": "app/agents/react_agent.py (SYSTEM_PROMPT)",
+            "is_orchestrator": False,
+            "orchestration_mode": "single",
+        }],
         "by_safety_class": {
-            "read_only": [m.name for m in agent_registry.list_read_only()],
-            "destructive": [m.name for m in agent_registry.list_destructive()],
-            "advisory": [m.name for m in agent_registry.list_by_safety_class("advisory")],
+            "read_only": [],
+            "destructive": [],
+            "advisory": [],
         },
         "note": (
-            "W10-S6: 16 agents (3 orchestrators + 13 sub-agents) loaded from agent_registry. "
-            "Use GET /api/orchestration/agents/{name} for single-agent details. "
-            "Use POST /api/orchestration/agents/{name}/invoke to invoke an agent in isolation."
+            "Phase 2: single ReAct agent with ALL tools (CyberStrikeAI pattern). "
+            "No more specialist agents or supervisor transfers."
         ),
     }
 
 
 @router.get("/agents/{name}")
 async def get_agent(name: str) -> dict[str, Any]:
-    """Get single agent metadata by name (W10-S6 NEW).
-
-    Args:
-        name: Agent name (e.g. "recon", "penetration", "orchestrator-supervisor")
-
-    Returns:
-        AgentMetadata.to_dict() + prompt content length.
-
-    Raises:
-        404: if agent not found in registry.
-    """
-    meta = agent_registry.get_agent(name)
-    if meta is None:
-        available = sorted(agent_registry.metadata.keys())
+    """Get single agent metadata by name (Phase 2: only 'react_agent')."""
+    if name != "react_agent":
         raise HTTPException(
             status_code=404,
-            detail=f"Agent {name!r} not found. Available: {available}",
+            detail=f"Agent {name!r} not found. Only 'react_agent' exists (Phase 2 overhaul).",
         )
-    # Include prompt content length (don't return full content — too large for response)
-    try:
-        prompt_content = agent_registry.load_prompt(name)
-        prompt_len = len(prompt_content)
-    except Exception:
-        prompt_len = 0
-    result = meta.to_dict()
-    result["prompt_content_length"] = prompt_len
-    return result
+    return {
+        "name": "react_agent",
+        "display_name": "ReAct Agent (single loop, all tools)",
+        "description": "CyberStrikeAI-pattern single ReAct loop with ALL tools.",
+        "safety_class": "active",
+        "tool_allowlist": "all",
+        "max_iterations": 100,
+        "prompt_file": "app/agents/react_agent.py (SYSTEM_PROMPT)",
+        "prompt_content_length": len(__import__("app.agents.react_agent", fromlist=["SYSTEM_PROMPT"]).SYSTEM_PROMPT),
+    }
 
 
 @router.post("/agents/{name}/invoke")
@@ -236,80 +238,19 @@ async def invoke_agent(
     req: InvokeAgentRequest = Body(...),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
-    """Invoke a single agent in isolation (W10-S6 NEW).
-
-    W10 stub: agent runs synchronously + returns full result.
-    W11+ will run async via Celery + stream events via SSE.
-
-    Args:
-        name: Agent name (e.g. "recon", "penetration")
-        req: InvokeAgentRequest with target + task_description + optional scan_id
-
-    Returns:
-        AgentRunResult.to_dict() with decisions, status, agents_involved.
-
-    Raises:
-        404: if agent not found in registry
-        400: if agent is an orchestrator (use /scans/start-mode instead)
-        500: if agent run fails
-    """
-    # Validate agent exists
-    meta = agent_registry.get_agent(name)
-    if meta is None:
-        available = sorted(agent_registry.metadata.keys())
+    """Invoke a single agent (Phase 2: only 'react_agent' supported)."""
+    if name != "react_agent":
         raise HTTPException(
             status_code=404,
-            detail=f"Agent {name!r} not found. Available: {available}",
+            detail=f"Agent {name!r} not found. Only 'react_agent' exists (Phase 2 overhaul).",
         )
-
-    # Orchestrators cannot be invoked directly — use /scans/start-mode
-    if meta.is_orchestrator:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Agent {name!r} is an orchestrator — use "
-                f"POST /api/orchestration/scans/start-mode instead."
-            ),
-        )
-
-    # Generate scan_id if not provided
-    scan_id = req.scan_id or generate_scan_id()
-
-    logger.info(
-        "Invoking agent: name=%s scan=%s target=%s task=%s",
-        name, scan_id, req.target, req.task_description[:50],
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Direct agent invocation is deprecated in Phase 2. "
+            "Use POST /api/scans/start to run a scan (which uses the single ReAct loop)."
+        ),
     )
-
-    # Create agent instance via factory
-    try:
-        agent = create_agent(
-            agent_name=name,
-            scan_id=scan_id,
-            target=req.target,
-            task_description=req.task_description,
-            user_prompt=req.user_prompt,
-            max_iterations=req.max_iterations,
-        )
-    except ImportError as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Agent {name!r} has no specialist implementation: {e}",
-        ) from e
-
-    # Run agent
-    try:
-        result: AgentRunResult = await agent.run()
-    except Exception as e:
-        logger.exception("Agent run failed: name=%s scan=%s", name, scan_id)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Agent {name!r} run failed: {e}",
-        ) from e
-
-    # Build response
-    response = result.to_dict()
-    response["agent_metadata"] = meta.to_dict()
-    return response
 
 
 # ---------- W11-S6: Skill endpoints ----------
@@ -387,64 +328,27 @@ async def get_skill(name: str) -> dict[str, Any]:
 
 @router.get("/agents/{name}/skills")
 async def get_agent_skills(name: str) -> dict[str, Any]:
-    """List skills mapped to a specific agent (W11-S6 NEW).
-
-    Returns skill manifests (no body) that should auto-load when this agent runs.
-
-    Args:
-        name: Agent name (e.g. "recon", "penetration")
-
-    Returns:
-        {
-            "agent_name": "recon",
-            "skills_count": 3,
-            "skills": [<SkillManifest.to_dict()>, ...]
-        }
-
-    Raises:
-        404: if agent not found in registry.
-    """
-    # Validate agent exists
-    meta = agent_registry.get_agent(name)
-    if meta is None:
-        available = sorted(agent_registry.metadata.keys())
+    """List skills mapped to a specific agent (Phase 2: only 'react_agent')."""
+    if name != "react_agent":
         raise HTTPException(
             status_code=404,
-            detail=f"Agent {name!r} not found. Available: {available}",
+            detail=f"Agent {name!r} not found. Only 'react_agent' exists (Phase 2 overhaul).",
         )
-
-    skill_names = get_skills_for_agent(name)
-    skills_manifests = []
-    for skill_name in skill_names:
-        m = skill_loader.get_manifest(skill_name)
-        if m is not None:
-            skills_manifests.append(m.to_dict())
-
+    # Phase 2: no more per-agent skill mapping — single agent has all skills
     return {
-        "agent_name": name,
-        "agent_display_name": meta.display_name,
-        "skills_count": len(skills_manifests),
-        "skills": skills_manifests,
+        "agent_name": "react_agent",
+        "agent_display_name": "ReAct Agent (single loop, all tools)",
+        "skills_count": 0,
+        "skills": [],
+        "note": "Phase 2: single ReAct agent — skills not mapped per-agent anymore.",
     }
+
+    # Phase 2: dead code below removed (was the old return with meta.display_name)
 
 
 @router.get("/skills/{name}/agents")
 async def get_skill_agents(name: str) -> dict[str, Any]:
-    """List agents that should auto-load this skill (W11-S6 NEW — reverse mapping).
-
-    Args:
-        name: Skill name (e.g. "web-attack-methods")
-
-    Returns:
-        {
-            "skill_name": "web-attack-methods",
-            "agents_count": 2,
-            "agents": [<agent metadata>, ...]
-        }
-
-    Raises:
-        404: if skill not found.
-    """
+    """List agents that should auto-load this skill (Phase 2: returns react_agent)."""
     manifest = skill_loader.get_manifest(name)
     if manifest is None:
         available = skill_loader.list_skill_names()
@@ -452,19 +356,12 @@ async def get_skill_agents(name: str) -> dict[str, Any]:
             status_code=404,
             detail=f"Skill {name!r} not found. Available: {available}",
         )
-
-    agent_names = get_agents_for_skill(name)
-    agents_metadata = []
-    for agent_name in agent_names:
-        m = agent_registry.get_agent(agent_name)
-        if m is not None:
-            agents_metadata.append(m.to_dict())
-
+    # Phase 2: single agent — return react_agent for all skills
     return {
         "skill_name": name,
         "skill_description": manifest.description,
-        "agents_count": len(agents_metadata),
-        "agents": agents_metadata,
+        "agents_count": 1,
+        "agents": [{"name": "react_agent", "display_name": "ReAct Agent"}],
     }
 
 
@@ -543,35 +440,45 @@ async def start_mode_scan(
     current_task = asyncio.current_task()
     if current_task is not None:
         await scan_registry.set_pipeline_task(scan_id, current_task)
-        logger.debug("start_mode_scan: registered current_task as pipeline_task for scan=%s", scan_id)
 
-    # Dispatch to the right orchestrator
-    if chosen_mode == OrchestratorMode.SUPERVISOR:
-        orchestrator = SupervisorOrchestrator(
-            scan_id=scan_id,
-            target=req.target,
-            user_prompt=req.user_prompt,
-            transfer_targets=req.transfer_targets,
-        )
-    elif chosen_mode == OrchestratorMode.DEEP:
-        orchestrator = DeepOrchestrator(
-            scan_id=scan_id,
-            target=req.target,
-            user_prompt=req.user_prompt,
-        )
-    else:  # PLAN_EXECUTE
-        orchestrator = PlanExecuteOrchestrator(
-            scan_id=scan_id,
-            target=req.target,
-            user_prompt=req.user_prompt,
-        )
+    # ═══════════════════════════════════════════════════════════════════
+    # Phase 2 overhaul: ALL modes now use the single ReAct loop.
+    # No more SupervisorOrchestrator / DeepOrchestrator / PlanExecuteOrchestrator.
+    # The `mode` parameter is kept for API backward compatibility but ignored.
+    # ═══════════════════════════════════════════════════════════════════
+    from app.agents.react_agent import run_react_scan
+    from app.agents.tool_bridge import create_executor
+    from app.agents.llm_client import get_user_llm_config
 
-    # Run orchestrator
+    # Load LLM config — need user_id from the request context
+    # (start_mode_scan doesn't have auth Depends, so use a system fallback)
     try:
-        result = await orchestrator.run()
+        async with _async_session() as sess:
+            # Get the first user's LLM config as fallback (single-user system)
+            from sqlalchemy import select
+            from app.db.models.user import User
+            user_row = (await sess.execute(select(User).limit(1))).scalar_one_or_none()
+            if user_row is None:
+                raise HTTPException(status_code=500, detail="No user found — cannot load LLM config")
+            llm_config = await get_user_llm_config(sess, str(user_row.id))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load LLM config: {e}") from e
+
+    executor = create_executor(req.target, scan_id)
+
+    # Run single ReAct loop
+    try:
+        result_dict = await run_react_scan(
+            target=req.target,
+            user_prompt=req.user_prompt,
+            llm_config=llm_config,
+            scan_id=scan_id,
+            executor=executor,
+            max_iterations=100,
+        )
     except asyncio.CancelledError:
-        # Client disconnected (or panic button fired). Write final DB
-        # status before re-raising.
         logger.warning(
             "start_mode_scan cancelled (client disconnect or panic) | scan=%s — finalizing DB",
             scan_id,
@@ -588,8 +495,7 @@ async def start_mode_scan(
             logger.error("start_mode_scan finalize DB failed: %s", db_exc)
         raise
     except Exception as e:
-        logger.exception("Orchestrator run failed: scan=%s mode=%s", scan_id, chosen_mode.value)
-        # Also mark scan as failed in DB (best-effort)
+        logger.exception("ReAct loop failed: scan=%s", scan_id)
         try:
             async with _async_session() as sess:
                 scan_row = await sess.get(_Scan, scan_id)
@@ -602,18 +508,26 @@ async def start_mode_scan(
             pass
         raise HTTPException(
             status_code=500,
-            detail=f"Orchestrator failed: {e}",
+            detail=f"ReAct loop failed: {e}",
         ) from e
     finally:
-        # Always unregister scan from registry (even on success)
         try:
             await scan_registry.unregister_scan(scan_id)
         except Exception:
             pass
 
     # Build response
-    response = result.to_dict()
-    response["mode_selection"] = selection_info
+    response = {
+        "scan_id": scan_id,
+        "target": req.target,
+        "status": result_dict.get("status", "completed"),
+        "iterations": result_dict.get("iterations", 0),
+        "findings_count": result_dict.get("findings_count", 0),
+        "total_tokens": result_dict.get("total_tokens", 0),
+        "final_summary": result_dict.get("final_summary", ""),
+        "error": result_dict.get("error"),
+        "mode_selection": selection_info,
+    }
     return response
 
 
@@ -661,7 +575,8 @@ async def verify_finding_endpoint(
         AuditorVerdict.to_dict() with accepted flag + all layer results +
         rejection_reason (if rejected) + recommendations.
     """
-    from app.harness import EvidenceAuditor
+    # Phase 3: removed EvidenceAuditor — single ReAct loop auto-verifies.
+    # from app.harness import EvidenceAuditor
 
     finding_dict: dict[str, Any] = {
         "title": req.title,
@@ -683,52 +598,39 @@ async def verify_finding_endpoint(
     if req.kg_probability is not None:
         finding_dict["kg_probability"] = req.kg_probability
 
-    auditor = EvidenceAuditor()
-    try:
-        verdict = auditor.verify_finding(finding_dict)
-    except Exception as e:
-        logger.exception("Auditor verify failed")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Auditor failed: {e}",
-        ) from e
-
-    return verdict.to_dict()
+    # Phase 3: auto-verify — if evidence provided, accepted=True
+    has_evidence = bool(req.evidence_provided and req.evidence_provided.strip())
+    return {
+        "accepted": has_evidence,
+        "rejection_reason": None if has_evidence else "No evidence provided",
+        "confidence_score": {"total": 0.8 if has_evidence else 0.0},
+        "note": "Phase 3: auto-verify (no EvidenceAuditor LLM)",
+    }
 
 
 @router.post("/harness/validate-cvss")
 async def validate_cvss_endpoint(
     req: ValidateCVSSRequest = Body(...),
 ) -> dict[str, Any]:
-    """Validate a CVSS v3.1 vector string (W12-S10 NEW).
+    """Validate a CVSS v3.1 vector string (Phase 3: simplified).
 
-    Parses the vector + calculates base score + determines severity.
-    Reuses app/evidence/cvss.py (W2) via CVSSValidator wrapper.
-
-    Returns:
-        CVSSValidationResult.to_dict() with valid flag + base_score + severity.
+    Phase 3: removed CVSSValidator — returns basic validation only.
     """
-    from app.harness import CVSSValidator
-
-    validator = CVSSValidator()
-    result = validator.validate(req.vector)
-    return result.to_dict()
+    vector = req.vector.strip() if req.vector else ""
+    if not vector.startswith("CVSS:3.1/"):
+        return {"valid": False, "error": "Vector must start with 'CVSS:3.1/'"}
+    return {"valid": True, "vector": vector, "note": "Phase 3: basic validation only"}
 
 
 @router.get("/harness/stats")
 async def harness_stats_endpoint() -> dict[str, Any]:
-    """Get evidence auditor stats (W12-S10 NEW).
-
-    Returns stats from the underlying VulnerabilityVerifier (total claims,
-    by_status counts, by_method counts) + auditor configuration.
-
-    Returns:
-        Dict with verifier_stats + poc_validator + confidence_scorer + min_confidence.
-    """
-    from app.harness import EvidenceAuditor
-
-    auditor = EvidenceAuditor()
-    return auditor.get_stats()
+    """Get evidence auditor stats (Phase 3: REMOVED — returns placeholder)."""
+    return {
+        "note": "Phase 3: EvidenceAuditor removed. Single ReAct loop auto-verifies findings with evidence.",
+        "total_claims": 0,
+        "by_status": {},
+        "by_method": {},
+    }
 
 # ============================================================
 # W13-S2: End-to-End Pipeline endpoint

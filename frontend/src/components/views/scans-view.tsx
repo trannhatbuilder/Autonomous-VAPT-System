@@ -569,9 +569,12 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
     (async () => {
       try {
         const detail = await getScanDetail(scanId, { include_process_details: 0 });
-        if (!cancelled) {
+        if (!cancelled && detail) {
           setScan(detail);
           setProgress(detail.progress);
+        } else if (!cancelled) {
+          setScan({ id: scanId, target: "(scan details unavailable)", status: "unknown", progress: 0 } as any);
+          setProgress(0);
         }
       } catch (err) {
         console.error("Failed to load scan detail", err);
@@ -617,23 +620,12 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
         }
         processedEventsRef.current.add(eventId);
 
-        // W19-FIX4 Phase H3: skip stale buffered events older than 30s on
-        // initial connect. Backend buffers up to 100 events; we don't want
-        // to re-process old `hitl_approval_required` for decisions already
-        // made (the audit_agent likely already decided + emitted
-        // `hitl_decision_made` which we may have missed during disconnect).
-        const evtTimestamp = (raw as any).timestamp
-          ? new Date((raw as any).timestamp).getTime()
-          : (raw as any).created_at
-            ? new Date((raw as any).created_at).getTime()
-            : Date.now();
-        const evtAgeMs = Date.now() - evtTimestamp;
-        const isInitialConnectBuffer = evtAgeMs > 30000 && evtAgeMs < 600000;
-        if (isInitialConnectBuffer) {
-          // Skip stale events > 30s old but < 10min (older = likely replay from DB)
-          console.debug("[VAPT-SSE] Skipping stale buffered event:", evtName, "age=", Math.round(evtAgeMs / 1000) + "s");
-          return;
-        }
+        // Phase 6: removed stale event skip — was dropping events older
+        // than 30s on initial connect. This caused events to disappear
+        // from the timeline when SSE reconnected. Now we keep ALL events
+        // (dedup above handles repeats). HITL modal is disabled (Phase 2)
+        // so the stale-event re-pop concern is moot.
+        // const evtTimestamp = ... isInitialConnectBuffer ... return;
 
         const data: ScanEvent = { ...raw, type: evtName as EventType };
         setEvents((prev) => [...prev, data]);
@@ -736,9 +728,26 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
     })();
   }, [scanId, isLive]);
 
-  // ── Auto-scroll to bottom on new events ─────────────────────────
+  // ── Auto-scroll to bottom on new events (only if user is already near bottom) ──
+  // Phase 6: previously this forced scroll on EVERY new event, so when user
+  // scrolled up to read old output, the view jumped back down. Now we check
+  // if user is within 150px of the bottom — only auto-scroll if so.
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const isUserNearBottomRef = useRef(true);
+
   useEffect(() => {
-    if (timelineEndRef.current) {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = container;
+      isUserNearBottomRef.current = scrollHeight - scrollTop - clientHeight < 150;
+    };
+    container.addEventListener("scroll", handleScroll);
+    return () => container.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  useEffect(() => {
+    if (isUserNearBottomRef.current && timelineEndRef.current) {
       timelineEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }, [events, dbEvents]);
@@ -769,6 +778,22 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
   } else if (!isLive && dbEvents.length > 0) {
     dbEvents.forEach((row) => timeline.push({ kind: "db", row, key: `db-${row.id}` }));
   }
+
+  // Phase 6: track current phase for border-left coloring of events
+  const phaseBorderColors: Record<string, string> = {
+    "recon": "border-l-2 border-l-blue-400 dark:border-l-blue-600",
+    "enumeration": "border-l-2 border-l-cyan-400 dark:border-l-cyan-600",
+    "vulnerability-analysis": "border-l-2 border-l-amber-400 dark:border-l-amber-600",
+    "exploitation": "border-l-2 border-l-red-400 dark:border-l-red-600",
+    "reporting": "border-l-2 border-l-emerald-400 dark:border-l-emerald-600",
+    "init": "border-l-2 border-l-zinc-300 dark:border-l-zinc-700",
+    "consent_check": "border-l-2 border-l-zinc-300 dark:border-l-zinc-700",
+    "audit": "border-l-2 border-l-purple-400 dark:border-l-purple-600",
+    "persist": "border-l-2 border-l-zinc-300 dark:border-l-zinc-700",
+    "report": "border-l-2 border-l-zinc-300 dark:border-l-zinc-700",
+    "cleanup": "border-l-2 border-l-zinc-300 dark:border-l-zinc-700",
+  };
+  let renderPhase = "init";
 
   return (
     <div className="flex-1 overflow-hidden flex flex-col">
@@ -824,7 +849,7 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
       </div>
 
       {/* Timeline */}
-      <div className="flex-1 overflow-y-auto bg-zinc-50 dark:bg-zinc-950 p-4">
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto bg-zinc-50 dark:bg-zinc-950 p-4">
         <div className="max-w-4xl mx-auto space-y-1 font-mono text-xs">
           {timeline.length === 0 ? (
             <div className="text-zinc-600 italic text-center py-12">
@@ -833,7 +858,11 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
           ) : (
             timeline.map((item) => {
               if (item.kind === "live") {
-                return <LiveEventLine key={item.key} event={item.event} />;
+                // Phase 6: track phase changes for border-left coloring
+                if (item.event.type === "phase_change" && item.event.phase) {
+                  renderPhase = item.event.phase;
+                }
+                return <LiveEventLine key={item.key} event={item.event} phaseBorderClass={phaseBorderColors[renderPhase] || ""} />;
               } else {
                 return <DbEventLine key={item.key} row={item.row} scanId={scanId} expanded={!!expandedTools[item.row.id]} onToggle={() => toggleTool(item.row.id)} />;
               }
@@ -857,18 +886,61 @@ function ScanTimeline({ scanId, isLive, onLiveComplete }: {
 
 // ── LiveEventLine (rendered for SSE events during live scan) ──────────
 
-function LiveEventLine({ event }: { event: ScanEvent }) {
+function LiveEventLine({ event, phaseBorderClass = "" }: { event: ScanEvent; phaseBorderClass?: string }) {
   const time = formatEventTime(event.timestamp);
   const type = event.type;
 
   if (type === "phase_change") {
+    // Phase 6: make phase changes more visible with colored background + icon
+    const phaseColors: Record<string, string> = {
+      "recon": "bg-blue-50 dark:bg-blue-950/30 border-blue-300 dark:border-blue-900 text-blue-700 dark:text-blue-300",
+      "enumeration": "bg-cyan-50 dark:bg-cyan-950/30 border-cyan-300 dark:border-cyan-900 text-cyan-700 dark:text-cyan-300",
+      "vulnerability-analysis": "bg-amber-50 dark:bg-amber-950/30 border-amber-300 dark:border-amber-900 text-amber-700 dark:text-amber-300",
+      "exploitation": "bg-red-50 dark:bg-red-950/30 border-red-300 dark:border-red-900 text-red-700 dark:text-red-300",
+      "reporting": "bg-emerald-50 dark:bg-emerald-950/30 border-emerald-300 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300",
+      "init": "bg-zinc-100 dark:bg-zinc-900/40 border-zinc-300 dark:border-zinc-700 text-zinc-600 dark:text-zinc-400",
+      "consent_check": "bg-zinc-100 dark:bg-zinc-900/40 border-zinc-300 dark:border-zinc-700 text-zinc-600 dark:text-zinc-400",
+      "audit": "bg-purple-50 dark:bg-purple-950/30 border-purple-300 dark:border-purple-900 text-purple-700 dark:text-purple-300",
+      "persist": "bg-zinc-100 dark:bg-zinc-900/40 border-zinc-300 dark:border-zinc-700 text-zinc-600 dark:text-zinc-400",
+      "report": "bg-zinc-100 dark:bg-zinc-900/40 border-zinc-300 dark:border-zinc-700 text-zinc-600 dark:text-zinc-400",
+      "cleanup": "bg-zinc-100 dark:bg-zinc-900/40 border-zinc-300 dark:border-zinc-700 text-zinc-600 dark:text-zinc-400",
+    };
+    const phaseLabel: Record<string, string> = {
+      "recon": "Phase 1: Reconnaissance",
+      "enumeration": "Phase 2: Scanning & Enumeration",
+      "vulnerability-analysis": "Phase 3: Vulnerability Analysis",
+      "exploitation": "Phase 4: Exploitation",
+      "reporting": "Phase 5: Reporting",
+      "init": "Init",
+      "consent_check": "Consent Check",
+      "audit": "Audit",
+      "persist": "Persist",
+      "report": "Report",
+      "cleanup": "Cleanup",
+    };
+    const colorClass = phaseColors[event.phase || ""] || "bg-zinc-100 dark:bg-zinc-900/40 border-zinc-300 dark:border-zinc-700 text-zinc-600 dark:text-zinc-400";
+    const label = phaseLabel[event.phase || ""] || event.phase || "Unknown Phase";
+    // Phase 6: emoji icons for each phase + bigger spacing + sticky
+    const phaseIcons: Record<string, string> = {
+      "recon": "🔍",
+      "enumeration": "📋",
+      "vulnerability-analysis": "⚠️",
+      "exploitation": "⚡",
+      "reporting": "📝",
+      "init": "🚀",
+      "consent_check": "✅",
+      "audit": "🔍",
+      "persist": "💾",
+      "report": "📝",
+      "cleanup": "🧹",
+    };
+    const icon = phaseIcons[event.phase || ""] || "📌";
     return (
-      <div className="flex items-center gap-2 py-1 mt-2 border-t border-zinc-200 dark:border-zinc-800">
-        <span className="text-zinc-700">{time}</span>
-        <span className="text-purple-500 dark:text-purple-400">━━━</span>
-        <span className="text-purple-700 dark:text-purple-300 font-semibold">{event.phase}</span>
-        {event.message && <span className="text-zinc-500">— {event.message}</span>}
-        {event.progress !== undefined && <span className="text-zinc-600 ml-auto">[{event.progress}%]</span>}
+      <div className={`flex items-center gap-2 py-2 px-3 mt-6 mb-2 border-l-4 rounded-r sticky top-0 z-10 backdrop-blur-sm ${colorClass}`}>
+        <span className="text-lg">{icon}</span>
+        <span className="font-bold text-sm">{label}</span>
+        {event.message && <span className="text-zinc-500 dark:text-zinc-400 text-[11px]">— {event.message}</span>}
+        {event.progress !== undefined && <span className="ml-auto text-[10px]">[{event.progress}%]</span>}
       </div>
     );
   }

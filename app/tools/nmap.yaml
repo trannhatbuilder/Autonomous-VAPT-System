@@ -16,10 +16,16 @@ description: |
   fingerprinting, vulnerability detection via NSE scripts.
 
   Examples:
-    - Port scan top 1000 ports: nmap -sS -sV <target>
-    - Full port scan: nmap -p- <target>
-    - OS + version detection: nmap -A <target>
-    - NSE vuln scripts: nmap --script vuln <target>
+    - Port scan top 1000 ports: nmap target -sT -sV -Pn
+    - Full port scan:           nmap target -sT -Pn -p-
+    - OS + version detection:   nmap target -A -Pn (root required)
+    - NSE vuln scripts:         nmap target -Pn --script vuln
+
+  NOTE: Most hardened/WAF-fronted targets drop ICMP ping probes. The
+  default host_online=true (-Pn) treats the host as up without pinging —
+  keep it enabled unless you are scanning a large CIDR and need host
+  discovery. "Host seems down" in output almost always means the ping
+  was blocked, NOT that the host is dead.
 
 short_description: Network scanner — port scan, service detection, NSE scripts
 
@@ -47,9 +53,26 @@ parameters:
     required: true
     position: 1  # positional arg (appended to command)
 
+  # FIX: added — THE critical default for WAF-fronted/hardened targets
+  # that drop ICMP. Without -Pn, single-target scans frequently return
+  # "Host seems down" and waste an iteration before the agent self-corrects.
+  - name: host_online
+    type: bool
+    description: |
+      Treat host as always online (-Pn), skipping ping discovery.
+      Default true — most targets block ICMP and would otherwise be
+      reported as "down". Disable ONLY when scanning large CIDR ranges
+      where host discovery is the goal.
+    required: false
+    flag: "-Pn"
+    default: true
+
   - name: ports
     type: string
-    description: 'Port specification (e.g. 80, 1-1000, -, top-1000). Default: top 1000.'
+    description: |
+      Port specification via -p (e.g. "80", "1-1000", "80,443,8080").
+      For ALL 65535 ports use additional_args="-p-" (nmap requires the
+      literal "-p-" token; "-p -" is not valid).
     required: false
     flag: "-p"
     default: ""
@@ -88,10 +111,13 @@ parameters:
 
   - name: os_detection
     type: bool
-    description: Enable OS detection (-O). Default true (fast mode).
+    description: |
+      Enable OS detection (-O). Default FALSE — requires root privileges.
+      The agent runs as non-root, so -O will cause nmap to quit with error.
+      Only enable if running as root (sudo).
     required: false
     flag: "-O"
-    default: true
+    default: false
 
   - name: aggressive
     type: bool
@@ -104,6 +130,15 @@ parameters:
     flag: "-A"
     default: false
 
+  # FIX: added — filters output to open ports only, reduces noise and
+  # keeps output under max_bytes on busy hosts
+  - name: open_only
+    type: bool
+    description: Only show open (or possibly open) ports (--open)
+    required: false
+    flag: "--open"
+    default: true
+
   - name: script
     type: string
     description: NSE script to run (e.g. vuln, banner, smb-os-discovery)
@@ -113,10 +148,13 @@ parameters:
 
   - name: timing
     type: string
-    description: Timing template (T0=paranoid, T3=normal, T5=insane)
+    description: |
+      Timing template (T0=paranoid, T3=normal, T4=aggressive, T5=insane).
+      T4 default. For WAF-fronted targets consider T3 to reduce
+      rate-limit/ban risk.
     required: false
     flag: "-T"
-    default: "4"  # T4 — aggressive timing
+    default: "4"
     options: ["0", "1", "2", "3", "4", "5"]
 
   # ---- hang guards -------------------------------------------------------
@@ -155,11 +193,13 @@ parameters:
 output:
   max_bytes: 50000  # 50KB cap, spill to disk if exceeded
   format: text       # nmap outputs text by default
+  # FIX: single-escaped (no double backslashes) + leading \s* so that
+  # indented nmap lines ("   80/tcp   open  http") actually match.
   parse_hints:
-    # Regex patterns to extract structured data from output
-    open_port: '^(\\d+)/(tcp|udp)\\s+open\\s+(\\S+)'
-    host_status: '^Host is up|Host: \\S+\\s+\\(.*\\)\\s+Status: Up'
+    open_port: '^\s*(\d+)/(tcp|udp)\s+open\s+(\S+)'
+    host_status: 'Host is up|Host:\s+\S+\s+\(.*\)\s+Status: Up'
     os_guess: '^OS details: (.*)'
+    filtered_note: 'Host seems down.*try -Pn'
 
 # Timeout (seconds) — hard external bound.
 # nmap self-terminates earlier via --host-timeout (default 4m); this is the
@@ -167,5 +207,9 @@ output:
 # scan cannot appear "frozen" for 10 minutes.
 timeout: 300
 
-# Allowed exit codes (0 = success, 1 = no hosts up — still useful info)
-allowed_exit_codes: [0, 1]
+# FIX: was [0, 1] with wrong comment. nmap exits 0 even when NO hosts are
+# up ("Host seems down" is still a successful run). Exit 1 = real error
+# (DNS resolution failure, bad flag, privilege error). Allowing exit 1
+# here would silently swallow invocation errors — the orchestrator must
+# see them so the agent can self-correct.
+allowed_exit_codes: [0]
