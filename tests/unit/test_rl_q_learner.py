@@ -194,17 +194,23 @@ class TestDoubleQLearner:
 
     def test_target_soft_update_changes_weights(self):
         """After train_step, target network should differ from initial (soft-updated)."""
+        # Seeded: at init `online` and `target` hold IDENTICAL weights, so the
+        # soft-update delta is τ · (online - target) where (online - target) is
+        # itself only a few gradient steps old. The delta is genuinely tiny
+        # (~1e-7) and `np.allclose` compares relative to the weight magnitude,
+        # so the unseeded version flipped pass/fail depending on the draw.
+        rng = np.random.default_rng(1234)
         learner = DoubleQLearner(state_dim=337, action_dim=7, hidden_dim=64)
         target_before = learner.target.get_weights()["value_W1"].copy()
         learner.train_step(
-            state=np.random.randn(337).astype(np.float32),
+            state=rng.standard_normal(337).astype(np.float32),
             action=0, reward=1.0,
-            next_state=np.random.randn(337).astype(np.float32),
+            next_state=rng.standard_normal(337).astype(np.float32),
             done=False,
         )
         target_after = learner.target.get_weights()["value_W1"]
-        # τ=0.005 → small change but non-zero
-        assert not np.allclose(target_before, target_after)
+        # τ=0.005 → small change, but it must be non-zero.
+        assert np.abs(target_after - target_before).max() > 0
 
     def test_QLearner_alias(self):
         """QLearner is alias for DoubleQLearner (backward compat with EVVO)."""
@@ -279,9 +285,11 @@ class TestCacheSaveLoad:
 
         fresh = DoubleQLearner(state_dim=337, action_dim=7, hidden_dim=64)
         assert fresh._step == 0  # reset, not 999
-        # Original stale file gone (renamed to .stale-dim128.<ts>.npz)
+        # Original stale file gone (renamed to .stale-shape.<ts>.npz — the
+        # backup name is no longer state-dim-specific: the guard validates
+        # every weight shape, not just value_W1's input width).
         assert not stale_path.exists()
-        backups = list(tmp_path.glob("q_weights.stale-dim128.*.npz"))
+        backups = list(tmp_path.glob("q_weights.stale-shape.*.npz"))
         assert len(backups) == 1
 
 

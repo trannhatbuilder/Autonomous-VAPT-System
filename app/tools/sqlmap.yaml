@@ -152,13 +152,13 @@ parameters:
 
   # WIDENED (was hard-blocked): --dump is now a first-class param. Scope the
   # extraction with dump_db (-D) / dump_table (-T); a bare --dump enumerates
-  # ALL tables of ALL databases and can exhaust the 300s tool timeout.
+  # ALL tables of ALL databases and can exhaust the 420s tool timeout.
   - name: dump
     type: bool
     description: |
       Extract DB entries for the tested parameter (--dump) — the PoC for SQLi
       impact. Combine with dump_db (-D) and dump_table (-T) to avoid dumping
-      the entire DBMS (slow; may hit the 300s timeout).
+      the entire DBMS (slow; may hit the 420s timeout).
     required: false
     flag: "--dump"
     default: false
@@ -194,11 +194,13 @@ output:
     dbms: "back-end DBMS: (.*)"
     payload: "Payload: (.*)"
 
-# FIX: 600 -> 300. sqlmap has no total run-time bound; with tamper scripts the
-# request count multiplies and a 10-minute run still never finishes. 300s is
-# enough for a single-parameter test; past that the agent should narrow scope
-# (e.g. -p <specific-param>) instead of waiting.
-timeout: 300
+# 600 -> 300 -> 420 (7 min). sqlmap has no total run-time bound; with tamper
+# scripts the request count multiplies, so a bounded window still matters.
+# 420s covers a scoped dump (-D/-T) that 300s cut off mid-extraction; past
+# that the agent should narrow scope (e.g. -p <specific-param>) instead of
+# waiting. This is the external kill backstop — per-request timeout stays at
+# the `--timeout` param default (20s).
+timeout: 420
 allowed_exit_codes: [0, 1]  # 1 = no SQLi found — still useful
 
 # Only the most dangerous flags remain blocked — enforced in

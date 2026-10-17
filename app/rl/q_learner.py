@@ -33,6 +33,17 @@ import numpy as np
 
 from app.core.config import settings
 
+# Dimensions are DERIVED, not restated.
+#
+# These used to be `STATE_DIM: int = 337` and `ACTION_DIM: int = 7`, justified
+# by a comment claiming a circular import between this module and
+# `state_encoder`. That cycle did not exist — `state_encoder` imports nothing
+# from `app` — so the duplicate constants bought nothing and cost a real
+# desync hazard: adding an eighth action to `ACTION_SPACE` would leave the
+# Q-network with seven outputs. See `app/rl/actions.py`.
+from app.rl.actions import ACTION_DIM
+from app.rl.state_encoder import STATE_DIM, state_layout_id
+
 logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────
@@ -41,12 +52,6 @@ DATA_DIR: Path = settings.rl_dir
 WEIGHTS_FILE: Path = DATA_DIR / "q_weights.npz"
 META_FILE: Path = DATA_DIR / "q_meta.json"
 
-# Must match app.rl.state_encoder.STATE_DIM (filled in W16-S3).
-# Hard-coded here to avoid circular import: state_encoder imports from q_learner
-# for ACTION_DIM, and q_learner needs STATE_DIM at class-instantiation time.
-STATE_DIM: int = 337
-ACTION_DIM: int = 7
-
 DEFAULT_LEARNING_RATE: float = 0.001
 DEFAULT_GAMMA: float = 0.95
 DEFAULT_TAU: float = 0.005
@@ -54,6 +59,27 @@ DEFAULT_HIDDEN_DIM: int = 64
 
 # Huber loss kappa (SmoothL1 threshold). EVVO audit P2-17.
 HUBER_KAPPA: float = 1.0
+
+# Cache write throttle for `train_batch` (explicit `save_cache()` is never
+# throttled — it is the durability anchor at episode end / shutdown).
+#
+# `train_batch` used to write the .npz after EVERY batch. Measured cost: the
+# state dict is 177,126 bytes (~173 KiB) and `save_cache()` takes ~3.9 ms
+# (np.savez + json.dumps + two file writes). With `train_from_memory`
+# running every few agent turns, that is a disk write per turn to protect at
+# most one batch of progress — the harness already calls `save_cache()`
+# explicitly at episode end (harness.py), which is what actually bounds the
+# loss window.
+#
+# The first call after start-up always writes (`_last_cache_save` starts at
+# 0.0, so the elapsed check is satisfied), which keeps "one batch ⇒ cache
+# exists" true for tests and for a process that trains once and exits.
+CACHE_SAVE_MIN_BATCHES: int = 25
+CACHE_SAVE_MIN_SECONDS: float = 30.0
+
+# Weight-source problems already reported (one per kind, not per batch).
+# Training runs every few turns; a per-batch warning would flood the log.
+_WARNED_WEIGHT_ISSUES: set[str] = set()
 
 
 # ── Activation helpers ────────────────────────────────────────────────────
@@ -212,12 +238,30 @@ class DuelingNetwork:
               - v_value:  scalar         — V(s)
               - advantage: (action_dim,) — A(s, a) - mean(A(s, :))
         """
-        v, _ = self.value_net.forward(x)
-        v = float(v[0])
-        a, _ = self.advantage_net.forward(x)
-        a = a - np.mean(a)  # advantage normalization (identifiability)
-        q = v + a
+        q, v, a, _, _ = self.forward_detailed(x)
         return q, v, a
+
+    def forward_detailed(
+        self, x: np.ndarray,
+    ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray, np.ndarray]:
+        """Forward pass that also returns the hidden activations.
+
+        `train_step` needs `h1_v` / `h1_a` for the backward pass. It used to
+        obtain them by running `value_net.forward()` and
+        `advantage_net.forward()` a second time on the same `s`, i.e. two
+        redundant forward passes per gradient step — measured at ~68 µs, 13.6%
+        of a 502 µs `train_step` (≈4.4 ms per batch of 64). Returning the
+        activations from the pass that already computed them costs nothing.
+
+        Returns:
+            (q_values, v_value, advantage, h1_value, h1_advantage)
+        """
+        v_out, h1_v = self.value_net.forward(x)
+        v = float(v_out[0])
+        a_out, h1_a = self.advantage_net.forward(x)
+        a = a_out - np.mean(a_out)  # advantage normalization (identifiability)
+        q = v + a
+        return q, v, a, h1_v, h1_a
 
     def get_weights(self) -> dict[str, np.ndarray]:
         w: dict[str, np.ndarray] = {}
@@ -275,6 +319,11 @@ class DoubleQLearner:
         self.hidden_dim = hidden_dim
         self._step = 0
 
+        # Throttle state for `_save_cache_throttled()` (see train_batch).
+        # 0.0 makes the first save unconditional: monotonic() - 0.0 > 30s.
+        self._batches_since_cache_save = 0
+        self._last_cache_save: float = 0.0
+
         self.online = DuelingNetwork(state_dim, action_dim, hidden_dim)
         self.target = DuelingNetwork(state_dim, action_dim, hidden_dim)
         self.target.copy_from(self.online)
@@ -283,44 +332,158 @@ class DoubleQLearner:
         # app.rl.persistence.load_latest_checkpoint() in W16-S7.
         self._load_from_cache()
 
+    @property
+    def train_steps(self) -> int:
+        """Gradient steps this learner has actually performed.
+
+        0 means the network is still at its random initialisation, so its
+        Q-values carry no information and any argmax over them is noise.
+        `HarnessBridge` uses this to decide whether RL guidance is fit to
+        be shown to the LLM at all.
+        """
+        return int(self._step)
+
     # ── cache load / save ──────────────────────────────────────────────
+    def load_cache(self) -> bool:
+        """Public re-load of the .npz cache. Returns True if weights loaded.
+
+        `HarnessBridge._load_checkpoint_safe()` calls this. It used to call
+        a method that did not exist, so the AttributeError was swallowed by
+        the surrounding `except` and the harness logged
+        `rl_checkpoint_load_skipped` on EVERY scan even though
+        `__init__` -> `_load_from_cache()` had already restored the weights.
+        """
+        if not WEIGHTS_FILE.exists():
+            return False
+        self._load_from_cache()
+        return True
+
     def _load_from_cache(self) -> None:
         """Load weights + meta from .npz cache if present and dims match.
 
-        If the cached weights were saved with a different state_dim (e.g.
-        EVVO legacy 128-dim), quarantine the stale file and start fresh.
-        This is the EVVO audit P0-6 fix, preserved.
+        Validates **every** cached array against the shape the live network
+        expects — state_dim, hidden_dim, action_dim, and any future dimension —
+        and quarantines the file on any difference. `TwoLayerMLP.set_weights()`
+        copies blindly with no shape check, so an unchecked mismatch does not
+        raise; it installs the wrong-width weights and the network keeps
+        running.
+
+        Two silent failure modes this closes (both were live before):
+
+        * `action_dim` 7 → 8: a cached `adv_W2` of shape (7, hidden) is adopted
+          by a network declaring 8 actions. `forward()` then returns 7
+          Q-values, `argmax` is always in [0, 7), and **action 7 can never be
+          selected** — for every scan, while the load reports success.
+        * `hidden_dim` 64 → 128: a cached `W1` of shape (64, state) is adopted.
+          This does NOT crash (the whole cached set is self-consistent), so the
+          network quietly runs 64-wide while `get_stats()` advertises 128.
+          The original guard assumed this case would "crash loud"; it does not.
+
+        Only `state_dim` was ever validated, because it is the one dimension
+        that also mismatches the *input data* and would raise at forward time.
+        Expected shapes are derived from `self.online` so the guard cannot
+        drift from the architecture it protects.
         """
         if not WEIGHTS_FILE.exists():
             return
         try:
             data = dict(np.load(WEIGHTS_FILE, allow_pickle=False))
-            w1 = data.get("value_W1")
-            expected_in = self.state_dim
-            if w1 is not None and w1.shape[1] != expected_in:
-                saved_dim = int(w1.shape[1])
+
+            expected_shapes = {
+                key: arr.shape for key, arr in self.online.get_weights().items()
+            }
+            mismatched = {
+                key: (tuple(int(d) for d in data[key].shape), exp)
+                for key, exp in expected_shapes.items()
+                if key in data and tuple(int(d) for d in data[key].shape) != exp
+            }
+            missing = sorted(k for k in expected_shapes if k not in data)
+
+            # A matching SHAPE does not identify a matching LAYOUT.
+            #
+            # SE4 replaced Sections 3/4 of the state vector (hash buckets →
+            # direct indices) without changing one array dimension, so the
+            # shape guard above is blind to it. Adopting such a cache produces
+            # a network that runs perfectly and reads dimensions that no
+            # longer mean what it learned: no exception, no warning, just
+            # quietly degraded Q-values for the rest of the process's life.
+            # `state_layout_id()` is stamped by `save_cache()`, so a cache from
+            # this build always matches; one from an older build — or one with
+            # no stamp at all, which is exactly what a pre-SE4 cache looks
+            # like — is quarantined rather than reinterpreted.
+            layout_ok = True
+            cached_layout: Any = None
+            if META_FILE.exists():
+                try:
+                    cached_layout = json.loads(META_FILE.read_text()).get("layout")
+                except Exception:
+                    cached_layout = None
+                layout_ok = cached_layout == state_layout_id()
+
+            if mismatched or missing or not layout_ok:
+                parts = [
+                    f"{key}: cached={got} expected={exp}"
+                    for key, (got, exp) in sorted(mismatched.items())
+                ]
+                if missing:
+                    parts.append(f"missing keys: {', '.join(missing)}")
+                if not layout_ok:
+                    parts.append(
+                        f"layout: cached={cached_layout!r} "
+                        f"expected={state_layout_id()!r}"
+                    )
+                detail = " | ".join(parts)
                 # Quarantine stale checkpoint so we can post-mortem, then reset
                 # the step counter so eval/A-B reporting reflects the fresh
-                # (untrained) network honestly.
+                # (untrained) network honestly. The suffix names the REASON, so
+                # a directory full of quarantined caches says why they went.
+                reason = "stale-shape" if (mismatched or missing) else "stale-layout"
                 try:
                     backup = WEIGHTS_FILE.with_suffix(
-                        f".stale-dim{saved_dim}.{int(time.time())}.npz"
+                        f".{reason}.{int(time.time())}.npz"
                     )
                     WEIGHTS_FILE.replace(backup)
                     logger.warning(
-                        "RL_CHECKPOINT_RESET | saved_dim=%d | current_dim=%d | quarantined=%s",
-                        saved_dim, expected_in, backup,
+                        "RL_CHECKPOINT_RESET | %s | quarantined=%s", detail, backup,
                     )
                 except Exception as exc:
                     logger.warning(
-                        "RL_CHECKPOINT_RESET | saved_dim=%d | current_dim=%d | quarantine_failed=%s",
-                        saved_dim, expected_in, exc,
+                        "RL_CHECKPOINT_RESET | %s | quarantine_failed=%s", detail, exc,
                     )
                 self._step = 0
                 return
 
             self.online.set_weights(data)
             self.target.copy_from(self.online)
+
+            # A cache written by an older build (before save_cache() refused
+            # non-finite weights), or edited by hand, may itself be poisoned.
+            # Loading it would make every subsequent forward pass NaN and
+            # every action substitution — silently, forever, because nothing
+            # ever overwrites the file again once writes are refused. Quarantine
+            # it instead so the failure is visible and one-shot.
+            bad = self._nonfinite_weight_keys()
+            if bad:
+                logger.error(
+                    "RL_CHECKPOINT_NONFINITE | keys=%s — cache quarantined, "
+                    "starting from fresh weights so action selection is not "
+                    "silently poisoned.",
+                    ", ".join(sorted(bad)),
+                )
+                try:
+                    backup = WEIGHTS_FILE.with_suffix(
+                        f".nonfinite.{int(time.time())}.npz"
+                    )
+                    WEIGHTS_FILE.replace(backup)
+                    logger.error("RL_CHECKPOINT_NONFINITE | quarantined=%s", backup)
+                except Exception as exc:
+                    logger.warning(
+                        "RL_CHECKPOINT_NONFINITE | quarantine_failed=%s", exc,
+                    )
+                self._reset_weights()
+                self._step = 0
+                return
+
             if META_FILE.exists():
                 meta = json.loads(META_FILE.read_text())
                 self._step = meta.get("step", 0)
@@ -337,9 +500,30 @@ class DoubleQLearner:
     def save_cache(self) -> None:
         """Persist weights + meta to .npz cache (fast-load).
 
+        Unconditional (subject only to the non-finite refusal below) — this is
+        the durability anchor called at episode end / shutdown. `train_batch`
+        uses `_save_cache_throttled()` instead so a per-batch training loop
+        does not write 173 KiB to disk on every batch.
+
         For durable cross-restart persistence, use app.rl.persistence.save_checkpoint()
         which writes to vapt_rl_checkpoints table.
+
+        Refuses to write non-finite weights. A NaN/Inf checkpoint is not a
+        degraded checkpoint, it is a *permanent* one: `_load_from_cache()`
+        would restore it into every future process, so one bad training step
+        would brick action selection until someone deleted the file by hand.
+        Refusing the write leaves the last known-good cache in place, which
+        is strictly better than replacing it with poison.
         """
+        bad = self._nonfinite_weight_keys()
+        if bad:
+            logger.error(
+                "RL_CACHE_WRITE_REFUSED | non-finite weights in %s — existing "
+                "cache left untouched. This is a training blow-up, not a "
+                "disk problem.",
+                ", ".join(sorted(bad)),
+            )
+            return
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         np.savez(WEIGHTS_FILE, **self.online.get_weights())
         META_FILE.write_text(json.dumps({
@@ -352,16 +536,69 @@ class DoubleQLearner:
             "hidden_dim": self.hidden_dim,
             "architecture": "dueling_double_q",
             "total_params": self._count_params(),
+            # Feature-layout fingerprint. See `_load_from_cache()`: the array
+            # shapes above cannot detect a re-mapping of the state vector.
+            "layout": state_layout_id(),
         }))
 
     def _count_params(self) -> int:
         return sum(w.size for w in self.online.get_weights().values())
+
+    def _save_cache_throttled(self) -> None:
+        """Write the cache at most every N batches or M seconds.
+
+        Trade-off, stated explicitly: between saves, up to
+        `CACHE_SAVE_MIN_BATCHES` batches (or `CACHE_SAVE_MIN_SECONDS`) of
+        gradient progress exist only in memory. That is bounded and small,
+        and `save_cache()` is called unconditionally at episode end, so the
+        durable-state window is unchanged in practice. What it buys: no disk
+        write per `train_batch` (173 KiB, ~3.9 ms each).
+
+        A non-finite blow-up bypasses the throttle: `save_cache()` refuses to
+        write and logs loudly, and that signal must not be delayed by up to 25
+        batches just because a save happened recently.
+        """
+        self._batches_since_cache_save += 1
+        now = time.monotonic()
+        due = (
+            self._batches_since_cache_save >= CACHE_SAVE_MIN_BATCHES
+            or (now - self._last_cache_save) >= CACHE_SAVE_MIN_SECONDS
+            or bool(self._nonfinite_weight_keys())  # never defer a poison report
+        )
+        if not due:
+            return
+        self.save_cache()
+        self._batches_since_cache_save = 0
+        self._last_cache_save = now
 
     # ── prediction ─────────────────────────────────────────────────────
     def q_values(self, state_vec: np.ndarray) -> np.ndarray:
         """Return Q(s, a) for all actions — shape (action_dim,)."""
         q, _, _ = self.online.forward(state_vec.astype(np.float32))
         return q
+
+    def _nonfinite_weight_keys(self) -> list[str]:
+        """Names of weight arrays containing NaN or ±inf.
+
+        Kept as a method (not inline) because both disk boundaries need the
+        same test and a divergence between them is exactly how a poisoned
+        cache gets written by one path and accepted by the other.
+        """
+        return [
+            key for key, arr in self.online.get_weights().items()
+            if not np.all(np.isfinite(arr))
+        ]
+
+    def _reset_weights(self) -> None:
+        """Discard current weights and re-initialise both networks.
+
+        Used only when a non-finite cache has been quarantined: there is no
+        known-good state to fall back to, and keeping the NaN in memory
+        would make every forward pass NaN for the rest of the process.
+        """
+        self.online = DuelingNetwork(self.state_dim, self.action_dim, self.hidden_dim)
+        self.target = DuelingNetwork(self.state_dim, self.action_dim, self.hidden_dim)
+        self.target.copy_from(self.online)
 
     def best_action(self, state_vec: np.ndarray) -> int:
         return int(np.argmax(self.q_values(state_vec)))
@@ -410,8 +647,9 @@ class DoubleQLearner:
         s = state.astype(np.float32)
         s_next = next_state.astype(np.float32)
 
-        # Forward pass — get current Q(s, a)
-        q_online, _, _ = self.online.forward(s)
+        # Single forward — returns the hidden activations as well, so the
+        # backward pass below does not re-run both streams on the same input.
+        q_online, _, _, h1_v, h1_a = self.online.forward_detailed(s)
         current_q = float(q_online[action])
 
         # Double Q target
@@ -436,11 +674,9 @@ class DoubleQLearner:
         grad_v = np.array([np.sum(grad_q)], dtype=np.float32)
         grad_a = grad_q - np.mean(grad_q)
 
-        # Backprop through value and advantage streams independently.
-        _, h1_v = self.online.value_net.forward(s)
+        # Backprop through value and advantage streams independently, reusing
+        # the h1 activations from the forward pass above.
         grads_v = self.online.value_net.backward(s, h1_v, grad_v)
-
-        _, h1_a = self.online.advantage_net.forward(s)
         grads_a = self.online.advantage_net.backward(s, h1_a, grad_a)
 
         # SGD update on online network.
@@ -458,36 +694,83 @@ class DoubleQLearner:
 
         return float(abs(td_error))
 
-    def train_batch(self, batch: list[dict[str, Any]]) -> tuple[float, list[float]]:
+    def train_batch(
+        self,
+        batch: list[dict[str, Any]],
+        is_weights: list[float] | None = None,
+    ) -> tuple[float, list[float]]:
         """
-        Train on a batch of transitions. Each item may include 'is_weight'
-        for PER.
+        Train on a batch of transitions, with PER importance weighting.
+
+        PER corrects the bias of non-uniform sampling by weighting each
+        sample's contribution by w_i = (N·P(i))^-β. This method applies that
+        weight to BOTH the gradient and the reported loss.
 
         Args:
             batch: list of dicts with keys: state, action, reward,
                    next_state, done, [is_weight].
+            is_weights: optional per-sample importance weights, positionally
+                   aligned with `batch`. When omitted, each item's own
+                   `is_weight` key is used (1.0 for uniform replay). When
+                   provided, it is authoritative — the two sources are never
+                   multiplied together.
 
         Returns:
-            (mean_squared_loss, list_of_abs_td_errors)
-            mean_squared_loss is mean(td_error²) over the batch — useful
-            for logging / convergence plots.
+            (loss, list_of_abs_td_errors)
+
+            `loss` is the **weighted** mean of td_error², i.e. the quantity
+            whose gradient is being followed. It is NOT the Huber objective
+            — `train_step` clips the gradient at HUBER_KAPPA, so for
+            |td| > kappa this number is larger than the loss actually being
+            minimised. It is a monitoring metric; do not compare it across
+            code versions that changed kappa or the weighting.
+
+            `td_errors` are **raw** |TD| values, never multiplied by w.
+            PER priority updates must use raw TD error — that is an
+            invariant of this function, not an implementation detail.
+
+        Weight source contract (why this parameter exists):
+            `ExperienceStore.sample()` also injects `is_weight` into every
+            transition dict, so the gradient was already weighted even when
+            the returned `is_weights` list was ignored. That made the list a
+            dead value that looked like a discarded one, and it made
+            correctness depend on a silent injection: if that key ever
+            stopped being written, PER would degrade to uniform replay with
+            no error anywhere. Passing the weights explicitly removes both
+            failure modes.
         """
+        if is_weights is not None and len(is_weights) != len(batch):
+            if "length" not in _WARNED_WEIGHT_ISSUES:
+                _WARNED_WEIGHT_ISSUES.add("length")
+                logger.warning(
+                    "train_batch: is_weights has %d entries but batch has %d — "
+                    "falling back to each sample's own is_weight key",
+                    len(is_weights), len(batch),
+                )
+            is_weights = None
+
         td_errors: list[float] = []
-        for t in batch:
+        weighted_sq: list[float] = []
+        for i, t in enumerate(batch):
+            if is_weights is not None:
+                weight = float(is_weights[i])
+            else:
+                weight = float(t.get("is_weight", 1.0))
             td_error = self.train_step(
                 state=t["state"],
                 action=t["action"],
                 reward=t["reward"],
                 next_state=t["next_state"],
                 done=t["done"],
-                is_weight=t.get("is_weight", 1.0),
+                is_weight=weight,
             )
             td_errors.append(td_error)
+            weighted_sq.append(weight * td_error * td_error)
 
         if td_errors:
-            self.save_cache()
+            self._save_cache_throttled()
 
-        mean_loss = float(np.mean(np.square(td_errors))) if td_errors else 0.0
+        mean_loss = float(np.mean(weighted_sq)) if weighted_sq else 0.0
         return mean_loss, td_errors
 
     # ── introspection ──────────────────────────────────────────────────

@@ -50,6 +50,43 @@ def _next_pow2(n: int) -> int:
     return p
 
 
+def _snapshot_vector(vec: Any) -> np.ndarray:
+    """Freeze a state vector into a private, read-only float32 array.
+
+    Why not `.tolist()` (what this used to do): a list of 337 Python floats
+    costs ~10.8 KB against ~1.4 KB for the same data as a float32 array —
+    each element is a 24-byte `float` object plus an 8-byte pointer slot, so
+    it is 8x the payload before dict overhead. A full 50,000-transition
+    buffer measured 22,431 B/transition = **1,069 MB** with lists, versus
+    3,671 B/transition = **175 MB** with arrays. (And the SumTree rounds the
+    capacity up to 65,536, so the real worst case was 1,402 MB, not 1,069.)
+    Nothing raises when that memory is exhausted — the process just creeps
+    toward the OOM killer while GC churn grows, which is why it survived
+    review.
+
+    Why a COPY and not `np.asarray(vec, dtype=np.float32)`:
+      - `asarray` returns the caller's array *unchanged* when it is already
+        float32, so the replay buffer would alias the caller's buffer. Any
+        later in-place reuse of that scratch array would retroactively
+        rewrite recorded history — silently, and only for the transitions
+        that happen to share the buffer. `tolist()` was accidentally
+        providing a snapshot; this keeps the snapshot and drops the cost.
+      - Tests in this repo really do reuse one `state` array across many
+        `add()` calls, so the aliasing path is one refactor away from real.
+
+    Why read-only: `sample()` hands these arrays straight to `train_batch()`
+    through a shallow `dict` copy. Marking them non-writeable turns
+    "something normalised a state in place" from silent replay corruption
+    into an immediate `ValueError` at the offending line.
+
+    Copies are 1,348 B per vector (2 per transition, once per agent turn),
+    i.e. noise next to the ~18.7 KB per transition this removes.
+    """
+    arr = np.array(vec, dtype=np.float32, copy=True)
+    arr.flags.writeable = False
+    return arr
+
+
 # ── SumTree ──────────────────────────────────────────────────────────────
 class SumTree:
     """
@@ -218,19 +255,38 @@ class ExperienceStore:
         Side effects:
             - Updates in-memory SumTree (always)
             - INSERTs into vapt_rl_transitions (best-effort, never raises)
+
+        The in-memory copy is a **private read-only snapshot** of `state` /
+        `next_state` (`_snapshot_vector`), not a reference to the caller's
+        array — the caller may recycle its buffer once this returns. The DB
+        path is unaffected: `_persist_transition` receives the original
+        arrays and `_insert_transition_row` builds JSON with its own
+        `.tolist()`, which is transient rather than retained per buffer slot.
         """
         transition = {
             "scan_id": scan_id,
             "turn": int(turn),
-            "state": state.astype(np.float32).tolist(),
+            # float32 arrays, NOT `.tolist()` — see `_snapshot_vector` for the
+            # measured 6.1x memory difference. `sample()` already returns
+            # arrays (it converts legacy list payloads), so this is the shape
+            # the training path has always consumed.
+            "state": _snapshot_vector(state),
             "action": int(action),
             "reward": float(reward),
-            "next_state": next_state.astype(np.float32).tolist(),
+            "next_state": _snapshot_vector(next_state),
             "done": bool(done),
         }
 
         # PER priority: new transitions inherit the running max-priority so
         # they get sampled at least once before refinement.
+        #
+        # NOTE (monitoring, not a defect): `_max_priority` never decreases —
+        # that is standard PER, and the invariant that every new transition is
+        # sampled at least once depends on it. Combined with reward clipping at
+        # [-100, +150], a single outlier transition can hold the maximum
+        # permanently and be oversampled for the life of the buffer. If Q is
+        # observed oscillating, cap priorities (e.g. at the 99th percentile)
+        # rather than removing the max-inheritance rule.
         if priority is None:
             per_priority = float(self.tree._max_priority) or 1.0
         else:
@@ -368,6 +424,12 @@ class ExperienceStore:
               - batch: list of transition dicts (with `is_weight` injected)
               - is_weights: importance-sampling weights for bias correction
               - tree_indices: indices for priority updates after training
+
+        Every `state` / `next_state` in the returned batch is a **read-only
+        float32 ndarray**, and it is the same object the tree holds — sample()
+        does not copy 1.3 KB per sample on the training hot path. Consumers
+        that need to modify one must copy it first; in-place writes raise
+        instead of corrupting the replay buffer.
         """
         if self.tree.size == 0:
             return [], [], []
@@ -382,8 +444,17 @@ class ExperienceStore:
 
         sampling_probs = np.array(priorities, dtype=np.float64) / total
 
-        # Anneal beta toward 1.0 over PER_BETA_ANNEAL_STEPS
-        self._beta_step += 1
+        # Advance the anneal by the number of samples about to be handed out —
+        # that is the number of gradient steps the caller will take, which is
+        # the denominator `PER_BETA_ANNEAL_STEPS` is expressed in.
+        #
+        # `PER_BETA_ANNEAL_STEPS` used to be compared against a counter that
+        # advanced by 1 per `sample()` call, making the anneal batch-size
+        # dependent: at batch_size=64, β=1.0 needed 100,000 calls ≈ 6.4 million
+        # gradient steps — 64× slower than the constant's name promises, so β
+        # stayed near its 0.4 floor (weak correction) for the practical life of
+        # the buffer.
+        self._beta_step += n
         self._beta = min(
             PER_BETA_END,
             PER_BETA_START + (PER_BETA_END - PER_BETA_START)
@@ -396,37 +467,89 @@ class ExperienceStore:
             is_weights /= max_w  # normalize for stability
 
         batch: list[dict[str, Any]] = []
-        for sample, w in zip(samples, is_weights):
+        kept_weights: list[float] = []
+        kept_indices: list[int] = []
+        for sample, w, idx in zip(samples, is_weights, indices):
             if sample is None:
                 continue
             s = dict(sample)
             s["is_weight"] = float(w)
-            # Ensure states are numpy arrays (they may be lists from DB)
-            if isinstance(s.get("state"), list):
-                s["state"] = np.array(s["state"], dtype=np.float32)
-            if isinstance(s.get("next_state"), list):
-                s["next_state"] = np.array(s["next_state"], dtype=np.float32)
+            # Legacy payloads (rows restored by an older build, or hand-built
+            # test data) may still carry lists. Normalise them through the
+            # same freezer so the whole batch obeys one contract: read-only
+            # float32 arrays.
+            if not isinstance(s.get("state"), np.ndarray):
+                s["state"] = _snapshot_vector(s["state"])
+            if not isinstance(s.get("next_state"), np.ndarray):
+                s["next_state"] = _snapshot_vector(s["next_state"])
             batch.append(s)
+            kept_weights.append(float(w))
+            kept_indices.append(idx)
 
-        return batch, is_weights.tolist(), indices
+        # The three lists are positionally aligned by construction. They were
+        # NOT before: `batch` skipped null samples while `is_weights` and
+        # `indices` were returned whole, so one null leaf made
+        # `update_priorities(indices, td_errors)` write every priority from
+        # that position onward onto the WRONG leaf — silently, and for the
+        # rest of the scan. A null leaf is reachable: `SumTree.get()` returns
+        # whatever sits at the sampled leaf, and leaves that were never
+        # written hold None.
+        return batch, kept_weights, kept_indices
 
     async def sample_from_db(
         self,
         batch_size: int = 256,
         scan_id: str | None = None,
+        session: Any = None,
     ) -> list[dict[str, Any]]:
-        """Sample uniformly (or by scan_id) from Postgres for offline training.
+        """Sample UNIFORMLY (or by scan_id) from Postgres for offline training.
+
+        HOW uniformity is achieved: `ORDER BY random()`. This used to be
+        `ORDER BY priority DESC`, which contradicted this docstring in two
+        ways, so state both explicitly:
+
+        1. It was *not* uniform. `LIMIT n` over a `priority DESC` ordering
+           returns the same n rows on every call — no diversity at all, and
+           `persist_priorities()` is a documented no-op stub (W17+ scope), so
+           the stored `priority` never changes between runs. Repeated offline
+           training therefore overfit to one fixed slice of the table.
+        2. That slice was *not* the high-TD-error rows either. The DB
+           `priority` column is written once at INSERT time from either
+           `SumTree._max_priority` (a running in-memory maximum that every
+           later row inherits) or `abs(rl_reward) * PER_PRIORITY_MULTIPLIER`
+           for self-correction rejections. TD errors never reach it because
+           `persist_priorities()` returns 0 without touching the DB. So
+           `ORDER BY priority DESC` selected an arbitrary, priority-coincident
+           subset — a bias with no meaning behind it.
+
+        Because sampling is now truly uniform, `is_weight = 1.0` is the
+        correct importance-sampling weight (uniform ⇒ no correction), and
+        `PentestPolicy.train_from_db()` deliberately passes no `is_weights`,
+        letting this per-sample value stand.
+
+        Cost note: `ORDER BY random()` requires a full sort of the filtered
+        set (the `priority` index cannot help). With `scan_id` that is a few
+        hundred rows and fine. Unbounded (scan_id=None) over the 90-day
+        retention window it degrades to O(N log N) — if that ever becomes
+        hot, switch to `TABLESAMPLE SYSTEM` rather than reintroducing an
+        ordering that carries no sampling meaning.
 
         Args:
             batch_size: max rows to return
             scan_id: optional filter (sample only from this scan's transitions)
+            session: optional caller-owned AsyncSession. `training_loop.
+                train_from_scan()` has always accepted a `session` argument and
+                silently dropped it; it is forwarded here so the documented
+                parameter actually scopes the read. A caller-owned session is
+                used as-is (never committed/closed); without one we open and
+                close our own.
 
         Returns:
             list of transition dicts with numpy state/next_state arrays.
             is_weight is set to 1.0 (uniform sampling — no IS correction).
         """
         try:
-            from sqlalchemy import select
+            from sqlalchemy import func, select
             from app.db.session import async_session
             from app.db.models.rl import RLTransition
         except ImportError as exc:
@@ -434,13 +557,24 @@ class ExperienceStore:
             return []
 
         try:
-            async with async_session() as sess:
-                stmt = select(RLTransition)
-                if scan_id is not None:
-                    stmt = stmt.where(RLTransition.scan_id == scan_id)
-                stmt = stmt.order_by(RLTransition.priority.desc()).limit(batch_size)
+            stmt = select(RLTransition)
+            if scan_id is not None:
+                stmt = stmt.where(RLTransition.scan_id == scan_id)
+            # ORDER BY random() — uniform. NOT `priority DESC`: that returned
+            # the same top-n rows every run (see the docstring for why the
+            # ordering carried no meaning), which made offline training
+            # both deterministic and biased.
+            stmt = stmt.order_by(func.random()).limit(batch_size)
+
+            async def _fetch(sess: Any):
                 result = await sess.execute(stmt)
-                rows = result.scalars().all()
+                return result.scalars().all()
+
+            if session is not None:
+                rows = await _fetch(session)
+            else:
+                async with async_session() as sess:
+                    rows = await _fetch(sess)
 
             batch: list[dict[str, Any]] = []
             for row in rows:
@@ -454,7 +588,7 @@ class ExperienceStore:
                     "reward": float(row.reward),
                     "next_state": np.array(next_list, dtype=np.float32),
                     "done": bool(row.done),
-                    "is_weight": 1.0,  # uniform — no IS for DB sampling
+                    "is_weight": 1.0,  # uniform (ORDER BY random) → no IS correction
                     "action_name": row.action_name,
                     "reward_breakdown": row.reward_breakdown,
                 })
@@ -467,6 +601,27 @@ class ExperienceStore:
 
     def __len__(self) -> int:
         return self.tree.size
+
+    @property
+    def beta(self) -> float:
+        """Current PER importance-sampling exponent β (0.4 → 1.0).
+
+        Public so callers do not have to reach into `_beta` through
+        `hasattr()` / `getattr()`. `PentestPolicy.train_from_memory()` logs
+        it, and a private-attribute probe there was the only reason the
+        attribute name was load-bearing across module boundaries.
+        """
+        return float(self._beta)
+
+    @property
+    def beta_step(self) -> int:
+        """Gradient steps' worth of samples that have advanced the β anneal.
+
+        Not the number of `sample()` calls: one call with `batch_size=64`
+        advances this by 64 (or fewer if empty leaves were skipped), because
+        `PER_BETA_ANNEAL_STEPS` is denominated in training steps.
+        """
+        return int(self._beta_step)
 
     def get_stats(self) -> dict[str, Any]:
         return {

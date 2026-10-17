@@ -80,6 +80,22 @@ async def save_checkpoint(
     Returns:
         checkpoint_id (UUID string) on success, None on failure.
     """
+    # Refuse to persist non-finite weights. Both stores below are durable —
+    # the .npz cache is read by every future process and the SQL blob is
+    # restored by load_latest_checkpoint() — so writing NaN here turns a
+    # transient training blow-up into a permanent one. `save_cache()` already
+    # refuses on its own; this check stops the SQL blob going in as well, and
+    # returns early so a bad checkpoint is never reported as saved.
+    bad = q_learner._nonfinite_weight_keys()
+    if bad:
+        logger.error(
+            "RL_CHECKPOINT_REFUSED | scan_id=%s | non-finite weights in %s — "
+            "no checkpoint written (neither SQL nor .npz). Previous "
+            "known-good checkpoint is untouched.",
+            scan_id, ", ".join(sorted(bad)),
+        )
+        return None
+
     # Serialize weights → compressed blob
     weights_dict = q_learner.online.get_weights()
     blob, weights_hash = _serialize_weights(weights_dict)

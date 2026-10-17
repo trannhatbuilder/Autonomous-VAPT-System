@@ -1,5 +1,5 @@
 """
-VAPT-AI Scan History Routes — Phase F3 (CyberStrikeAI pattern).
+VAPT-AI Scan History Routes.
 
 Mirrors CyberStrikeAI's conversation list + paginated timeline endpoints.
 
@@ -658,6 +658,9 @@ async def delete_scan(
         "vapt_methodology_progress",
         "vapt_rl_episodes",
         "vapt_rl_q_snapshots",
+        # Phase 1-6 RL intelligence layer — FK to vapt_scans(scan_id)
+        "vapt_rl_transitions",
+        "vapt_rl_checkpoints",
     ]
     for tbl in hard_delete_tables:
         # Skip tables we know don't exist on this DB (pre-check above).

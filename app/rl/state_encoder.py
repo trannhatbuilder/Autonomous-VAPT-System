@@ -18,15 +18,21 @@ State vector layout (337 dims, float32):
         - commands_run / max_commands
         - token_budget_remaining
 
-    Section 2: 256-dim tech stack multi-hot (hash-bucketed)
-    Section 3: 32-dim last-vector one-hot (hash-bucketed)
-    Section 4: 32-dim last-tool one-hot (hash-bucketed)
-    Section 5: 9-dim flags
-        - last_success
-        - kg_available
-        - planner_paths_live / max
-        - planner_paths_pruned / max
+    Section 2: 256-dim tech stack multi-hot (hash-bucketed — the stack is an
+        OPEN set: `technologies` is whatever the recon parser found, so a
+        vocabulary cannot be enumerated in advance)
+    Section 3: 32-dim last-vector one-hot (DIRECT index into VECTOR_LABELS)
+    Section 4: 32-dim last-tool one-hot (DIRECT index into TOOL_LABELS)
+    Section 5: 9-dim flags = 7 booleans + 2 planner ratios
+        - last_success                 (bool)
+        - kg_available                 (bool)
+        - planner_paths_live / max     (ratio)
+        - planner_paths_pruned / max   (ratio)
         - recon_login, recon_api, recon_upload, recon_graphql, recon_websocket
+
+Sections 3 and 4 are CLOSED sets derived from `ACTION_SPACE`, so they are
+indexed directly rather than hashed — see `_label_index()` for why hashing a
+closed set was a defect, not a style choice.
 
 Pure numpy, no torch dependency.
 """
@@ -34,10 +40,19 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+
+# Action space lives in its own dependency-free module so `q_learner` can
+# import it without importing the encoder (see app/rl/actions.py for why the
+# old "circular import" justification was fictional). Re-exported here because
+# this has been the de-facto public path for `ACTION_SPACE` for several rounds
+# of callers (`react_agent`, `policy`, `harness`, tests).
+from app.rl.actions import ACTION_DIM, ACTION_SPACE, tool_category  # noqa: F401
+from app.evidence.finding_state import count_verified_findings
 
 logger = logging.getLogger(__name__)
 
@@ -77,22 +92,80 @@ VECTOR_VOCAB = DEFAULT_STATE_CONFIG.vector_vocab          # 32
 TOOL_VOCAB = DEFAULT_STATE_CONFIG.tool_vocab              # 32
 
 _SCALAR_DIMS = 8        # see PentestState.to_vector section 1
-_FLAG_DIMS = 9          # see PentestState.to_vector section 5 (8 booleans + planner_paths_pruned)
+# Section 5 is 7 booleans (last_success, kg_available, recon_login/api/upload/
+# graphql/websocket) plus 2 NORMALISED PLANNER RATIOS (live, pruned). The
+# comment here used to read "(8 booleans + planner_paths_pruned)", which is
+# neither the count nor the composition: it invited the next reader to "fix"
+# the block by moving a flag into the ratios or vice versa.
+_FLAG_DIMS = 9          # 7 booleans + 2 planner ratios
 STATE_DIM = (
     _SCALAR_DIMS + TECH_STACK_VOCAB + VECTOR_VOCAB + TOOL_VOCAB + _FLAG_DIMS
 )  # 8 + 256 + 32 + 32 + 9 = 337
 
-# Action space — must match DoubleQLearner output size (app.rl.q_learner)
-ACTION_SPACE: list[str] = [
-    "execute_command_recon",
-    "execute_command_exploit",
-    "execute_command_fuzz",
-    "select_skill",
-    "consult_kg",
-    "report_vulnerability",
-    "pentest_complete",
-]
-ACTION_DIM = len(ACTION_SPACE)  # 7
+# Bumped whenever the MEANING of any dimension changes without its size
+# changing. `q_learner._load_from_cache()` compares this against the value
+# stamped into `q_meta.json` and quarantines a cache that was trained under a
+# different layout — shapes alone cannot detect a re-mapping, and adopting
+# such a cache gives a network that runs fine on dimensions that no longer
+# mean what it learned.
+#
+# 1 — Sections 3/4 were SHA-256 hash buckets.
+# 2 — Sections 3/4 are direct indices into VECTOR_LABELS / TOOL_LABELS.
+STATE_LAYOUT_VERSION: int = 2
+
+# Action space — see app/rl/actions.py. `ACTION_SPACE` / `ACTION_DIM` are
+# imported above and re-exported; do not redefine them here.
+
+# ── Canonical `last_vector` vocabulary — the ONLY definition ──────────────
+# `react_agent._infer_vector_from_tools()` produces
+# `action.replace("execute_command_", "")`, so the vocabulary is a pure
+# function of ACTION_SPACE. Deriving it means the two cannot drift: adding
+# an action automatically legalizes its vector label, and removing one
+# automatically retires it.
+#
+# The previous contract lived only in `_session_builder`'s docstring, which
+# listed {"recon", "exploit", "fuzz", "report", "complete", ""} — already
+# wrong for three of the six tokens the producer actually emitted
+# (`consult_kg`, `report_vulnerability`, `pentest_complete`). A docstring is
+# not a validator, so nothing caught it.
+#
+# "" is the designated "no vector" label (turn 1, content-only turns, and
+# anything the builder refuses).
+_ACTION_PREFIX = "execute_command_"
+
+VECTOR_LABELS: tuple[str, ...] = tuple(
+    action.replace(_ACTION_PREFIX, "") for action in ACTION_SPACE
+) + ("",)
+
+# ── Canonical `last_tool` vocabulary — the ONLY definition ────────────────
+# `tool_category()` in `app/rl/actions.py` returns exactly the
+# `execute_command_*` subset of ACTION_SPACE ("recon" / "exploit" / "fuzz"),
+# or "" when the last action produced no shell tool at all (turn 1, or a
+# turn that only called `record_vulnerability` / `exit` / `consult_kg`).
+# Deriving it here means the encoder's Section 4 cannot accept a label that
+# `tool_category()` would never produce, and vice versa.
+TOOL_LABELS: tuple[str, ...] = tuple(
+    action.replace(_ACTION_PREFIX, "")
+    for action in ACTION_SPACE
+    if action.startswith(_ACTION_PREFIX)
+)
+
+
+def state_layout_id() -> str:
+    """Fingerprint of the state vector's LAYOUT (sizes + label orderings).
+
+    Stamped into `q_meta.json` by `q_learner.save_cache()` and compared on
+    load. `STATE_DIM` alone is not an identity: SE4 changed Sections 3 and 4
+    from hash buckets to direct indices without changing a single array shape,
+    so a shape-only guard would have adopted the old weights and run them on
+    dimensions that no longer encode the same thing.
+    """
+    return (
+        f"v{STATE_LAYOUT_VERSION}"
+        f"|{_SCALAR_DIMS}+{TECH_STACK_VOCAB}+{VECTOR_VOCAB}+{TOOL_VOCAB}+{_FLAG_DIMS}"
+        f"|vec:{'/'.join(VECTOR_LABELS)}"
+        f"|tool:{'/'.join(TOOL_LABELS)}"
+    )
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -114,9 +187,75 @@ def _hash_bucket(text: str, size: int) -> int:
     Using SHA-256 (not Python's built-in hash()) because Python's hash is
     salted per-process by default (PYTHONHASHSEED), which would make state
     encodings non-reproducible across runs — fatal for offline replay.
+
+    ONLY for OPEN sets. Section 2 (tech stack) needs it because the vocabulary
+    is whatever the recon parser found. Sections 3 and 4 are closed sets
+    derived from ACTION_SPACE and must NOT use it — see `_label_index()`.
     """
     h = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
     return int(h, 16) % size
+
+
+def _label_index(label: Any, labels: tuple[str, ...]) -> int:
+    """Position of a CLOSED-SET label, or -1 (→ zero vector) when unknown.
+
+    Why not `_hash_bucket` for these two sections: with a closed set the
+    vocabulary is already an ordered tuple, so hashing it is pure indirection
+    and buys two defects.
+
+      1. Aliasing risk. Eight labels into 32 buckets collide with probability
+         ~61% under a random hash (birthday bound). The current labels happen
+         to be collision-free, which is luck, not design — and a collision is
+         permanent because the hash is deterministic.
+      2. Typo → invented feature. `_hash_bucket` maps EVERY string into
+         [0, 32), so an unknown label does NOT produce a zero vector; it
+         produces a private bucket and masquerades as a legitimate attack
+         vector. That had to be papered over in `_session_builder`, one module
+         away from the producer, and only for `last_vector`.
+
+    Direct indexing makes both impossible: a known label gets its own stable
+    dimension, and anything else gets the documented "no signal" zero vector.
+    Case and surrounding whitespace are folded — `"Recon"` is the same vector.
+    """
+    if not isinstance(label, str):
+        return -1
+    try:
+        return labels.index(label.strip().lower())
+    except ValueError:
+        return -1
+
+
+def _unit_interval(value: Any, default: float = 0.0) -> float:
+    """Coerce to a finite float in [0, 1], falling back to `default`.
+
+    A plain `min(max(x, 0.0), 1.0)` is not enough: NaN propagates through both
+    comparisons unchanged, so a corrupt TDI entry would inject NaN into the
+    Q-network input and poison every forward pass derived from it. Non-finite
+    values are treated as "no information" instead.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not np.isfinite(number):
+        return default
+    return float(min(max(number, 0.0), 1.0))
+
+
+def _planner_count(snapshot: Any, key: str) -> int:
+    """Non-negative int from an `EGATS.to_dict()` snapshot, 0 when absent.
+
+    Deliberately narrow: only a type/format error in the value falls back to
+    0. The old code wrapped a whole `planner.stats()` introspection in
+    `except Exception: pass`, which turned every contract violation into a
+    silent 0/0 and made the two planner dimensions permanently dead.
+    """
+    if not isinstance(snapshot, Mapping):
+        return 0
+    try:
+        return max(0, int(snapshot.get(key, 0) or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 # ── PentestState ─────────────────────────────────────────────────────────
@@ -166,13 +305,17 @@ class PentestState:
         # 1. Scalar normalized features — 8 dims
         scalars = np.array([
             min(self.turn / cfg.max_turns, 1.0),
-            float(self.tdi),
+            # Clamped and NaN-guarded: the TDI ladder produces [0, 1] today,
+            # but a single corrupt `tdi_log` entry (or an explicit
+            # `tdi_log_entry=` override from a caller) would otherwise put a
+            # network input outside the range every other scalar respects.
+            _unit_interval(self.tdi, default=0.5),
             1.0 if self.mode == "broaden" else (0.5 if self.mode == "llm" else 0.0),
             min(self.findings_count / cfg.max_findings, 1.0),
             min(self.verified_findings / cfg.max_verified_findings, 1.0),
             min(self.fp_findings / cfg.max_fp_findings, 1.0),
             min(self.commands_run / cfg.max_commands, 1.0),
-            float(self.token_budget_remaining),
+            _unit_interval(self.token_budget_remaining),
         ], dtype=np.float32)
         parts.append(scalars)
 
@@ -184,10 +327,24 @@ class PentestState:
         parts.append(tech_vec)
 
         # 3. Last vector one-hot — VECTOR_VOCAB dims
-        parts.append(_one_hot(_hash_bucket(self.last_vector, VECTOR_VOCAB), VECTOR_VOCAB))
+        # DIRECT index into the closed vocabulary. This used to be
+        # `_hash_bucket(self.last_vector, VECTOR_VOCAB)`, which had two
+        # defects the surrounding comment only documented rather than fixed:
+        # a hash collision would make two different vectors share one feature
+        # permanently, and an unknown label got a private bucket of its own
+        # instead of the intended "no signal" zero vector — so a typo invented
+        # a feature. `_session_builder._normalize_vector()` was added to mask
+        # the second symptom one layer away from the producer; it is now
+        # redundant, and this line is correct on its own.
+        parts.append(_one_hot(_label_index(self.last_vector, VECTOR_LABELS), VECTOR_VOCAB))
 
         # 4. Last tool one-hot — TOOL_VOCAB dims
-        parts.append(_one_hot(_hash_bucket(self.last_tool, TOOL_VOCAB), TOOL_VOCAB))
+        # Same closed-set treatment. `last_tool` is "recon"/"exploit"/"fuzz",
+        # or "" when the last action ran no shell tool at all — "" is the
+        # zero vector here, because "no tool bucket" is the absence of a
+        # signal rather than a third category (Section 3 already carries the
+        # exact action for those turns).
+        parts.append(_one_hot(_label_index(self.last_tool, TOOL_LABELS), TOOL_VOCAB))
 
         # 5. Boolean flags + planner-pruned ratio — 9 dims
         flags = np.array([
@@ -226,14 +383,28 @@ class StateEncoder:
         _commands_run: int             — total commands executed
         _tokens_used: int              — LLM tokens consumed so far
         _token_budget: int             — total token budget for the scan
-        _last_command: str             — last shell command executed
+        _last_command: str             — last shell command OR tool name run
+        _last_tool: str                — the tool that actually ran on the last
+                                         turn. OPTIONAL and takes precedence over
+                                         `_last_command`. Accepts a tool name, a
+                                         command line, or an action name; the
+                                         bucket comes from
+                                         `app.rl.actions.tool_category()`, so an
+                                         action with no shell bucket (e.g.
+                                         `record_vulnerability`) encodes as
+                                         "no signal" instead of "recon".
+                                         `_session_builder.build_session()`
+                                         emits it as the `last_tool=` argument.
         _last_vector: str              — last attack vector tried
         _last_turn_success: bool       — did last turn yield a verified finding?
-        _kg_consulted: bool            — was KG queried this turn?
+        _kg_consulted: bool            — was KG queried in that same turn?
         tdi_log: list[dict]            — TDA history, last entry wins
         recon_signals: dict            — tech stack + recon flags
         findings: list[dict]           — findings list
-        egats_planner: object|None     — planner with .stats() method
+        egats_planner: dict|None       — EGATS.to_dict() snapshot (plain data,
+                                         NOT the live planner: the session dict
+                                         must survive json.dumps). Only
+                                         `alive` and `pruned` are read.
     """
 
     @staticmethod
@@ -254,25 +425,26 @@ class StateEncoder:
         """
         recon = session.get("recon_signals") or {}
         findings = session.get("findings") or []
-        verified = sum(
-            1 for f in findings
-            if f.get("verified") and not f.get("false_positive")
-        )
+        # ONE definition of "verified" — see app.evidence.finding_state.
+        # This block used to count `f.get("verified") and not
+        # f.get("false_positive")` inline, i.e. the LEGACY boolean only.
+        # Every producer that writes just the canonical
+        # `verification: "confirmed"` then scored 0 here forever: the fifth
+        # scalar of Section 1 (and any caller deriving last_turn_success
+        # from the same count) went dead with no exception and no log line.
+        verified = count_verified_findings(findings)
         fp = sum(1 for f in findings if f.get("false_positive"))
         planner = session.get("egats_planner")
 
-        # Planner stats — defensive: planner may be None (W17 will wire KG/EGATS)
-        live_paths = 0
-        pruned_paths = 0
-        if planner is not None:
-            try:
-                for stat in planner.stats():
-                    if stat.pruned:
-                        pruned_paths += 1
-                    else:
-                        live_paths += 1
-            except Exception:
-                pass
+        # Planner path counts — read from the PLAIN-DATA snapshot built by
+        # `EGATS.to_dict()`. This used to introspect a live planner via
+        # `planner.stats()` inside a bare `except Exception: pass`; that
+        # swallowed every contract violation and silently returned 0/0, so a
+        # caller passing anything the loop could not walk pinned both planner
+        # dimensions to zero forever. Counts are now read directly, and a
+        # non-mapping is treated as "no planner" without hiding errors.
+        live_paths = _planner_count(planner, "alive")
+        pruned_paths = _planner_count(planner, "pruned")
 
         # TDI (Task Difficulty Index)
         tdi = 0.5
@@ -293,9 +465,30 @@ class StateEncoder:
         else:
             token_rem = max(0.0, 1.0 - tokens_used / token_budget)
 
-        # Last action hints — derive last_tool from last_command
+        # Last action hints.
+        #
+        # `_last_tool` is the EXPLICIT signal and it wins. Reading it is not a
+        # nicety: `_last_command` is only ever a guess at "which tool ran",
+        # and when the last turn ran no shell tool at all (turn 1, or a turn
+        # that only called `record_vulnerability` / `exit` / `consult_kg`) the
+        # old code either reused the previous turn's command or defaulted to
+        # "recon" — a state feature claiming reconnaissance happened on a turn
+        # that recorded a finding.
+        #
+        # Resolution, in order:
+        #   1. session["_last_tool"], when non-empty → `tool_category()` of it,
+        #      with NO fallback. An explicit value that maps to "" MEANS ""
+        #      ("no shell bucket"); falling back would let the stale
+        #      `_last_command` override the caller, which is the same
+        #      "heuristic wins over the explicit signal" bug in reverse.
+        #   2. otherwise `tool_category(_last_command)`.
+        #   3. otherwise "" — no signal, encoded as a zero vector.
         last_cmd = session.get("_last_command", "") or ""
-        last_tool = StateEncoder._infer_tool_from_command(last_cmd)
+        explicit_tool = session.get("_last_tool")
+        if isinstance(explicit_tool, str) and explicit_tool.strip():
+            last_tool = tool_category(explicit_tool)
+        else:
+            last_tool = StateEncoder._infer_tool_from_command(last_cmd)
 
         last_vector = session.get("_last_vector", "") or ""
         last_success = bool(session.get("_last_turn_success", False))
@@ -326,22 +519,32 @@ class StateEncoder:
 
     @staticmethod
     def _infer_tool_from_command(cmd: str) -> str:
-        """Heuristic mapping from shell command → RL tool category.
+        """Tool bucket for the state's `last_tool` feature.
 
-        Used as a fallback when no explicit _last_tool is set on the session.
-        The 3 categories match the first 3 entries of ACTION_SPACE:
-            - "recon"   → execute_command_recon
-            - "exploit" → execute_command_exploit
-            - "fuzz"    → execute_command_fuzz
+        DERIVED from `app.rl.actions.TOOL_TO_ACTION` — the same table the agent
+        loop uses for credit assignment. It used to be a hand-written substring
+        heuristic in this file, and it disagreed with that table on five tools:
+
+            nuclei, nikto, dalfox, wpscan, fscan -> "recon" here,
+                                                    execute_command_fuzz there
+
+        so the state vector told the Q-network "the last action was recon"
+        while the reward for that same action was credited to the fuzz head.
+        The state contradicting its own reward is the SE1 failure class again;
+        a second table is what made it possible.
+
+        Returns "" when the value names no shell bucket (unknown binary, or a
+        non-command action such as `record_vulnerability`). It used to return
+        "recon" as a catch-all default, which made every unclassifiable turn —
+        including a turn that only recorded a finding — actively assert that
+        reconnaissance had run. "" is encoded as the documented "no signal"
+        zero vector, which is the honest answer, and it is also what turn 1
+        produces.
+
+        Prefer `session["_last_tool"]` when the caller knows the tool directly;
+        `from_session` consults it first and only falls back to this.
         """
-        cmd_lower = cmd.lower()
-        if any(t in cmd_lower for t in ("nuclei", "nikto", "nmap", "whatweb", "httpx", "subfinder")):
-            return "recon"
-        if any(t in cmd_lower for t in ("sqlmap", "metasploit", "msfconsole", "exploit")):
-            return "exploit"
-        if any(t in cmd_lower for t in ("ffuf", "gobuster", "feroxbuster", "arjun", "paramspider", "katana")):
-            return "fuzz"
-        return "recon"  # default
+        return tool_category(cmd)
 
 
 # ── Convenience ──────────────────────────────────────────────────────────

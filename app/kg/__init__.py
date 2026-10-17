@@ -1,22 +1,22 @@
 """
 VAPT-AI Dynamic Knowledge Graph module.
 
-Ported from EVVO Sentinel shield_engine/vapt_kg.py — adapted for
-VAPT-AI schema (6 node types + 5 edge types per W1-D) and async SQL
-persistence (vapt_kg_nodes + vapt_kg_edges + vapt_kg_scan_snapshots).
+Components
+----------
+- types.py         NodeType, EdgeType, KGNodeData, KGEdgeData, KGPath, ConsultResult
+- graph.py         KnowledgeGraph class — NetworkX in-memory + SQL bridge
+- persistence.py   load_kg_from_db, persist_kg_to_db, save/load/merge snapshots
+- seeder.py        seed_all — populate from skills + WSTG + ATT&CK catalogs
+- _recon_parser.py parse_whatweb / parse_nmap / parse_httpx — extract tech
+                   tokens from recon tool output (Phase 2)
+- advisor.py       extract_tech_stack / consult_text / consult_plan —
+                   markdown rendering + tech-stack extraction layer on
+                   top of KnowledgeGraph (Phase 2)
 
-Components:
-    - types.py         NodeType, EdgeType, KGNodeData, KGEdgeData, KGPath, ConsultResult
-    - graph.py         KnowledgeGraph class — NetworkX in-memory + SQL bridge
-    - persistence.py   load_kg_from_db, persist_kg_to_db, save/load/merge snapshots
-    - seeder.py        seed_all — populate from skills + WSTG + ATT&CK catalogs
-    - (EGATS)          app/harness/egats.py — UCB1 bandit over KG attack paths
-    - (TDA)            app/harness/tda.py — Task Difficulty Index for EGATS
-
-Node types (6 — per master plan §12 W17):
+Node types (6):
     Technology, AttackVector, Finding, Recommendation, Verification, Outcome
 
-Edge types (5 — per W1-D schema):
+Edge types (5):
     has_vuln         Technology → AttackVector
     produces_finding AttackVector → Finding
     recommends       Finding → Recommendation
@@ -25,9 +25,9 @@ Edge types (5 — per W1-D schema):
 
 Outcome probability (Laplace-smoothed):
     P(success) = (success_count + 1) / (total_attempts + 2)
-    Fresh edges (0/0) → 0.5 (uncertain prior). Converges to true rate.
+Fresh edges (0/0) → 0.5 (uncertain prior). Converges to true rate.
 
-Seeding (W17-S6):
+Seeding (at app startup, idempotent):
     - 24 skill packages → Technology + AttackVector nodes (P=0.5)
     - 119 OWASP WSTG v4.2 IDs → AttackVector nodes
     - 44 MITRE ATT&CK v15.1 techniques → AttackVector nodes
@@ -59,6 +59,15 @@ from app.kg.seeder import (
     seed_from_attack_catalog, seed_all,
 )
 
+# Phase 2: recon parsers + advisor layer
+from app.kg._recon_parser import (
+    parse_whatweb, parse_nmap, parse_httpx, parse_recon_output,
+)
+from app.kg.advisor import (
+    extract_tech_stack, consult_text, consult_plan,
+    render_advisory_brief, get_kg_safe,
+)
+
 __all__ = [
     # Types
     "NodeType", "EdgeType", "EDGE_TYPE_NODE_CONSTRAINTS",
@@ -73,4 +82,8 @@ __all__ = [
     # Seeder
     "SeedResult", "seed_from_skills", "seed_from_wstg_catalog",
     "seed_from_attack_catalog", "seed_all",
+    # Phase 2: recon parsers + advisor
+    "parse_whatweb", "parse_nmap", "parse_httpx", "parse_recon_output",
+    "extract_tech_stack", "consult_text", "consult_plan",
+    "render_advisory_brief", "get_kg_safe",
 ]

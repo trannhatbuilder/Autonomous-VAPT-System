@@ -50,6 +50,67 @@ from app.harness.ansi import strip_ansi as _strip_ansi, _ANSI_ESCAPE_RE
 MAX_LLM_OUTPUT_CHARS = 8000
 
 
+# ── Short-run / banner-only detector ──────────────────────────────────────
+# A tool that dies on its OWN command line finishes in well under a second
+# and prints only a banner + complaint. Two real cases (VERIFIED on this
+# host) that the exit-code and invocation-error checks both miss:
+#
+#   whatweb  `unrecognized option '--output-format'`  -> exit 0 (!), 149 B
+#   sqlmap   `missing a mandatory option (-d, -u, ...)` -> exit 2,  439 B
+#
+# whatweb exiting 0 is the dangerous one: `allowed_exit_codes` passes, the
+# output is non-empty, so every downstream guard treats a phantom run as a
+# real result. This check gives the LLM the diagnosis IN CONTEXT instead of
+# letting it conclude "the target has nothing" or silently burn turns.
+_SHORT_RUN_SECONDS = 5.0
+_SHORT_RUN_MAX_CHARS = 2048
+
+# Any of these in a SHORT output means the tool rejected its own argv.
+_CLI_DIAGNOSTIC_MARKERS: tuple[str, ...] = (
+    "unrecognized option",              # GNU getopt — whatweb
+    "unrecognized arguments",           # argparse
+    "unexpected argument",              # clap — feroxbuster
+    "unknown flag",                     # Go/C
+    "flag provided but not defined",    # Go pflag — katana, httpx, gobuster
+    "no such option",                   # getopt-style
+    "mandatory option",                 # sqlmap — "missing a mandatory option"
+    "incorrect usage",                  # cobra — gobuster
+    "parse error",                      # ffuf — invalid value for flag
+)
+
+_SHORT_RUN_WARNING = (
+    "[tool-bridge] WARNING: this run finished suspiciously fast with "
+    "banner-only output — likely a CLI argument error (check target/-u). "
+    "Treat as NO RESULT."
+)
+
+
+def _looks_like_short_run_failure(
+    body: str, duration_s: float, exit_code: int | None,
+) -> bool:
+    """True when a run was too fast/small to have actually scanned anything.
+
+    Requires ALL of: a measurable duration below _SHORT_RUN_SECONDS, an
+    output under _SHORT_RUN_MAX_CHARS, and a positive signal that the tool
+    never got started (a CLI-diagnostic marker, or a non-zero exit code).
+    The extra signal matters: a legacy tool that legitimately answers in one
+    second with 300 bytes (httpx on a single host, `nmap -p 80`) must NOT be
+    flagged — telling the LLM to discard a valid result is worse than the
+    bug being fixed.
+    """
+    if duration_s <= 0 or duration_s >= _SHORT_RUN_SECONDS:
+        return False
+    if len(body) > _SHORT_RUN_MAX_CHARS:
+        return False
+    if body.startswith("[empty_result]"):
+        # Already carries its own explanation — don't stack two warnings.
+        return False
+    head = body[:2000].lower()
+    if any(marker in head for marker in _CLI_DIAGNOSTIC_MARKERS):
+        return True
+    return exit_code is not None and exit_code != 0
+
+
 # Placeholder patterns an LLM may leave in a PoC command/evidence instead of
 # substituting the concrete target (e.g. `dalfox url "{{URL}}"`). A literal
 # placeholder makes the PoC non-reproducible and looks fabricated to a
@@ -196,6 +257,49 @@ def build_tool_schemas(tool_names: list[str] | None = None) -> list[dict[str, An
         },
     })
 
+    # Add fetch_tool_output tool (always available) — reads back the FULL
+    # output of a past execution. Without it, both truncation notices
+    # ("full output preserved in scan artifacts / spill file") pointed at a
+    # capability the agent did not have.
+    schemas.append({
+        "type": "function",
+        "function": {
+            "name": "fetch_tool_output",
+            "description": (
+                "Read the FULL (untruncated) output of a tool execution from "
+                "earlier in this scan. Use it when a result says "
+                "'[truncated N chars]' or '... [truncated] ...' and the part "
+                "you need was cut off — e.g. to re-read a sqlmap verdict tail "
+                "before calling record_vulnerability. Pass the `execution_id` "
+                "shown in the '[execution_id] ...' footer of that tool result, "
+                "or `tool_name` to get that tool's most recent output. "
+                "Returns JSON with `content` plus `offset`/`has_more` for paging."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "execution_id": {
+                        "type": "string",
+                        "description": "Execution id from the tool result's '[execution_id] ...' footer.",
+                    },
+                    "tool_name": {
+                        "type": "string",
+                        "description": "Alternative to execution_id — newest output of this tool in this scan (e.g. 'sqlmap').",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Start character offset (default 0). Use next_offset from a previous call to page.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max characters to return (default 4000, max 20000).",
+                    },
+                },
+                "required": [],
+            },
+        },
+    })
+
     # Add exit tool (LLM calls this to signal scan complete)
     schemas.append({
         "type": "function",
@@ -212,8 +316,13 @@ def build_tool_schemas(tool_names: list[str] | None = None) -> list[dict[str, An
         },
     })
 
-    logger.info("Built %d tool schemas (%d security tools + record_vulnerability + exit)",
-                len(schemas) - 2, len(schemas) - 2)
+    # 3 non-security tools are appended after the YAML-driven ones:
+    # record_vulnerability + fetch_tool_output + exit.
+    logger.info(
+        "Built %d tool schemas (%d security tools + record_vulnerability "
+        "+ fetch_tool_output + exit)",
+        len(schemas), len(schemas) - 3,
+    )
     _tool_schema_cache[key] = schemas
     return schemas
 
@@ -416,6 +525,9 @@ async def execute_tool_call(
 
     if tool_name == "record_vulnerability":
         return await _record_vulnerability(tool_args, scan_id)
+
+    if tool_name == "fetch_tool_output":
+        return _fetch_tool_output(tool_args, scan_id)
 
     # ── Phase F5: cache lookups BEFORE subprocess spawn ──────────────
     # All 3 caches are per-scan (in-memory). A cache HIT means we can
@@ -787,13 +899,46 @@ async def execute_tool_call(
     if looks_like_invocation_error(body):
         mark_tool_invocation_failure(scan_id, tool_name)
 
+    # ── Short-run / banner-only classification ──────────────
+    # Catches what the exit code cannot (whatweb rejects the flag but exits
+    # 0) and what `_looks_like_failure` in the agent loop would otherwise
+    # miss when the banner pushes the error past its scan window. The
+    # diagnosis is appended to the OUTPUT so the LLM reads it in the same
+    # context as the raw bytes — same mechanism as `[empty_result]`.
+    short_run_failure = (
+        execution.status == ExecutionStatus.COMPLETED
+        and _looks_like_short_run_failure(
+            body,
+            execution.duration_seconds,
+            (execution.result or {}).get("exit_code"),
+        )
+    )
+    if short_run_failure:
+        logger.warning(
+            "SHORT_RUN_BANNER_ONLY | scan=%s | tool=%s | elapsed=%.2fs | bytes=%d "
+            "| exit=%s — likely a CLI argument error, flagging as no-result",
+            scan_id, tool_name, execution.duration_seconds, len(body),
+            (execution.result or {}).get("exit_code"),
+        )
+        body += f"\n\n{_SHORT_RUN_WARNING}"
+
     # Truncate for LLM context (keep first + last half).
     # NOTE: truncation must happen on `body` BEFORE caching — otherwise
     # the cached value is the un-truncated version, which won't match
     # the truncated version returned to the LLM on the next call.
+    # The marker names the retrieval tool because the execution_id footer
+    # is appended just below — together they let the LLM page the middle
+    # of a large output back instead of re-running the tool.
+    full_body = body  # kept whole for the artifact store (fetch_tool_output)
     if len(body) > MAX_LLM_OUTPUT_CHARS:
         half = MAX_LLM_OUTPUT_CHARS // 2
-        body = body[:half] + "\n... [truncated] ...\n" + body[-half:]
+        body = (
+            body[:half]
+            + "\n... [middle truncated to save context — call "
+              "fetch_tool_output with this result's execution_id for the "
+              "full output] ...\n"
+            + body[-half:]
+        )
 
     # ── Surface spill artifact path (evidence preservation) ─────────
     # When the executor's 50KB output cap spills the FULL stdout to disk
@@ -819,6 +964,12 @@ async def execute_tool_call(
         # Layer 2: scope-blocked combo — mark for this specific (tool, args)
         # so different args of the same tool are still tried.
         mark_scope_blocked(scan_id, tool_name, tool_args, body)
+    elif short_run_failure:
+        # Layer 2 (negative): banner-only invocation failure — do NOT cache.
+        # A cached `unrecognized option` banner would be replayed to the LLM
+        # on a later retry with the same args, making a broken invocation look
+        # like a stable (and therefore "real") result.
+        pass
     elif body.strip() in ("(no output)", "[empty_result]") or body.startswith("[empty_result]"):
         # Layer 2 (negative): result is EMPTY — do NOT cache it.
         # Empty results are often transient (target rate-limited, momentary
@@ -840,11 +991,141 @@ async def execute_tool_call(
     # cache never includes it → no false "different result" perception.
     output = body + f"\n[execution_id] {execution.id}"
 
+    # ── Store a retrievable artifact ─────────────────────────────────
+    # The LLM only ever sees `body` truncated to MAX_LLM_OUTPUT_CHARS, and
+    # older results get pruned to 1_500 chars. Both truncation notices tell
+    # the model the full output is "in the scan artifacts" — this is what
+    # makes that promise true: `fetch_tool_output(execution_id=...)` reads
+    # it back on demand (e.g. to re-check a sqlmap verdict tail).
+    try:
+        from app.agents.tool_artifacts import record_artifact
+        record_artifact(
+            scan_id,
+            execution.id,
+            tool_name,
+            full_body,
+            spill_path=spill_path,
+            command=cmd_str,
+        )
+    except Exception as exc:  # never break a tool result over bookkeeping
+        logger.debug("artifact_record_failed | scan=%s | tool=%s | err=%s",
+                     scan_id, tool_name, exc)
+
     logger.info(
         "Tool result | scan=%s | tool=%s | status=%s | exec_id=%s | output_len=%d",
         scan_id, tool_name, execution.status.value, execution.id[:8], len(output),
     )
     return output
+
+
+def _fetch_tool_output(args: dict[str, Any], scan_id: str) -> str:
+    """Return a slice of a past tool execution's FULL output.
+
+    Backs the promise made by both truncation notices ("full output
+    preserved in scan artifacts / spill file. Reference it if needed.").
+    Before this tool existed, that text pointed at a capability the agent
+    did not have — a finding whose evidence sat in the truncated tail of a
+    sqlmap run could only be re-checked by re-running the tool.
+
+    Args:
+        args:
+            execution_id: id from the `[execution_id] ...` footer of a tool
+                result. Omit to fall back to `tool_name` (most recent run).
+            tool_name: fetch the newest output of this tool in this scan.
+            offset: start char (default 0).
+            limit: max chars to return (default 4000, capped at 20000).
+        scan_id: scan scope for the artifact store.
+
+    Returns:
+        JSON string with `status`, `content`, and paging metadata — or a
+        JSON error explaining what to pass instead.
+    """
+    from app.agents.tool_artifacts import find_latest, get_artifact, list_artifacts, read_spill
+
+    execution_id = str(args.get("execution_id") or "").strip()
+    tool_name = str(args.get("tool_name") or args.get("tool") or "").strip()
+    try:
+        offset = max(0, int(args.get("offset") or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        limit = int(args.get("limit") or 4000)
+    except (TypeError, ValueError):
+        limit = 4000
+    limit = max(1, min(limit, 20_000))
+
+    artifact = get_artifact(scan_id, execution_id) if execution_id else None
+    if artifact is None and tool_name:
+        artifact = find_latest(scan_id, tool_name)
+    if artifact is None and not execution_id and not tool_name:
+        latest = list_artifacts(scan_id)
+        return json.dumps({
+            "status": "error",
+            "error": "missing_argument",
+            "message": (
+                "Pass `execution_id` (the id in the '[execution_id] ...' "
+                "footer of a tool result) or `tool_name`."
+            ),
+            "available": latest[-10:],
+        })
+
+    if artifact is None:
+        return json.dumps({
+            "status": "not_found",
+            "message": (
+                f"No stored output for execution_id={execution_id or '(none)'} "
+                f"tool={tool_name or '(none)'} in this scan. It may have been "
+                f"evicted (only the newest "
+                f"{40} executions are kept in memory). Re-run the tool if you "
+                f"need that output again."
+            ),
+            "available": list_artifacts(scan_id)[-10:],
+        })
+
+    body = artifact.get("body") or ""
+    # Evicted/empty in-memory copy: the spill file on disk still has it.
+    if not body and artifact.get("spill_path"):
+        spilled = read_spill(artifact.get("spill_path"))
+        if spilled:
+            body = spilled
+    if not body:
+        return json.dumps({
+            "status": "empty",
+            "execution_id": artifact["execution_id"],
+            "tool": artifact.get("tool", ""),
+            "message": "The stored output for this execution is empty.",
+        })
+
+    total = len(body)
+    if offset >= total:
+        return json.dumps({
+            "status": "offset_out_of_range",
+            "execution_id": artifact["execution_id"],
+            "tool": artifact.get("tool", ""),
+            "total_chars": total,
+            "offset": offset,
+        })
+
+    chunk = body[offset:offset + limit]
+    end = offset + len(chunk)
+    logger.info(
+        "fetch_tool_output | scan=%s | tool=%s | exec_id=%s | %d-%d/%d",
+        scan_id, artifact.get("tool", ""), artifact["execution_id"][:8],
+        offset, end, total,
+    )
+    return json.dumps({
+        "status": "ok",
+        "execution_id": artifact["execution_id"],
+        "tool": artifact.get("tool", ""),
+        "command": artifact.get("command", ""),
+        "total_chars": total,
+        "offset": offset,
+        "returned_chars": len(chunk),
+        "has_more": end < total,
+        "next_offset": end if end < total else None,
+        "spill_path": artifact.get("spill_path"),
+        "content": chunk,
+    })
 
 
 async def _record_vulnerability(args: dict[str, Any], scan_id: str) -> str:
@@ -872,6 +1153,7 @@ async def _record_vulnerability(args: dict[str, Any], scan_id: str) -> str:
     try:
         from app.db.session import async_session
         from app.evidence.service import EvidenceService
+        from app.evidence.verifier import assess_verification
 
         # Extract fields from LLM args (case-insensitive + alias tolerant)
         title = args.get("title") or args.get("name") or "Unknown"
@@ -983,9 +1265,32 @@ async def _record_vulnerability(args: dict[str, Any], scan_id: str) -> str:
             )
 
         # PoC definition: command + server response. The LLM is the judge.
-        # Any tool output attached as evidence = PoC confirmed.
+        # Any tool output attached as evidence = a PoC *attempt* was made.
         poc_status = "successful"
         exploit_match_reason = "LLM provided tool output as evidence (PoC = command + server response)"
+
+        # ── Verification level (evidence provenance, not evidence presence) ──
+        # "evidence string is non-empty" is NOT proof of a vulnerability, so
+        # the level handed back to the agent must be derived from what the
+        # TOOL actually printed, not from the fact that a record was created.
+        # The ReAct loop used to hardcode `"verified": True` here, which made
+        # every recorded finding score CONFIRMED_VULN (0.8) in the TDA ladder
+        # and turned the evidence-gated EXPLOIT override into
+        # `len(findings) > 0` with extra steps.
+        verification, verification_reason = assess_verification(
+            vuln_type=vuln_type,
+            evidence=raw_evidence,
+            tool=tool_name,
+            # Reserved internal keys (leading underscore) — the LLM schema has
+            # no such fields, so the model cannot self-declare its own finding
+            # as replay-verified. Only a real replay engine sets these.
+            replay_reproduced=bool(args.get("_replay_reproduced")),
+            human_verified=bool(args.get("_human_verified")),
+        )
+        logger.info(
+            "Finding verification | scan=%s | title=%s | level=%s | reason=%s",
+            scan_id, title[:60], verification, verification_reason,
+        )
 
         # Pack description + remediation into metadata_json (model has no `description` column)
         description = args.get("description") or ""
@@ -1020,6 +1325,13 @@ async def _record_vulnerability(args: dict[str, Any], scan_id: str) -> str:
             # what the LLM emitted — a {{...}}/<...>/$TARGET placeholder was
             # replaced with the real target. UI/PDF show this as a warning.
             metadata_payload["poc"]["placeholder_repaired"] = True
+        # Provenance for reports/UI: WHY this finding sits where it does on
+        # the plausible -> confirmed -> replay_verified ladder.
+        metadata_payload["verification"] = {
+            "level": verification,
+            "reason": verification_reason,
+            "source": "deterministic rule verifier (app/evidence/verifier.py)",
+        }
 
         async with async_session() as session:
             svc = EvidenceService(session)
@@ -1070,14 +1382,20 @@ async def _record_vulnerability(args: dict[str, Any], scan_id: str) -> str:
         return json.dumps({
             "status": "recorded",
             "finding_id": finding_id,
-            "verified": False,  # will be flipped by Phase 5 auditor
+            # `verification` is the honest provenance level. `verified` is the
+            # DB row state and stays False until Phase 5 audits the finding —
+            # do not conflate the two.
+            "verification": verification,
+            "verification_reason": verification_reason,
+            "verified": False,  # DB row state (flipped by Phase 5 auditor)
             "poc_status": poc_status,
             "poc_reason": exploit_match_reason,
             "message": (
                 f"Vulnerability '{title}' recorded with severity {severity} "
                 f"(cvss_base_score={cvss_base_score}). "
+                f"Verification level: {verification} — {verification_reason}. "
                 + (
-                    "PoC confirmed: tool output captured as evidence. "
+                    "PoC: tool output captured as evidence. "
                     "Pending audit verification."
                     if poc_status == "successful" else
                     "No PoC: no evidence attached. Run a tool, capture the "

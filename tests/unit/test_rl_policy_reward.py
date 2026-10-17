@@ -70,7 +70,7 @@ class TestEpsilonGreedy:
         policy = PentestPolicy()
         for _ in range(100):
             policy.end_episode(episode_reward=0.0)
-        # ε(100) ≈ 1.0 * 0.98566^100 ≈ 0.224
+        # ε(100) ≈ 1.0 * 0.98513^100 ≈ 0.224  (0.98513 = 0.05^(1/200))
         assert 0.15 < policy.epsilon < 0.30
 
     def test_select_action_returns_3_tuple(self):
@@ -201,7 +201,14 @@ class TestResolveAction:
         }
         result = policy.resolve_action("execute_command_exploit", session)
         assert result["type"] == "execute_command"
-        assert "nuclei" in result["command"]
+        # Was `nuclei`. `_TOOL_TO_ACTION` credits nuclei as
+        # `execute_command_fuzz`, so the agent loop recorded the exploit
+        # suggestion as a fuzz action and Q(exploit) never learned. The
+        # exploit branch must emit an exploit-bucket binary.
+        from app.agents.react_agent import _TOOL_TO_ACTION
+
+        binary = result["command"].split()[0]
+        assert _TOOL_TO_ACTION[binary] == "execute_command_exploit"
 
     def test_pentest_complete(self):
         policy = PentestPolicy()
@@ -232,22 +239,26 @@ class TestD26Reward:
         """+5 confirmed exploit Tier-1 (shell obtained via C2Session)."""
         session = self._base_session()
         r, b = compute_reward(
-            session=session, previous_findings_count=0, previous_verified_count=0,
+            session=session, previous_verified_count=0,
             command_output="meterpreter session 1 opened",
-            tokens_used_delta=1000, turn=5,
+            tokens_used_delta=1000,
             turn_events=[d26_event("exploit_tier1", c2_session_id="sess_001")],
         )
         assert b["d26_signals"]["exploit_tier1"] == 5.0
-        # Total reward should be >= 5 (plus efficiency bonus)
-        assert r >= 5.0
+        # No flat per-turn bonus on an eventful turn (§6 is gated on
+        # `not turn_events` — the event already priced this turn); only the
+        # token penalty applies. Previously this was 5.195 because an
+        # unconditional +0.2 was paid on top.
+        assert b["efficiency_bonus"] == 0.0
+        assert r == pytest.approx(R_EXPLOIT_TIER1 - 0.005)
 
     def test_scenario_2_exploit_tier2(self):
         """+3 confirmed exploit Tier-2 (partial PoC)."""
         session = self._base_session()
         r, b = compute_reward(
-            session=session, previous_findings_count=0, previous_verified_count=0,
+            session=session, previous_verified_count=0,
             command_output="sqlmap: dumped 5 tables",
-            tokens_used_delta=800, turn=6,
+            tokens_used_delta=800,
             turn_events=[d26_event("exploit_tier2", tool="sqlmap")],
         )
         assert b["d26_signals"]["exploit_tier2"] == 3.0
@@ -256,9 +267,9 @@ class TestD26Reward:
         """+0.5 successful recon (asset discovered)."""
         session = self._base_session()
         r, b = compute_reward(
-            session=session, previous_findings_count=0, previous_verified_count=0,
+            session=session, previous_verified_count=0,
             command_output="whatweb: nginx/1.18 php/7.4",
-            tokens_used_delta=200, turn=2,
+            tokens_used_delta=200,
             turn_events=[d26_event("recon_success", asset="target.com")],
         )
         assert b["d26_signals"]["recon_success"] == 0.5
@@ -267,8 +278,8 @@ class TestD26Reward:
         """-1 timeout / no useful output."""
         session = self._base_session()
         r, b = compute_reward(
-            session=session, previous_findings_count=0, previous_verified_count=0,
-            command_output="", tokens_used_delta=100, turn=8,
+            session=session, previous_verified_count=0,
+            command_output="", tokens_used_delta=100,
             turn_events=[d26_event("timeout", tool="nuclei")],
         )
         assert b["d26_signals"]["timeout"] == -1.0
@@ -277,9 +288,9 @@ class TestD26Reward:
         """-2 verifier-rejected FP."""
         session = self._base_session()
         r, b = compute_reward(
-            session=session, previous_findings_count=1, previous_verified_count=0,
+            session=session, previous_verified_count=0,
             command_output="XSS reflected",
-            tokens_used_delta=500, turn=4,
+            tokens_used_delta=500,
             turn_events=[d26_event("fp_rejected", finding_id="f1")],
         )
         assert b["d26_signals"]["fp_rejected"] == -2.0
@@ -288,8 +299,8 @@ class TestD26Reward:
         """-3 scope violation (blocked)."""
         session = self._base_session()
         r, b = compute_reward(
-            session=session, previous_findings_count=0, previous_verified_count=0,
-            command_output="", tokens_used_delta=50, turn=3,
+            session=session, previous_verified_count=0,
+            command_output="", tokens_used_delta=50,
             turn_events=[d26_event("scope_violation", target="8.8.8.8")],
         )
         assert b["d26_signals"]["scope_violation"] == -3.0
@@ -298,8 +309,8 @@ class TestD26Reward:
         """-5 user_aborted (HITL denied)."""
         session = self._base_session()
         r, b = compute_reward(
-            session=session, previous_findings_count=0, previous_verified_count=0,
-            command_output="", tokens_used_delta=0, turn=10,
+            session=session, previous_verified_count=0,
+            command_output="", tokens_used_delta=0,
             turn_events=[d26_event("user_aborted", approval_id="app_001")],
         )
         assert b["d26_signals"]["user_aborted"] == -5.0
@@ -308,8 +319,8 @@ class TestD26Reward:
         """-10 destructive op without HITL (failsafe)."""
         session = self._base_session()
         r, b = compute_reward(
-            session=session, previous_findings_count=0, previous_verified_count=0,
-            command_output="", tokens_used_delta=0, turn=12,
+            session=session, previous_verified_count=0,
+            command_output="", tokens_used_delta=0,
             turn_events=[d26_event("destructive_no_hitl", tool="metasploit")],
         )
         assert b["d26_signals"]["destructive_no_hitl"] == -10.0
@@ -321,9 +332,9 @@ class TestD26Reward:
              "verified": True, "false_positive": False},
         ]}
         r, b = compute_reward(
-            session=session, previous_findings_count=1, previous_verified_count=1,
+            session=session, previous_verified_count=1,
             command_output="scan complete",
-            tokens_used_delta=200, turn=30, is_done=True,
+            tokens_used_delta=200, is_done=True,
         )
         assert b["completion_bonus"] == 10.0
 
@@ -334,8 +345,8 @@ class TestD26Reward:
              "verified": True, "false_positive": False},
         ]}
         r, b = compute_reward(
-            session=session, previous_findings_count=0, previous_verified_count=0,
-            command_output="XSS reflected", tokens_used_delta=500, turn=5,
+            session=session, previous_verified_count=0,
+            command_output="XSS reflected", tokens_used_delta=500,
         )
         # First verified finding → R_NOVEL_FINDING (20.0) * WEIGHT_RULE (1.0) = 20.0
         # (Finding is "novel" because it's the first in the session)
@@ -352,8 +363,8 @@ class TestMultiSignalWeights:
              "verified": True, "false_positive": False},  # no replay/human
         ]}
         r, b = compute_reward(
-            session=session, previous_findings_count=0, previous_verified_count=0,
-            command_output="x", tokens_used_delta=0, turn=1,
+            session=session, previous_verified_count=0,
+            command_output="x", tokens_used_delta=0,
         )
         # First finding is novel → R_NOVEL_FINDING (20) * WEIGHT_RULE (1.0) = 20
         assert b["finding_bonus"] == 20.0
@@ -366,8 +377,8 @@ class TestMultiSignalWeights:
              "replay_reproduced": True},
         ]}
         r, b = compute_reward(
-            session=session, previous_findings_count=0, previous_verified_count=0,
-            command_output="x", tokens_used_delta=0, turn=1,
+            session=session, previous_verified_count=0,
+            command_output="x", tokens_used_delta=0,
         )
         # Novel * WEIGHT_REPLAY = 20 * 5 = 100
         assert b["finding_bonus"] == 100.0
@@ -380,8 +391,8 @@ class TestMultiSignalWeights:
              "human_verified": True},
         ]}
         r, b = compute_reward(
-            session=session, previous_findings_count=0, previous_verified_count=0,
-            command_output="x", tokens_used_delta=0, turn=1,
+            session=session, previous_verified_count=0,
+            command_output="x", tokens_used_delta=0,
         )
         # Novel * WEIGHT_HUMAN = 20 * 3 = 60
         assert b["finding_bonus"] == 60.0
@@ -409,8 +420,8 @@ class TestD26EventAndClipping:
         ]}
         events = [d26_event("exploit_tier1") for _ in range(20)]
         r, b = compute_reward(
-            session=session, previous_findings_count=0, previous_verified_count=0,
-            command_output="x", tokens_used_delta=0, turn=1,
+            session=session, previous_verified_count=0,
+            command_output="x", tokens_used_delta=0,
             turn_events=events,
         )
         assert r <= R_MAX_CLIP
@@ -420,8 +431,8 @@ class TestD26EventAndClipping:
         session = {"findings": []}
         events = [d26_event("destructive_no_hitl") for _ in range(20)]
         r, b = compute_reward(
-            session=session, previous_findings_count=0, previous_verified_count=0,
-            command_output="", tokens_used_delta=0, turn=1,
+            session=session, previous_verified_count=0,
+            command_output="", tokens_used_delta=0,
             turn_events=events,
         )
         assert r >= R_MIN_CLIP
@@ -430,8 +441,8 @@ class TestD26EventAndClipping:
         """compute_reward returns (reward, breakdown_dict)."""
         session = {"findings": []}
         r, b = compute_reward(
-            session=session, previous_findings_count=0, previous_verified_count=0,
-            command_output="x", tokens_used_delta=0, turn=1,
+            session=session, previous_verified_count=0,
+            command_output="x", tokens_used_delta=0,
         )
         assert isinstance(r, float)
         assert isinstance(b, dict)

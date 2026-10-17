@@ -230,6 +230,8 @@ INVOCATION_ERROR_PATTERNS: tuple[str, ...] = (
     r"unknown flag",                           # misc Go/C
     r"unexpected argument",                    # feroxbuster (clap)
     r"unrecognized argument",                  # argparse — "unrecognized arguments:"
+    r"unrecognized option",                    # GNU getopt — whatweb: unrecognized option `--x'
+    r"missing an? mandatory option",           # sqlmap — "missing a mandatory option (-u)"
     r"no such option",                         # getopt-style
     r"invalid option",                         # getopt — "invalid option -- 'x'"
     r"invalid value\b.*\bfor\s+(?:flag|--)",   # bad VALUE: gobuster/katana/feroxbuster
@@ -237,7 +239,10 @@ INVOCATION_ERROR_PATTERNS: tuple[str, ...] = (
 _INVOCATION_ERROR_RES = tuple(re.compile(p) for p in INVOCATION_ERROR_PATTERNS)
 
 # How much of the output head to scan (arg parsers print usage errors up front).
-_INVOCATION_ERROR_SCAN_CHARS = 800
+# 2000, not 800: sqlmap emits a ~440-byte ASCII banner and, once arguments ARE
+# supplied, its legal disclaimer can push the real error line past 800 chars —
+# which is exactly the case this counter exists for.
+_INVOCATION_ERROR_SCAN_CHARS = 2000
 
 
 # Human/LLM-readable alternatives to suggest when a tool is blocked as broken.

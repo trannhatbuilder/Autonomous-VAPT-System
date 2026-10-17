@@ -182,7 +182,13 @@ class TestExperienceStore:
         asyncio.run(run())
 
     def test_beta_annealing(self):
-        """Beta should increase from 0.4 → 1.0 with each sample call."""
+        """Beta must advance by the number of samples, not by 1 per call.
+
+        `PER_BETA_ANNEAL_STEPS` is denominated in gradient steps. Counting
+        `sample()` calls made the anneal depend on `batch_size` (a batch of 64
+        needed 64× more calls to reach the same β), so one call with n=5 must
+        advance the counter by 5.
+        """
         async def run():
             store = ExperienceStore(max_buffer=1000)
             state = np.random.randn(337).astype(np.float32)
@@ -192,8 +198,10 @@ class TestExperienceStore:
                     reward=1.0, next_state=state, done=False,
                 )
             beta_before = store._beta
+            assert store.beta_step == 0
             store.sample(5)
             beta_after = store._beta
+            assert store.beta_step == 5, "anneal must count samples, not calls"
             assert beta_after > beta_before
         asyncio.run(run())
 

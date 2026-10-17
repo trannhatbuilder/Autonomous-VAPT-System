@@ -41,8 +41,11 @@ def train_one_step(
 
     Flow:
       1. store.sample(batch_size) → (batch, is_weights, tree_indices)
-      2. policy.q.train_batch(batch) → (loss, td_errors)
-      3. store.update_priorities(tree_indices, td_errors)
+      2. policy.q.train_batch(batch, is_weights=...) → (loss, raw td_errors)
+      3. store.update_priorities(tree_indices, raw td_errors)
+
+    The invariant worth stating twice: importance weights go into the loss
+    and the gradient, RAW TD errors go back into the priorities.
 
     Args:
         policy: PentestPolicy (holds the Q-learner)
@@ -50,7 +53,8 @@ def train_one_step(
         batch_size: PER batch size (default 64 per master plan §12 W16)
 
     Returns:
-        (loss, td_errors) — loss is mean(td_error²). Empty batch → (0.0, []).
+        (loss, td_errors) — loss is the PER-weighted mean(td_error²).
+        Empty batch → (0.0, []).
     """
     if len(store) == 0:
         logger.debug("train_one_step skipped — store empty")
@@ -99,23 +103,31 @@ async def train_from_scan(
     batch_size: int = 256,
     session: Any = None,
 ) -> tuple[float, list[float]]:
-    """Offline training: pull all transitions of a scan from Postgres.
+    """Offline training: pull transitions of a scan from Postgres.
 
     Uses store.sample_from_db(batch_size, scan_id) which queries
-    vapt_rl_transitions for that scan's transitions (ordered by priority DESC).
+    vapt_rl_transitions for that scan's transitions and samples them
+    UNIFORMLY (`ORDER BY random()`). This docstring previously claimed
+    "ordered by priority DESC" — that was accurate about the old SQL but it
+    was the wrong behaviour (deterministic, and the priority column is never
+    updated with TD error, so the ordering was also meaningless). The
+    docstring in `sample_from_db` claimed "uniform" the whole time; the two
+    disagreed, and the one nearer the SQL was the one telling the truth.
 
     Args:
         scan_id: scan to re-train on
         policy: PentestPolicy
         store: ExperienceStore
         batch_size: DB batch size (default 256 — larger than PER batch)
-        session: optional AsyncSession
+        session: optional AsyncSession — forwarded to `sample_from_db`.
+            It was accepted and silently ignored before; a caller with
+            uncommitted rows saw an empty result and no error.
 
     Returns:
         (loss, td_errors) — empty DB result → (0.0, []).
     """
     loss, td_errors = await policy.train_from_db(
-        store, batch_size=batch_size, scan_id=scan_id,
+        store, batch_size=batch_size, scan_id=scan_id, session=session,
     )
     if not td_errors:
         logger.info("train_from_scan | scan=%s | no transitions found", scan_id)

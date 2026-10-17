@@ -75,9 +75,7 @@ data/reports/
 data/uploads/
 # Ignore tool-output spill artifacts (write-only; full output of >50KB tool runs)
 data/evidence_spills/
-# Ignore C2 payloads
-c2_payloads/
-!c2_payloads/.gitkeep
+
 
 # === Logs ===
 *.log
