@@ -48,12 +48,24 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+.env.*
+!.env.example
 *.pem
 *.key
 *.crt
 certs/*.crt
 certs/*.key
 !certs/.gitkeep
+# Config files may hold live API keys — never commit them.
+config.yaml
+config.yaml.*
+config.yml
+config.yml.*
+# Editor/OS backup copies of secrets-bearing files
+*.backup
+*.bak
+*.orig
+*.save
 
 # === Runtime data ===
 # Keep data/rl/adaptive_encoder.json (EVVO legacy RL weights — useful seed)
