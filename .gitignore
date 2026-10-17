@@ -111,4 +111,5 @@ frontend/node_modules/
 reports/
 
 config.yaml
-config.yaml.backupdata/rl/policy_state.json
+config.yaml.backup
+data/rl/policy_state.json
