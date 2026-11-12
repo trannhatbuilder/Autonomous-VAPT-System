@@ -733,21 +733,27 @@ class PentestPolicy:
             # round-trip contract in the docstring: emitting `nuclei` here made
             # the reward land on `execute_command_fuzz`, teaching the policy
             # that exploitation had been attempted when a scan had.
+            # Run-budget contract: every template must finish inside the
+            # sqlmap tool timeout (420s). Payload volume grows as
+            # #parameters x #payloads x #techniques x latency, so keep
+            # level<=2, risk=1 and a bounded technique set. `--crawl` and
+            # `--level 5 --risk 3` were removed here for that reason -- they
+            # are also in `app/tools/sqlmap.yaml` forbidden_args.
             if "wordpress" in [t.lower() for t in tech]:
                 cmd = (
-                    f"sqlmap -u {shlex.quote(target)} --batch --level 3 "
-                    f"--risk 2 --crawl 2"
+                    f"sqlmap -u {shlex.quote(target)} --batch --smart "
+                    f"--technique BEU --level 2 --risk 1"
                 )
             elif any("graphql" in t.lower() or "graphiql" in t.lower() for t in tech):
                 cmd = (
-                    f"sqlmap -u {shlex.quote(target)}/graphql --batch "
-                    f"--level 2 --risk 2 "
+                    f"sqlmap -u {shlex.quote(target)}/graphql --batch --smart "
+                    f"--technique BEU --level 2 --risk 1 "
                     f"--data '{{\"query\":\"{{__typename}}\"}}'"
                 )
             else:
                 cmd = (
-                    f"sqlmap -u {shlex.quote(target)} --batch "
-                    f"--level 2 --risk 2"
+                    f"sqlmap -u {shlex.quote(target)} --batch --smart "
+                    f"--technique BEU --level 2 --risk 1"
                 )
             return {"type": "execute_command", "command": cmd, "rl_action": action_name}
 

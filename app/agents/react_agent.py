@@ -868,6 +868,13 @@ Goal: For each potential vulnerability from Phase 3 that needs active exploitati
 
 Steps:
 - SQL Injection: Run `sqlmap` on suspected injectable parameters (batch mode). The sqlmap output IS the PoC.
+  TIME BUDGET (sqlmap is killed at 420s): the FIRST call must be narrow —
+  `param=<the one suspicious parameter>`, `level=1`, `risk=1`, and keep the
+  default `technique=BEU` + `smart=true`. A call without `param` tests every
+  parameter on the URL and will be killed mid-run. NEVER pass level 5 / risk 3
+  on a first attempt. If the narrow run reports the parameter is not
+  injectable but the target still looks suspicious, make a SECOND call with
+  `technique=BT` (time-based blind) — never widen level/risk to compensate.
 - Parameter discovery: test interesting parameters found in Phase 2 with sqlmap/dalfox as appropriate.
 - Missing Security Headers: tool output showing the response headers IS the PoC.
 - Exposed Panel: probe output showing 200 OK on /phpmyadmin/ IS the PoC.

@@ -18,6 +18,16 @@
 # The agent is instructed to escalate gradually (detect -> dump -> os-shell)
 # and to treat --os-shell as a last resort.
 # ============================================================
+# RUNTIME BUDGET (why the defaults below are deliberately narrow):
+#   sqlmap has NO total run-time bound. Its cost is roughly
+#       (#parameters) x (#payloads per parameter) x (#techniques) x latency
+#   so a "give me everything" invocation (-p omitted, --level 5, --risk 3,
+#   --technique=BEUST) explodes into tens of thousands of requests and cannot
+#   finish inside the 420s kill window. Raising the timeout does not fix that —
+#   it only makes each doomed run cost more wall-clock before the kill.
+#   Narrow the SCOPE first (one parameter, fewer techniques); raise `timeout`
+#   only after the invocation is already bounded.
+# ============================================================
 
 name: sqlmap
 command: sqlmap
@@ -27,16 +37,22 @@ description: |
   and dump database content as PoC. sqlmap output (injection point + payload
   + DBMS + dumped rows) IS the strongest PoC for SQLi findings.
 
-  Workflow (escalate gradually):
-    1. Detect:        sqlmap -u <url> --batch
+  Workflow (escalate gradually — every step is time-boxed; the process group
+  is killed at 420s and a run killed mid-scan returns only partial output):
+    1. Detect (fast pass): sqlmap -u <url> -p <param> --technique=BEU --smart --batch
     2. Confirm data:  sqlmap -u <url> -p <param> --batch --dump -D <db> -T <table>
     3. Only if needed: --os-shell (RCE — use as final proof, document impact).
        Pass --os-shell / --sql-shell through additional_args (no dedicated param).
 
   Tips: --random-agent is ON by default (WAF). If blocked, add
-  --tamper=space2comment via additional_args. Use -p to target one param
-  instead of full-URL scans (much faster). Prefer -D/-T with --dump to avoid
-  dumping every DBMS table (slow — may exhaust the tool timeout).
+  --tamper=space2comment via additional_args.
+  ALWAYS pass `param` (-p): a scan without it tests every parameter on the URL
+  and is the #1 cause of the 420s timeout.
+  Keep --technique=BEU for the first pass (default). Time-based blind (T)
+  costs roughly an order of magnitude more requests — run it as a SECOND,
+  separate call only when the BEU pass is clean but the target still looks
+  injectable. Never combine --level 5 with --risk 3.
+  Prefer -D/-T with --dump to avoid dumping every table (slow).
 
 short_description: SQL injection detection + data dump (PoC extraction; escalate gradually)
 
@@ -65,10 +81,33 @@ parameters:
 
   - name: param
     type: string
-    description: Specific parameter to test (skip others). Comma-separated for multiple.
+    description: |
+      Parameter(s) to test (-p), e.g. "id". Comma-separated for several.
+      ALWAYS set this. Leaving it empty makes sqlmap test every parameter of the
+      URL (GET query string + --data body), which multiplies the request count
+      by the number of inputs and is the main reason a run hits the 420s kill.
     required: false
     flag: "-p"
     default: ""
+
+  - name: technique
+    type: string
+    description: |
+      Injection techniques to use (--technique). Default "BEU" =
+      B(boolean-based blind) + E(error-based) + U(union) — the fast,
+      low-request-count techniques.
+
+      Costs, cheapest first: E < U < B << T (time-based blind) < S (stacked).
+      Each added letter multiplies the payloads sent per parameter.
+
+      FIRST PASS: leave the default. Only add "T" in a SEPARATE follow-up call
+      when the BEU pass returned "not injectable" and the target still looks
+      suspicious (e.g. error messages, param-dependent response times) —
+      time-based blind needs seconds of sleep per payload and will often
+      exhaust the timeout on its own.
+    required: false
+    flag: "--technique"
+    default: "BEU"
 
   - name: cookie
     type: string
@@ -90,24 +129,26 @@ parameters:
   - name: level
     type: integer
     description: |
-      Test level (1-5, higher = more tests but slower).
-      W19-FIX3-F3: default 1 (safe + fast) — NOT --level 5. Use higher levels
-      only when explicitly requested for targeted deep testing.
+      Test level, capped at 1-3 in this deployment. Default 1 — the fast pass.
+      Raise to 2 only when you specifically need cookie/User-Agent/Referer
+      injection tests, and only with `param` set to a single parameter.
+      Levels 4-5 are not exposed because they multiply the payload set per
+      parameter and cannot complete inside the 420s run budget.
     required: false
     flag: "--level"
     default: 1
-    options: [1, 2, 3, 4, 5]
+    options: [1, 2, 3]
 
   - name: risk
     type: integer
     description: |
-      Risk of tests (1-3, higher = more aggressive — risk of data modification).
-      W19-FIX3-F3: default 1 (safe). Risk 2-3 can modify DB rows — use only with
-      explicit user opt-in via additional_args.
+      Risk of tests, capped at 1-2 in this deployment. Default 1 (safe + fast).
+      Risk 2 adds OR-based payloads and is materially slower; risk 3 both
+      modifies DB rows and multiplies the payload count, so it is not exposed.
     required: false
     flag: "--risk"
     default: 1
-    options: [1, 2, 3]
+    options: [1, 2]
 
   - name: dbms
     type: string
@@ -124,6 +165,21 @@ parameters:
       agent loop indefinitely.
     required: false
     flag: "--batch"
+    default: true
+
+  # Time-budget switch: with heuristics enabled sqlmap abandons tests as soon
+  # as the responses look non-injectable, instead of firing the full payload
+  # set. That is what keeps a first pass inside the 420s window.
+  - name: smart
+    type: bool
+    description: |
+      Heuristic fast-skip (--smart). Default true: sqlmap stops testing a
+      parameter once the responses show no injection heuristic, instead of
+      sending the entire payload set. Set false only for a deliberate
+      exhaustive re-test of a parameter you already suspect is injectable but
+      the BEU pass reported clean — be aware that run is much slower.
+    required: false
+    flag: "--smart"
     default: true
 
   # FIX: added — sqlmap's default UA is instantly blocked by Cloudflare/WAF
@@ -196,16 +252,29 @@ output:
 
 # 600 -> 300 -> 420 (7 min). sqlmap has no total run-time bound; with tamper
 # scripts the request count multiplies, so a bounded window still matters.
-# 420s covers a scoped dump (-D/-T) that 300s cut off mid-extraction; past
-# that the agent should narrow scope (e.g. -p <specific-param>) instead of
-# waiting. This is the external kill backstop — per-request timeout stays at
-# the `--timeout` param default (20s).
+# 420s covers a scoped dump (-D/-T) that 300s cut off mid-extraction.
+# DO NOT raise this to "make sqlmap finish" — an unbounded invocation never
+# finishes, it just burns more wall-clock per attempt. Narrow the invocation
+# instead (param=-p, technique=BEU, level=1, smart=true); only after the
+# command itself is bounded does a larger timeout buy anything.
+# This is the external kill backstop — per-request timeout stays at the
+# `--timeout` param default (20s).
 timeout: 420
 allowed_exit_codes: [0, 1]  # 1 = no SQLi found — still useful
 
 # Only the most dangerous flags remain blocked — enforced in
 # app/agents/tool_bridge.py (execute_tool_call), NOT by scope_guard.
-# --dump / --dump-all / --os-shell / --sql-shell are intentionally ALLOWED now.
+# --dump / --os-shell / --sql-shell are intentionally ALLOWED now.
+#
+# The last two entries are run-budget guards, not safety guards: both flags
+# are unbounded crawlers/extractors that can never finish inside `timeout`,
+# and neither is needed (use -D/-T with --dump for extraction, and pass the
+# already-discovered URLs one at a time). `level` 4-5 / `risk` 3 are capped in
+# the schema instead of being blocked here, because first-class params are
+# what the agent actually reaches for; a human can still force them by
+# editing this file.
 forbidden_args:
-  - "--os-pwn"    # out-of-band shell (Meterpreter/VNC) — not needed
-  - "--priv-esc"  # DB process privilege escalation — not needed
+  - "--os-pwn"      # out-of-band shell (Meterpreter/VNC) — not needed
+  - "--priv-esc"    # DB process privilege escalation — not needed
+  - "--crawl"       # multi-page crawl — unbounded request count
+  - "--dump-all"    # dumps every table of every DB — guaranteed timeout

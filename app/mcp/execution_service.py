@@ -246,8 +246,23 @@ class ExecutionService:
         try:
             await task
         except asyncio.CancelledError:
-            # Task was cancelled externally — already handled in _run_worker
-            pass
+            # ── PATCH (cancel-propagation fix) ──
+            # Two cancellation sources land here:
+            #
+            #   A. cancel()/cancel_scan() — cancel_event was set, so
+            #      _run_worker already recorded status=CANCELLED and swallowed
+            #      the error. Swallowing here is the documented contract: the
+            #      caller receives a ToolExecution with status=CANCELLED.
+            #
+            #   B. an external Task.cancel() (pipeline abort). _run_worker
+            #      re-raises CancelledError. Swallowing it converted an
+            #      aborted scan into a normal return, letting the agent loop
+            #      keep running and burning LLM calls. Re-raise, and forward
+            #      the cancel to the worker task so it kills the subprocess
+            #      group instead of leaving it orphaned.
+            if not cancel_event.is_set():
+                task.cancel()
+                raise
 
         async with self._lock:
             return self._executions[exec_id]

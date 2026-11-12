@@ -729,7 +729,7 @@ async def execute_tool_call(
     cmd = [tool_def.command] + args
     cmd_str = " ".join(cmd)
 
-    logger.info("Tool execute | scan=%s | tool=%s | cmd=%s", scan_id, tool_name, cmd_str[:120])
+    logger.info("Tool execute | scan=%s | tool=%s | cmd=%s", scan_id, tool_name, cmd_str[:400])
 
     # ── W19-FIX2: HITL gate — defense-in-depth wiring ──────────────
     # Per DIAG-W19-2: tool_bridge.execute_tool_call was NOT routing
@@ -783,7 +783,13 @@ async def execute_tool_call(
         run=run,
         scan_id=scan_id,
         actor_id="agent",
-        hard_timeout=tool_def.timeout,
+        # The hard timeout must fire AFTER the executor's own soft timeout.
+        # Both used to be tool_def.timeout, which raced: the hard kill could
+        # win and cancel the run closure, discard the partial transcript, and
+        # report HARD_TIMEOUT. With the extra head-room the soft timeout always
+        # wins, so the tool is killed by the executor and its partial output
+        # is returned to the agent as a normal result.
+        hard_timeout=tool_def.timeout + 60,
     )
 
     # Build output string for LLM (back-compat with P1 shape — single string,
@@ -792,8 +798,48 @@ async def execute_tool_call(
     # reason about them in the same context.
     output_parts: list[str] = []
 
-    if execution.status == ExecutionStatus.COMPLETED and execution.result:
-        result_dict = execution.result
+    # A soft timeout (executor killed the group) now comes back as a normal
+    # COMPLETED execution carrying `timed_out=True` + the partial transcript;
+    # a hard timeout leaves no result at all. Both mean the same thing to the
+    # agent, so they share one branch — and neither may be cached.
+    result_dict = execution.result or {}
+    tool_timed_out = (
+        execution.status == ExecutionStatus.HARD_TIMEOUT
+        or bool(result_dict.get("timed_out"))
+    )
+
+    if tool_timed_out:
+        # Record the stall so the circuit-breaker can force a tool switch if
+        # the agent tries this tool again in this scan.
+        from app.agents.tool_call_caps import mark_tool_stalled, TOOL_ALTERNATIVES
+        stalls = mark_tool_stalled(scan_id, tool_name, reason="hard_timeout")
+        alt = TOOL_ALTERNATIVES.get(tool_name, "a different tool from your allowlist")
+        partial_stdout = (result_dict.get("stdout") or "").strip()
+        partial_stderr = (result_dict.get("stderr") or "").strip()
+        output_parts.append(
+            f"[error] TIMEOUT: '{tool_name}' was killed after {tool_def.timeout}s "
+            f"(stall #{stalls})."
+        )
+        # Evidence first: a killed sqlmap/nuclei run has usually already
+        # printed the finding it was killed over, so never throw that away.
+        if partial_stdout:
+            output_parts.append(
+                "[partial_output_before_kill] The tool was killed mid-run, so "
+                "this transcript is incomplete — but it may already contain "
+                "the finding:\n" + partial_stdout
+            )
+        if partial_stderr:
+            output_parts.append(f"[stderr] {partial_stderr[:1000]}")
+        output_parts.append(
+            f"DO NOT retry '{tool_name}' with the same settings. Choose ONE:\n"
+            f"  1. Switch to: {alt}.\n"
+            f"  2. Re-run '{tool_name}' with a much narrower scope "
+            f"(single port / single parameter / shorter module run).\n"
+            f"  3. If you already have enough evidence, call "
+            f"record_vulnerability and then `exit` — an engagement that "
+            f"finishes with an unconfirmed finding beats one that hangs."
+        )
+    elif execution.status == ExecutionStatus.COMPLETED and execution.result:
         if result_dict.get("scope_violation"):
             output_parts.append("SCOPE VIOLATION: target not in declared scope. Tool blocked.")
         stdout = result_dict.get("stdout") or ""
@@ -823,25 +869,6 @@ async def execute_tool_call(
                 f"the target is down or secure. Try different flags, a different "
                 f"tool, or note this limitation in the final report."
             )
-    elif execution.status == ExecutionStatus.HARD_TIMEOUT:
-        # Record the stall so the circuit-breaker can force a tool switch if
-        # the agent tries this tool again in this scan.
-        from app.agents.tool_call_caps import mark_tool_stalled, TOOL_ALTERNATIVES
-        stalls = mark_tool_stalled(scan_id, tool_name, reason="hard_timeout")
-        alt = TOOL_ALTERNATIVES.get(tool_name, "a different tool from your allowlist")
-        output_parts.append(
-            f"[error] TIMEOUT: '{tool_name}' was killed after {tool_def.timeout}s "
-            f"without producing a result (stall #{stalls})."
-        )
-        output_parts.append(
-            f"DO NOT retry '{tool_name}' with the same settings. Choose ONE:\n"
-            f"  1. Switch to: {alt}.\n"
-            f"  2. Re-run '{tool_name}' with a much narrower scope "
-            f"(single port / single parameter / shorter module run).\n"
-            f"  3. If you already have enough evidence, call "
-            f"record_vulnerability and then `exit` — an engagement that "
-            f"finishes with an unconfirmed finding beats one that hangs."
-        )
     elif execution.status == ExecutionStatus.CANCELLED:
         # The operator pressed the panic button (or the scan was aborted).
         # Count it as a stall too: retrying would just hit the same state.
@@ -907,6 +934,7 @@ async def execute_tool_call(
     # context as the raw bytes — same mechanism as `[empty_result]`.
     short_run_failure = (
         execution.status == ExecutionStatus.COMPLETED
+        and not tool_timed_out
         and _looks_like_short_run_failure(
             body,
             execution.duration_seconds,
@@ -956,7 +984,14 @@ async def execute_tool_call(
     # NOTE: cache the TRUNCATED `body` (no execution_id), not the
     # final `output` — this is what makes the cache stable.
     output_lower_head = body[:500].lower()  # check first 500 chars only
-    if "binary not found" in output_lower_head or "[errno 13] permission denied" in output_lower_head:
+    if tool_timed_out:
+        # Layer 2 (negative): a timeout kill is an infrastructure event, not a
+        # result. Caching it replayed "[error] TIMEOUT ..." for identical args
+        # forever, so the agent could never retry after the target/first-run
+        # conditions changed. The stall counter above already prevents a
+        # blind retry with the same settings.
+        pass
+    elif "binary not found" in output_lower_head or "[errno 13] permission denied" in output_lower_head:
         # Layer 1: tool unavailable (binary missing or no execute perms)
         # Mark for ALL future calls to this tool_name — no point retrying.
         mark_unavailable(scan_id, tool_name, body)

